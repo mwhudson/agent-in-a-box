@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+# lxd-copilot: Run GitHub Copilot CLI in the 'copilot' LXD container with
+# the current directory (and optionally others) mounted into it.
+#
+# Usage:
+#   lxd-copilot [--also DIR]... [-- COPILOT_ARGS...]
+#
+# See lxd_ai.py for full details.
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lxd_ai
+
+lxd_ai.main(
+    container="copilot",
+    config_host_dir=os.path.expanduser("~/.local/share/lxd-copilot/config"),
+    config_container_path="/root/.copilot",
+    config_device_name="copilotconfig",
+    command="copilot",
+    install_cmds=[
+        ("Installing Node.js 22 ...",
+         ["bash", "-c",
+          "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
+          " && apt-get install -y -q nodejs"]),
+        ("Installing copilot ...",
+         ["npm", "install", "-g", "@github/copilot"]),
+    ],
+)
