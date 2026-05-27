@@ -33,27 +33,26 @@ def _device_name(path):
     return f"dir-{digest}"
 
 
-def get_device_paths(container):
-    """Return the set of container paths already occupied by disk devices."""
+def _get_devices(container):
+    """Return the devices dict for a container."""
     result = run(
         ["lxc", "query", f"/1.0/instances/{container}"],
         capture_output=True, text=True,
     )
-    data = json.loads(result.stdout)
+    return json.loads(result.stdout).get("devices", {})
+
+
+def get_device_paths(container):
+    """Return the set of container paths already occupied by disk devices."""
     return {
         dev["path"]
-        for dev in data.get("devices", {}).values()
+        for dev in _get_devices(container).values()
         if dev.get("type") == "disk" and "path" in dev
     }
 
 
 def add_device(container, host_path, work_prefix=None):
     name = _device_name(host_path)
-    # Remove any leftover device from a previous crashed session
-    subprocess.run(
-        ["lxc", "config", "device", "remove", container, name],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
     if work_prefix is None:
         container_path = host_path
     else:
@@ -66,6 +65,17 @@ def add_device(container, host_path, work_prefix=None):
                 suffix += 1
             candidate = f"{candidate}-{suffix}"
         container_path = candidate
+
+    # Check if the device is already configured for this host path.
+    devices = _get_devices(container)
+    if name in devices and devices[name].get("source") == host_path:
+        return container_path
+
+    # Remove any leftover device from a previous crashed session, then add.
+    subprocess.run(
+        ["lxc", "config", "device", "remove", container, name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
     run(["lxc", "config", "device", "add", container, name,
          "disk", f"source={host_path}", f"path={container_path}"],
         stdout=subprocess.DEVNULL)
@@ -267,17 +277,14 @@ def main(config_host_dir, config_container_path,
     if skip_permissions:
         tool_args = ["--dangerously-skip-permissions"] + tool_args
 
-    try:
-        container_cwd = add_device(session_container, cwd,
-                                   work_prefix=work_prefix)
-        for d in also_dirs:
-            add_device(session_container, d, work_prefix=work_prefix)
+    container_cwd = add_device(session_container, cwd,
+                               work_prefix=work_prefix)
+    for d in also_dirs:
+        add_device(session_container, d, work_prefix=work_prefix)
 
-        exec_cmd = ["lxc", "exec", session_container, f"--cwd={container_cwd}"]
-        if container_user != 0:
-            exec_cmd += [f"--user={container_user}",
-                         f"--env=HOME={container_home}"]
-        result = subprocess.run(exec_cmd + ["--", command] + tool_args)
-        sys.exit(result.returncode)
-    finally:
-        remove_all_dir_devices(session_container)
+    exec_cmd = ["lxc", "exec", session_container, f"--cwd={container_cwd}"]
+    if container_user != 0:
+        exec_cmd += [f"--user={container_user}",
+                     f"--env=HOME={container_home}"]
+    result = subprocess.run(exec_cmd + ["--", command] + tool_args)
+    sys.exit(result.returncode)
