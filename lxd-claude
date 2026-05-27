@@ -15,15 +15,16 @@ import lxd_ai
 
 lxd_ai.main(
     container="claude",
-    config_host_dir=os.path.expanduser("~/.local/share/lxd-claude/config"),
-    config_container_path="/root/.claude",
+    config_host_dir=os.path.expanduser("~/.local/share/lxd-claude/home"),
+    config_container_path="/home/ubuntu",
     config_device_name="claudeconfig",
-    command="/root/.local/bin/claude",
+    command="/home/ubuntu/.local/bin/claude",
     install_cmds=[
-        ("Installing Node.js ...",
-         ["bash", "-c",
-          "apt-get update -q && apt-get install -y -q nodejs npm"]),
         ("Installing claude ...",
-         ["npm", "install", "-g", "@anthropic-ai/claude-code"]),
+         ["runuser", "-u", "ubuntu", "--",
+          "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
     ],
+    container_user=1000,
+    container_home="/home/ubuntu",
+    work_prefix="/work",
 )

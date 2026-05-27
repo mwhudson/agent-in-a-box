@@ -4,6 +4,7 @@
 # is handled here.
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -22,18 +23,45 @@ def _device_name(path):
     return f"dir-{digest}"
 
 
-def add_device(container, path, devices):
-    name = _device_name(path)
+def get_device_paths(container):
+    """Return the set of container paths already occupied by disk devices."""
+    result = run(
+        ["lxc", "query", f"/1.0/instances/{container}"],
+        capture_output=True, text=True,
+    )
+    data = json.loads(result.stdout)
+    return {
+        dev["path"]
+        for dev in data.get("devices", {}).values()
+        if dev.get("type") == "disk" and "path" in dev
+    }
+
+
+def add_device(container, host_path, devices, work_prefix=None):
+    name = _device_name(host_path)
     # Remove any leftover device from a previous crashed session
     subprocess.run(
         ["lxc", "config", "device", "remove", container, name],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    if work_prefix is None:
+        container_path = host_path
+    else:
+        base = os.path.basename(host_path)
+        candidate = f"{work_prefix}/{base}"
+        occupied = get_device_paths(container)
+        if candidate in occupied:
+            suffix = 2
+            while f"{candidate}-{suffix}" in occupied:
+                suffix += 1
+            candidate = f"{candidate}-{suffix}"
+        container_path = candidate
     run(["lxc", "config", "device", "add", container, name,
-         "disk", f"source={path}", f"path={path}"],
+         "disk", f"source={host_path}", f"path={container_path}"],
         stdout=subprocess.DEVNULL)
     devices.append(name)
-    print(f"Mounted {path} -> container:{path}", file=sys.stderr)
+    print(f"Mounted {host_path} -> container:{container_path}", file=sys.stderr)
+    return container_path
 
 
 def remove_devices(container, devices):
@@ -60,7 +88,7 @@ def container_status(container):
 
 
 def setup_container(container, config_host_dir, config_container_path,
-                    config_device_name, install_cmds):
+                    config_device_name, install_cmds, container_user=0):
     """Create and configure a fresh container, then install the tool.
 
     install_cmds is a list of (description, cmd) pairs where cmd is passed
@@ -73,10 +101,10 @@ def setup_container(container, config_host_dir, config_container_path,
           file=sys.stderr)
     run(["lxc", "init", "ubuntu:24.04", container])
 
-    # Map the host user's UID/GID to container root so that files created
+    # Map the host user's UID/GID to the container user so that files created
     # inside mounted directories appear owned by the host user.
     run(["lxc", "config", "set", container, "raw.idmap",
-         f"uid {uid} 0\ngid {gid} 0"])
+         f"uid {uid} {container_user}\ngid {gid} {container_user}"])
 
     # Mount a dedicated config directory for persistent authentication.
     # On first use the tool will prompt for credentials inside the container.
@@ -144,7 +172,8 @@ Arguments after -- are passed directly to {tool_name}.""")
 
 
 def main(container, config_host_dir, config_container_path,
-         config_device_name, command, install_cmds):
+         config_device_name, command, install_cmds,
+         container_user=0, container_home="/root", work_prefix=None):
     """Top-level entry point for a tool script.
 
     Args:
@@ -155,6 +184,14 @@ def main(container, config_host_dir, config_container_path,
         command:               Binary to run inside the container.
         install_cmds:          List of (description, cmd) pairs to run during
                                container setup.
+        container_user:        UID to run the command as (default 0 = root).
+        container_home:        HOME directory for container_user (default /root).
+        work_prefix:           Container directory prefix for mounted paths.
+                               If set, each host path is mounted at
+                               work_prefix/basename(host_path) (with a numeric
+                               suffix to avoid collisions). If None (default),
+                               host paths are mirrored at the same absolute path
+                               inside the container.
     """
     also_dirs, tool_args = _parse_args(command, container, config_host_dir)
     cwd = os.getcwd()
@@ -162,20 +199,22 @@ def main(container, config_host_dir, config_container_path,
 
     if not container_exists(container):
         setup_container(container, config_host_dir, config_container_path,
-                        config_device_name, install_cmds)
+                        config_device_name, install_cmds, container_user)
     elif container_status(container) != "RUNNING":
         print(f"Starting container '{container}' ...", file=sys.stderr)
         run(["lxc", "start", container])
 
     try:
-        add_device(container, cwd, devices)
+        container_cwd = add_device(container, cwd, devices,
+                                   work_prefix=work_prefix)
         for d in also_dirs:
-            add_device(container, d, devices)
+            add_device(container, d, devices, work_prefix=work_prefix)
 
-        result = subprocess.run(
-            ["lxc", "exec", container, f"--cwd={cwd}", "--", command]
-            + tool_args,
-        )
+        exec_cmd = ["lxc", "exec", container, f"--cwd={container_cwd}"]
+        if container_user != 0:
+            exec_cmd += [f"--user={container_user}",
+                         f"--env=HOME={container_home}"]
+        result = subprocess.run(exec_cmd + ["--", command] + tool_args)
         sys.exit(result.returncode)
     finally:
         remove_devices(container, devices)
