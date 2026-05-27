@@ -1,9 +1,9 @@
 # lxd-claude
 
-Run coding agents (Claude Code, GitHub Copilot CLI) inside disposable
+Run coding agents (Claude Code, opencode, GitHub Copilot CLI) inside disposable
 [LXD](https://canonical.com/lxd) containers, with the current directory mounted
-in. Each project directory gets its own container, so an agent running
-`--dangerously-skip-permissions` can only touch the directories you've mounted —
+in. Each project directory gets its own container, so an agent running with
+permission prompts disabled can only touch the directories you've mounted —
 not the rest of your machine.
 
 ## Tools
@@ -11,7 +11,9 @@ not the rest of your machine.
 | Script | What it does |
 | --- | --- |
 | `lxd-claude` | Run [Claude Code](https://claude.ai/code) in a per-directory container. |
+| `lxd-opencode` | Run [opencode](https://opencode.ai) in a per-directory container. |
 | `lxd-claude-mount` | Mount extra host directories into an already-running `lxd-claude` session. |
+| `lxd-opencode-mount` | Mount extra host directories into an already-running `lxd-opencode` session. |
 | `lxd-copilot` | Run the [GitHub Copilot CLI](https://github.com/github/copilot-cli) in a shared container. |
 | `lxd_ai.py` | Shared helper module imported by the scripts above. |
 
@@ -74,6 +76,27 @@ Notes:
 - Missing entries are skipped, so it's fine to delete `claude/CLAUDE.md` or
   leave `claude/commands/` empty.
 
+## Versioned opencode config (opencode.json + AGENTS.md)
+
+The `opencode/` directory plays the same role for `lxd-opencode`, bind-mounted
+into the container's `~/.config/opencode`:
+
+```
+opencode/
+  opencode.json   -> mounted at ~/.config/opencode/opencode.json  (global config)
+  AGENTS.md       -> mounted at ~/.config/opencode/AGENTS.md       (global instructions)
+  commands/       -> mounted at ~/.config/opencode/commands/       (custom commands)
+```
+
+`opencode/opencode.json` sets `"permission": "allow"`, so opencode runs without
+permission prompts. opencode has no Claude-style `--dangerously-skip-permissions`
+flag; this config is the equivalent, and it's safe for the same reason — the
+container can only see the directories you've mounted into it. `AGENTS.md` is
+opencode's equivalent of `CLAUDE.md` (auto-loaded as global instructions). As
+with the Claude overlay, credentials are *not* versioned (they stay in
+`~/.local/share/lxd-opencode/home/.local/share/opencode/auth.json`), and missing
+entries are skipped.
+
 ## Requirements
 
 - LXD, installed and initialised (`lxd init`), with your user able to run `lxc`.
@@ -88,7 +111,9 @@ to `sys.path`). Symlink the entry points onto your `PATH`, e.g.:
 ```sh
 git clone <this-repo> ~/src/lxd-claude
 ln -s ~/src/lxd-claude/lxd-claude      ~/.local/bin/lxd-claude
-ln -s ~/src/lxd-claude/lxd-claude-mount ~/.local/bin/lxd-claude-mount
+ln -s ~/src/lxd-claude/lxd-opencode    ~/.local/bin/lxd-opencode
+ln -s ~/src/lxd-claude/lxd-claude-mount  ~/.local/bin/lxd-claude-mount
+ln -s ~/src/lxd-claude/lxd-opencode-mount ~/.local/bin/lxd-opencode-mount
 ln -s ~/src/lxd-claude/lxd-copilot     ~/.local/bin/lxd-copilot
 ```
 
@@ -116,6 +141,25 @@ Run from inside the project directory you want the agent to work in.
 On first run inside a fresh base container, authenticate Claude as prompted;
 credentials are stored on the host and reused afterwards.
 
+### lxd-opencode
+
+```
+lxd-opencode [--also DIR]... [--shell] [-- OPENCODE_ARGS...]
+```
+
+Works just like `lxd-claude` — per-directory session containers cloned from an
+`opencode` base, your working directory mounted at `/work/<basename>`, files
+owned by you on the host.
+
+- `--also DIR` — also mount `DIR` into the container (repeatable).
+- `--shell` — open an interactive shell in the container instead of opencode.
+- Anything after `--` is passed straight through to `opencode`.
+
+On first run, authenticate inside the container with `opencode auth login`;
+credentials persist on the host under `~/.local/share/lxd-opencode/`.
+Use `lxd-opencode-mount` to mount additional directories into a running session
+(see below).
+
 ### lxd-claude-mount
 
 Mount additional host directories into a session that's already running:
@@ -127,6 +171,18 @@ lxd-claude-mount [--or] [--for DIR] [--read-only] DIR [DIR ...]
 - By default it targets the container for the current directory.
 - `--for DIR` — target the container for a different project directory.
 - `--or` — target an OpenRouter session container.
+- `--read-only` — mount the directories read-only (the container cannot modify them).
+
+### lxd-opencode-mount
+
+Mount additional host directories into an opencode session that's already running:
+
+```
+lxd-opencode-mount [--for DIR] [--read-only] DIR [DIR ...]
+```
+
+- By default it targets the container for the current directory.
+- `--for DIR` — target the container for a different project directory.
 - `--read-only` — mount the directories read-only (the container cannot modify them).
 
 ### lxd-copilot
