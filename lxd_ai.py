@@ -4,11 +4,12 @@
 # is handled here.
 
 import hashlib
-import json
 import os
 import re
 import subprocess
 import sys
+
+import yaml
 
 BASE_CONTAINER = "claude"
 
@@ -79,10 +80,10 @@ def _device_name(path):
 def _get_devices(container):
     """Return the devices dict for a container."""
     result = run(
-        _lxc(["query", f"/1.0/instances/{container}"]),
+        _lxc(["config", "show", container]),
         capture_output=True, text=True,
     )
-    return json.loads(result.stdout).get("devices", {})
+    return yaml.safe_load(result.stdout).get("devices", {})
 
 
 def get_device_paths(container):
