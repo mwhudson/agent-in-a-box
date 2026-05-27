@@ -15,6 +15,7 @@ not the rest of your machine.
 | `lxd-claude-mount` | Mount extra host directories into an already-running `lxd-claude` session. |
 | `lxd-opencode-mount` | Mount extra host directories into an already-running `lxd-opencode` session. |
 | `lxd-copilot` | Run the [GitHub Copilot CLI](https://github.com/github/copilot-cli) in a shared container. |
+| `lxd-ai-update` | Update template containers (apt upgrade + agent binary). |
 | `lxd_ai.py` | Shared helper module imported by the scripts above. |
 
 ## How it works
@@ -114,7 +115,8 @@ ln -s ~/src/lxd-claude/lxd-claude      ~/.local/bin/lxd-claude
 ln -s ~/src/lxd-claude/lxd-opencode    ~/.local/bin/lxd-opencode
 ln -s ~/src/lxd-claude/lxd-claude-mount  ~/.local/bin/lxd-claude-mount
 ln -s ~/src/lxd-claude/lxd-opencode-mount ~/.local/bin/lxd-opencode-mount
-ln -s ~/src/lxd-claude/lxd-copilot     ~/.local/bin/lxd-copilot
+ln -s ~/src/lxd-claude/lxd-copilot      ~/.local/bin/lxd-copilot
+ln -s ~/src/lxd-claude/lxd-ai-update   ~/.local/bin/lxd-ai-update
 ```
 
 (Symlinks work because each script resolves its real location to find
@@ -184,6 +186,24 @@ lxd-opencode-mount [--for DIR] [--read-only] DIR [DIR ...]
 - By default it targets the container for the current directory.
 - `--for DIR` — target the container for a different project directory.
 - `--read-only` — mount the directories read-only (the container cannot modify them).
+
+### lxd-ai-update
+
+Update template containers in place (apt upgrade + agent binary):
+
+```
+lxd-ai-update [AGENT...]
+```
+
+With no arguments, updates all template containers that currently exist.
+Pass one or more agent names to update only those: `claude`, `claude-or`,
+`opencode`, `copilot`.
+
+Each update starts the template container, runs `apt-get update` and
+`dist-upgrade`, re-runs the agent installer (all installers are idempotent
+and will fetch the latest version), then stops the container again. Session
+containers cloned afterwards will include the updates; existing session
+containers are not affected.
 
 ### lxd-copilot
 

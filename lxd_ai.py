@@ -263,6 +263,38 @@ def setup_base_container(config_host_dir, config_container_path,
     run(_lxc(["stop", base_container]))
 
 
+def update_base_container(base_container, update_cmds, container_user=0):
+    """Update an existing base template container and stop it again.
+
+    Starts the container, runs apt-get update/dist-upgrade, then runs
+    update_cmds (same format as install_cmds), then stops it. If the
+    container is not found, exits with an error.
+    """
+    if not container_exists(base_container):
+        print(f"Skipping '{base_container}': container does not exist.",
+              file=sys.stderr)
+        return False
+
+    if container_status(base_container) != "RUNNING":
+        print(f"Starting '{base_container}' ...", file=sys.stderr)
+        run(_lxc(["start", base_container]))
+
+    print("Updating packages ...", file=sys.stderr)
+    lxc_exec(base_container, ["apt-get", "update", "-q"],
+             stdout=subprocess.DEVNULL)
+    lxc_exec(base_container, ["apt-get", "dist-upgrade", "-y", "-q"],
+             stdout=subprocess.DEVNULL)
+
+    for description, cmd in update_cmds:
+        print(description, file=sys.stderr)
+        lxc_exec(base_container, cmd, stdout=subprocess.DEVNULL)
+
+    print(f"Stopping '{base_container}' (template) ...", file=sys.stderr)
+    run(_lxc(["stop", base_container]))
+    print(f"'{base_container}' updated.\n", file=sys.stderr)
+    return True
+
+
 def ensure_session_container(name, base_container=BASE_CONTAINER):
     """Clone from the base container if needed, then ensure it's running."""
     if not container_exists(name):

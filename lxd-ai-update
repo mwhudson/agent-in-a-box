@@ -1,0 +1,107 @@
+#!/usr/bin/python3
+# Copyright (C) 2026 Canonical Ltd.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# lxd-ai-update: Update AI agent template containers (apt upgrade + agent).
+#
+# Usage:
+#   lxd-ai-update [AGENT...]
+#
+# With no arguments, updates all template containers that exist.
+# AGENT may be one or more of: claude, claude-or, opencode, copilot.
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import lxd_ai
+
+# Update commands for each known agent template. These re-run the same
+# installer as the initial setup; all installers are idempotent and will
+# upgrade to the latest version.
+AGENTS = {
+    "claude": {
+        "container": "claude",
+        "container_user": 1000,
+        "update_cmds": [
+            ("Updating claude ...",
+             ["runuser", "-u", "ubuntu", "--",
+              "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
+        ],
+    },
+    "claude-or": {
+        "container": "claude-or",
+        "container_user": 1000,
+        "update_cmds": [
+            ("Updating claude (OpenRouter) ...",
+             ["runuser", "-u", "ubuntu", "--",
+              "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
+        ],
+    },
+    "opencode": {
+        "container": "opencode",
+        "container_user": 1000,
+        "update_cmds": [
+            ("Updating opencode ...",
+             ["runuser", "-u", "ubuntu", "--",
+              "bash", "-c", "curl -fsSL https://opencode.ai/install | bash"]),
+        ],
+    },
+    "copilot": {
+        "container": "copilot",
+        "container_user": 0,
+        "update_cmds": [
+            ("Updating copilot ...",
+             ["npm", "install", "-g", "@github/copilot"]),
+        ],
+    },
+}
+
+parser = argparse.ArgumentParser(
+    description="Update AI agent template containers (apt upgrade + agent binary).")
+parser.add_argument(
+    "agents", nargs="*", metavar="AGENT",
+    help=f"template(s) to update: {', '.join(AGENTS)}. "
+         "Omit to update all that exist.")
+args = parser.parse_args()
+
+if args.agents:
+    unknown = [a for a in args.agents if a not in AGENTS]
+    if unknown:
+        parser.error(f"Unknown agent(s): {', '.join(unknown)}. "
+                     f"Known: {', '.join(AGENTS)}")
+    targets = args.agents
+else:
+    targets = list(AGENTS)
+
+lxd_ai.use_project("lxd-ai")
+
+updated = 0
+skipped = 0
+for name in targets:
+    cfg = AGENTS[name]
+    print(f"=== {name} ===", file=sys.stderr)
+    ok = lxd_ai.update_base_container(
+        base_container=cfg["container"],
+        update_cmds=cfg["update_cmds"],
+        container_user=cfg["container_user"],
+    )
+    if ok:
+        updated += 1
+    else:
+        skipped += 1
+
+print(f"Done: {updated} updated, {skipped} skipped.", file=sys.stderr)
