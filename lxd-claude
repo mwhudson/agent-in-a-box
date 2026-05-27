@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lxd_ai
 
 lxd_ai.main(
-    container="claude",
     config_host_dir=os.path.expanduser("~/.local/share/lxd-claude/home"),
     config_container_path="/home/ubuntu",
     config_device_name="claudeconfig",
