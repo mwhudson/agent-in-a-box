@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lxd_ai
 
 lxd_ai.main(
-    container="claude",
     config_host_dir=os.path.expanduser("~/.local/share/lxd-claude/config"),
     config_container_path="/root/.claude",
     config_device_name="claudeconfig",
@@ -26,4 +25,5 @@ lxd_ai.main(
         ("Installing claude ...",
          ["npm", "install", "-g", "@anthropic-ai/claude-code"]),
     ],
+    skip_permissions=True,
 )
