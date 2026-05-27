@@ -181,6 +181,7 @@ def ensure_session_container(name, base_container=BASE_CONTAINER):
 def _parse_args(tool_name, config_host_dir, container_label):
     also_dirs = []
     tool_args = []
+    shell = False
     argv = sys.argv[1:]
 
     i = 0
@@ -192,7 +193,7 @@ def _parse_args(tool_name, config_host_dir, container_label):
         elif arg in ("-h", "--help"):
             prog = os.path.basename(sys.argv[0])
             print(f"""\
-Usage: {prog} [--also DIR]... [-- {tool_name.upper()}_ARGS...]
+Usage: {prog} [--also DIR]... [--shell] [-- {tool_name.upper()}_ARGS...]
 
 Mounts the current directory into the LXD container {container_label} and runs
 {tool_name} in that directory inside the container.
@@ -203,6 +204,8 @@ Authenticate inside the container on first run; credentials are stored in
 
 Options:
   --also DIR    Also mount DIR into the container (repeatable)
+  --shell       Open an interactive shell in the container instead of running
+                {tool_name}
   -h, --help    Show this help
 
 Arguments after -- are passed directly to {tool_name}.""")
@@ -213,11 +216,13 @@ Arguments after -- are passed directly to {tool_name}.""")
             also_dirs.append(os.path.realpath(argv[i + 1]))
             i += 2
             continue
+        elif arg == "--shell":
+            shell = True
         else:
             tool_args.append(arg)
         i += 1
 
-    return also_dirs, tool_args
+    return also_dirs, tool_args, shell
 
 
 def main(config_host_dir, config_container_path,
@@ -253,7 +258,7 @@ def main(config_host_dir, config_container_path,
 
     if container is None:
         session_container = container_name_for_dir(cwd, prefix=base_container)
-        also_dirs, tool_args = _parse_args(
+        also_dirs, tool_args, shell = _parse_args(
             tool_name, config_host_dir,
             f"'{session_container}' (derived from current directory)")
 
@@ -264,7 +269,7 @@ def main(config_host_dir, config_container_path,
         ensure_session_container(session_container, base_container=base_container)
     else:
         session_container = container
-        also_dirs, tool_args = _parse_args(
+        also_dirs, tool_args, shell = _parse_args(
             tool_name, config_host_dir, f"'{container}'")
 
         if not container_exists(container):
@@ -274,8 +279,12 @@ def main(config_host_dir, config_container_path,
             print(f"Starting container '{container}' ...", file=sys.stderr)
             run(["lxc", "start", container])
 
-    if skip_permissions:
-        tool_args = ["--dangerously-skip-permissions"] + tool_args
+    if shell:
+        run_cmd = ["bash", "-l"]
+    else:
+        if skip_permissions:
+            tool_args = ["--dangerously-skip-permissions"] + tool_args
+        run_cmd = [command] + tool_args
 
     container_cwd = add_device(session_container, cwd,
                                work_prefix=work_prefix)
@@ -286,5 +295,5 @@ def main(config_host_dir, config_container_path,
     if container_user != 0:
         exec_cmd += [f"--user={container_user}",
                      f"--env=HOME={container_home}"]
-    result = subprocess.run(exec_cmd + ["--", command] + tool_args)
+    result = subprocess.run(exec_cmd + ["--"] + run_cmd)
     sys.exit(result.returncode)
