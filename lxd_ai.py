@@ -87,6 +87,31 @@ def add_device(container, host_path, work_prefix=None):
     return container_path
 
 
+def add_config_overlay(container, host_path, container_path):
+    """Bind-mount a host file or directory at an explicit container path.
+
+    Used to overlay versioned config (e.g. CLAUDE.md, commands/) onto the
+    container's home, independent of the working-directory mounts. The device
+    name is derived from container_path so the mount is idempotent across
+    sessions, and uses a 'cfg-' prefix so remove_all_dir_devices leaves it
+    alone.
+    """
+    name = "cfg-" + hashlib.md5(container_path.encode()).hexdigest()[:8]
+    devices = _get_devices(container)
+    existing = devices.get(name)
+    if (existing and existing.get("source") == host_path
+            and existing.get("path") == container_path):
+        return
+    subprocess.run(
+        ["lxc", "config", "device", "remove", container, name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    run(["lxc", "config", "device", "add", container, name,
+         "disk", f"source={host_path}", f"path={container_path}"],
+        stdout=subprocess.DEVNULL)
+    print(f"Overlaid {host_path} -> container:{container_path}", file=sys.stderr)
+
+
 def remove_all_dir_devices(container):
     """Remove all dir-* devices from a container (cleanup on session exit)."""
     result = subprocess.run(
@@ -233,7 +258,7 @@ def main(config_host_dir, config_container_path,
          config_device_name, command, install_cmds,
          container=None, skip_permissions=False,
          container_user=0, container_home="/root", work_prefix=None,
-         base_container=BASE_CONTAINER):
+         base_container=BASE_CONTAINER, config_overlays=None):
     """Top-level entry point for a tool script.
 
     Args:
@@ -256,6 +281,11 @@ def main(config_host_dir, config_container_path,
                                inside the container.
         base_container:        Name of the LXD base/template container to clone
                                session containers from (default: 'claude').
+        config_overlays:       Optional list of (host_path, container_path)
+                               pairs to bind-mount into the session container
+                               before running the tool (e.g. versioned
+                               CLAUDE.md / commands/). Entries whose host_path
+                               does not exist are skipped.
     """
     tool_name = os.path.basename(command)
     cwd = os.getcwd()
@@ -294,6 +324,10 @@ def main(config_host_dir, config_container_path,
                                work_prefix=work_prefix)
     for d in also_dirs:
         add_device(session_container, d, work_prefix=work_prefix)
+
+    for host_path, overlay_path in (config_overlays or []):
+        if os.path.exists(host_path):
+            add_config_overlay(session_container, host_path, overlay_path)
 
     exec_cmd = ["lxc", "exec", session_container, f"--cwd={container_cwd}"]
     if container_user != 0:

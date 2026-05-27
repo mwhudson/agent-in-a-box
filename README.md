@@ -32,6 +32,40 @@ owned by you on the host.
 Authentication is persisted on the host (under `~/.local/share/lxd-claude/` and
 similar) and mounted into the container, so you only log in once.
 
+## Versioned Claude config (CLAUDE.md + slash commands)
+
+The `claude/` directory in this repo is the source of truth for the global
+config you want available in every Claude session:
+
+```
+claude/
+  CLAUDE.md        -> mounted at ~/.claude/CLAUDE.md  (global instructions)
+  commands/        -> mounted at ~/.claude/commands/  (custom /slash commands)
+```
+
+`lxd-claude` bind-mounts these into the session container's `~/.claude` as LXD
+devices, sourced from this repo's own location (found via the script's real
+path, so it works no matter which project directory you're running in). Because
+it's a bind mount, the files are the *same* on the host and in the container —
+edit them here and commit, or edit them from inside a session; either way the
+change is reflected in both and tracked by git.
+
+Why not just symlink them into the config dir? The config dir is mounted into
+the container, so a symlink there would have to resolve to a path that exists
+*inside* the container — but this repo is only mounted (at `/work/<basename>`)
+when it happens to be the working directory, so the link would dangle in every
+other session. Bind-mounting sidesteps that entirely.
+
+Notes:
+
+- Your **credentials** are *not* versioned — they stay in the per-machine
+  config dir (`~/.local/share/lxd-claude/home/.claude/`); only `CLAUDE.md` and
+  `commands/` are overlaid from the repo.
+- This applies to the default (Claude API) container only. The `--or` /
+  OpenRouter container does not get the overlay.
+- Missing entries are skipped, so it's fine to delete `claude/CLAUDE.md` or
+  leave `claude/commands/` empty.
+
 ## Requirements
 
 - LXD, installed and initialised (`lxd init`), with your user able to run `lxc`.

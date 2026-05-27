@@ -1,0 +1,7 @@
+# Custom slash commands for lxd-claude containers.
+#
+# This directory is bind-mounted into session containers at
+# ~/.claude/commands/. Drop <name>.md files here and they become /<name>
+# slash commands inside every lxd-claude (Claude API) session.
+#
+# (This file just keeps the otherwise-empty directory tracked in git.)
