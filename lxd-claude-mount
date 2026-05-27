@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+# lxd-claude-mount: Mount additional directories into a running lxd-claude session.
+#
+# Usage:
+#   lxd-claude-mount [--for DIR] DIR [DIR ...]
+#
+# By default, targets the container for the current directory. Use --for to
+# specify a different project directory if running from elsewhere.
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lxd_ai
+
+parser = argparse.ArgumentParser(
+    description="Mount directories into a running lxd-claude session.")
+parser.add_argument(
+    "--for", dest="for_dir", metavar="DIR", default=None,
+    help="project directory whose container to target (default: current directory)")
+parser.add_argument(
+    "dirs", nargs="+", metavar="DIR",
+    help="host directories to mount into the container")
+args = parser.parse_args()
+
+for_dir = os.path.realpath(args.for_dir) if args.for_dir else os.getcwd()
+container = lxd_ai.container_name_for_dir(for_dir)
+
+if not lxd_ai.container_exists(container):
+    sys.exit(f"Error: no container for '{for_dir}' (expected '{container}')")
+if lxd_ai.container_status(container) != "RUNNING":
+    sys.exit(f"Error: container '{container}' exists but is not running")
+
+for path in args.dirs:
+    lxd_ai.add_device(container, os.path.realpath(path), work_prefix="/work")
