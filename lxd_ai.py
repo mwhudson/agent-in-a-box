@@ -53,6 +53,15 @@ def get_device_paths(container):
 
 def add_device(container, host_path, work_prefix=None):
     name = _device_name(host_path)
+
+    # If the device is already configured for this host path, reuse its
+    # existing container path. Computing a fresh path here would see the
+    # device's own mount as "occupied" and bump to a non-existent suffixed
+    # path (e.g. /work/foo-2), leaving the caller with a bad cwd.
+    devices = _get_devices(container)
+    if name in devices and devices[name].get("source") == host_path:
+        return devices[name]["path"]
+
     if work_prefix is None:
         container_path = host_path
     else:
@@ -65,11 +74,6 @@ def add_device(container, host_path, work_prefix=None):
                 suffix += 1
             candidate = f"{candidate}-{suffix}"
         container_path = candidate
-
-    # Check if the device is already configured for this host path.
-    devices = _get_devices(container)
-    if name in devices and devices[name].get("source") == host_path:
-        return container_path
 
     # Remove any leftover device from a previous crashed session, then add.
     subprocess.run(
