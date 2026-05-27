@@ -138,3 +138,11 @@ lxd-copilot [--also DIR]... [-- COPILOT_ARGS...]
 Runs the GitHub Copilot CLI. Unlike `lxd-claude`, it uses a single shared
 container named `copilot` (not one per directory). Config/auth is persisted
 under `~/.local/share/lxd-copilot/config`.
+
+## License
+
+Copyright (C) 2026 Canonical Ltd.
+
+This project is free software, licensed under the GNU General Public License
+version 3 (or, at your option, any later version). See the [LICENSE](LICENSE)
+file for the full text.
