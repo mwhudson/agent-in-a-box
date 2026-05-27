@@ -97,4 +97,5 @@ lxd_ai.main(
     work_prefix="/work",
     base_container=base_container,
     config_overlays=config_overlays,
+    project="lxd-ai",
 )

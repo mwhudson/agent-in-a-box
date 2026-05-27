@@ -28,6 +28,9 @@ parser.add_argument(
     help="host directories to mount into the container")
 args = parser.parse_args()
 
+# Target the same LXD project the session containers were created in.
+lxd_ai.use_project("lxd-ai")
+
 prefix = "claude-or" if args.use_openrouter else "claude"
 for_dir = os.path.realpath(args.for_dir) if args.for_dir else os.getcwd()
 container = lxd_ai.container_name_for_dir(for_dir, prefix=prefix)

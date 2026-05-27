@@ -27,4 +27,5 @@ lxd_ai.main(
         ("Installing copilot ...",
          ["npm", "install", "-g", "@github/copilot"]),
     ],
+    project="lxd-ai",
 )

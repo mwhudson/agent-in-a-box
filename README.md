@@ -32,6 +32,14 @@ owned by you on the host.
 Authentication is persisted on the host (under `~/.local/share/lxd-claude/` and
 similar) and mounted into the container, so you only log in once.
 
+All containers these tools create live in a dedicated LXD project named
+`lxd-ai` (created automatically on first use), so they stay grouped together
+and out of your `default` project. The project is created with
+`features.profiles=false` and `features.images=false`, so it shares the default
+project's profiles (network/storage) and image cache — containers work out of
+the box, they're just namespaced separately. List them with
+`lxc list --project lxd-ai`.
+
 ## Versioned Claude config (CLAUDE.md + slash commands)
 
 The `claude/` directory in this repo is the source of truth for the global

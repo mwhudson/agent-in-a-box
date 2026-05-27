@@ -12,13 +12,56 @@ import sys
 
 BASE_CONTAINER = "claude"
 
+# LXD project that all tool containers live in. Set via use_project(); while
+# None, lxc commands run against the client's active/default project.
+_PROJECT = None
+
 
 def run(cmd, **kwargs):
     return subprocess.run(cmd, check=True, **kwargs)
 
 
+def _lxc(args):
+    """Build an lxc command list targeting the configured project (if any).
+
+    Used for everything that operates on instances/devices in the project.
+    Project-management commands (lxc project ...) deliberately bypass this.
+    """
+    cmd = ["lxc"]
+    if _PROJECT is not None:
+        cmd += ["--project", _PROJECT]
+    return cmd + args
+
+
+def project_exists(name):
+    r = subprocess.run(
+        ["lxc", "project", "show", name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return r.returncode == 0
+
+
+def use_project(name):
+    """Direct all subsequent instance commands at the given LXD project.
+
+    The project is created if missing, configured to share the default
+    project's profiles and images so containers get networking/storage from
+    the existing 'default' profile and don't re-download base images. Passing
+    None leaves commands targeting the client's active project.
+    """
+    global _PROJECT
+    _PROJECT = name
+    if name is None or project_exists(name):
+        return
+    print(f"Creating LXD project '{name}' "
+          "(sharing default profiles and images) ...", file=sys.stderr)
+    run(["lxc", "project", "create", name,
+         "-c", "features.images=false",
+         "-c", "features.profiles=false"])
+
+
 def lxc_exec(container, cmd, **kwargs):
-    return run(["lxc", "exec", container, "--"] + cmd, **kwargs)
+    return run(_lxc(["exec", container, "--"] + cmd), **kwargs)
 
 
 def container_name_for_dir(path, prefix=BASE_CONTAINER):
@@ -36,7 +79,7 @@ def _device_name(path):
 def _get_devices(container):
     """Return the devices dict for a container."""
     result = run(
-        ["lxc", "query", f"/1.0/instances/{container}"],
+        _lxc(["query", f"/1.0/instances/{container}"]),
         capture_output=True, text=True,
     )
     return json.loads(result.stdout).get("devices", {})
@@ -77,11 +120,11 @@ def add_device(container, host_path, work_prefix=None):
 
     # Remove any leftover device from a previous crashed session, then add.
     subprocess.run(
-        ["lxc", "config", "device", "remove", container, name],
+        _lxc(["config", "device", "remove", container, name]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    run(["lxc", "config", "device", "add", container, name,
-         "disk", f"source={host_path}", f"path={container_path}"],
+    run(_lxc(["config", "device", "add", container, name,
+              "disk", f"source={host_path}", f"path={container_path}"]),
         stdout=subprocess.DEVNULL)
     print(f"Mounted {host_path} -> container:{container_path}", file=sys.stderr)
     return container_path
@@ -103,11 +146,11 @@ def add_config_overlay(container, host_path, container_path):
             and existing.get("path") == container_path):
         return
     subprocess.run(
-        ["lxc", "config", "device", "remove", container, name],
+        _lxc(["config", "device", "remove", container, name]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    run(["lxc", "config", "device", "add", container, name,
-         "disk", f"source={host_path}", f"path={container_path}"],
+    run(_lxc(["config", "device", "add", container, name,
+              "disk", f"source={host_path}", f"path={container_path}"]),
         stdout=subprocess.DEVNULL)
     print(f"Overlaid {host_path} -> container:{container_path}", file=sys.stderr)
 
@@ -115,7 +158,7 @@ def add_config_overlay(container, host_path, container_path):
 def remove_all_dir_devices(container):
     """Remove all dir-* devices from a container (cleanup on session exit)."""
     result = subprocess.run(
-        ["lxc", "config", "device", "show", container],
+        _lxc(["config", "device", "show", container]),
         capture_output=True, text=True,
     )
     for line in result.stdout.splitlines():
@@ -123,14 +166,14 @@ def remove_all_dir_devices(container):
             name = line[:-1]
             if name.startswith('dir-'):
                 subprocess.run(
-                    ["lxc", "config", "device", "remove", container, name],
+                    _lxc(["config", "device", "remove", container, name]),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
 
 
 def container_exists(container):
     r = subprocess.run(
-        ["lxc", "info", container],
+        _lxc(["info", container]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return r.returncode == 0
@@ -138,7 +181,7 @@ def container_exists(container):
 
 def container_status(container):
     return run(
-        ["lxc", "list", container, "--format=csv", "--columns=s"],
+        _lxc(["list", container, "--format=csv", "--columns=s"]),
         capture_output=True, text=True,
     ).stdout.strip()
 
@@ -155,23 +198,24 @@ def setup_container(container, config_host_dir, config_container_path,
 
     print(f"Creating container '{container}' from ubuntu:24.04 ...",
           file=sys.stderr)
-    run(["lxc", "init", "ubuntu:24.04", container])
+    run(_lxc(["init", "ubuntu:24.04", container]))
 
     # Map the host user's UID/GID to the container user so that files created
     # inside mounted directories appear owned by the host user.
-    run(["lxc", "config", "set", container, "raw.idmap",
-         f"uid {uid} {container_user}\ngid {gid} {container_user}"])
+    run(_lxc(["config", "set", container, "raw.idmap",
+              f"uid {uid} {container_user}\ngid {gid} {container_user}"]))
 
     # Mount a dedicated config directory for persistent authentication.
     # On first use the tool will prompt for credentials inside the container.
     os.makedirs(config_host_dir, exist_ok=True)
-    run(["lxc", "config", "device", "add", container, config_device_name,
-         "disk", f"source={config_host_dir}", f"path={config_container_path}"],
+    run(_lxc(["config", "device", "add", container, config_device_name,
+              "disk", f"source={config_host_dir}",
+              f"path={config_container_path}"]),
         stdout=subprocess.DEVNULL)
     print(f"Container config: {config_host_dir}", file=sys.stderr)
 
     print(f"Starting container '{container}' ...", file=sys.stderr)
-    run(["lxc", "start", container])
+    run(_lxc(["start", container]))
 
     print("Waiting for cloud-init ...", file=sys.stderr)
     lxc_exec(container, ["cloud-init", "status", "--wait"],
@@ -192,7 +236,7 @@ def setup_base_container(config_host_dir, config_container_path,
                     config_device_name, install_cmds, container_user)
     print(f"Stopping base container '{base_container}' (template) ...",
           file=sys.stderr)
-    run(["lxc", "stop", base_container])
+    run(_lxc(["stop", base_container]))
 
 
 def ensure_session_container(name, base_container=BASE_CONTAINER):
@@ -200,11 +244,11 @@ def ensure_session_container(name, base_container=BASE_CONTAINER):
     if not container_exists(name):
         print(f"Creating session container '{name}' from base ...",
               file=sys.stderr)
-        run(["lxc", "copy", base_container, name])
-        run(["lxc", "start", name])
+        run(_lxc(["copy", base_container, name]))
+        run(_lxc(["start", name]))
     elif container_status(name) != "RUNNING":
         print(f"Starting container '{name}' ...", file=sys.stderr)
-        run(["lxc", "start", name])
+        run(_lxc(["start", name]))
 
 
 def _parse_args(tool_name, config_host_dir, container_label):
@@ -258,7 +302,7 @@ def main(config_host_dir, config_container_path,
          config_device_name, command, install_cmds,
          container=None, skip_permissions=False,
          container_user=0, container_home="/root", work_prefix=None,
-         base_container=BASE_CONTAINER, config_overlays=None):
+         base_container=BASE_CONTAINER, config_overlays=None, project=None):
     """Top-level entry point for a tool script.
 
     Args:
@@ -286,9 +330,14 @@ def main(config_host_dir, config_container_path,
                                before running the tool (e.g. versioned
                                CLAUDE.md / commands/). Entries whose host_path
                                does not exist are skipped.
+        project:               LXD project to place containers in. Created
+                               (sharing the default project's profiles and
+                               images) if missing. None uses the active project.
     """
     tool_name = os.path.basename(command)
     cwd = os.getcwd()
+
+    use_project(project)
 
     if container is None:
         session_container = container_name_for_dir(cwd, prefix=base_container)
@@ -311,7 +360,7 @@ def main(config_host_dir, config_container_path,
                             config_device_name, install_cmds, container_user)
         elif container_status(container) != "RUNNING":
             print(f"Starting container '{container}' ...", file=sys.stderr)
-            run(["lxc", "start", container])
+            run(_lxc(["start", container]))
 
     if shell:
         run_cmd = ["bash", "-l"]
@@ -329,7 +378,7 @@ def main(config_host_dir, config_container_path,
         if os.path.exists(host_path):
             add_config_overlay(session_container, host_path, overlay_path)
 
-    exec_cmd = ["lxc", "exec", session_container, f"--cwd={container_cwd}"]
+    exec_cmd = _lxc(["exec", session_container, f"--cwd={container_cwd}"])
     if container_user != 0:
         exec_cmd += [f"--user={container_user}",
                      f"--env=HOME={container_home}"]
