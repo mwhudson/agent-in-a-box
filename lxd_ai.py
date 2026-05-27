@@ -240,6 +240,11 @@ def setup_container(container, config_host_dir, config_container_path,
     lxc_exec(container, ["cloud-init", "status", "--wait"],
              stdout=subprocess.DEVNULL)
 
+    print("Updating packages ...", file=sys.stderr)
+    lxc_exec(container, ["apt-get", "update", "-q"], stdout=subprocess.DEVNULL)
+    lxc_exec(container, ["apt-get", "dist-upgrade", "-y", "-q"],
+             stdout=subprocess.DEVNULL)
+
     for description, cmd in install_cmds:
         print(description, file=sys.stderr)
         lxc_exec(container, cmd, stdout=subprocess.DEVNULL)
@@ -317,11 +322,68 @@ Arguments after -- are passed directly to {tool_name}.""")
     return also_dirs, tool_args, shell
 
 
+def _add_wayland_socket(container, container_user):
+    """Bind-mount the host Wayland socket into the container.
+
+    Reads WAYLAND_DISPLAY and XDG_RUNTIME_DIR from the host environment,
+    mounts the socket at the same path inside the container, and returns a
+    list of --env flags to pass to lxc exec. Returns an empty list if the
+    host environment is not set up for Wayland.
+    """
+    xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+    if not xdg_runtime_dir:
+        print("Warning: XDG_RUNTIME_DIR not set; skipping Wayland passthrough",
+              file=sys.stderr)
+        return []
+
+    socket_host = os.path.join(xdg_runtime_dir, wayland_display)
+    if not os.path.exists(socket_host):
+        print(f"Warning: Wayland socket {socket_host} not found; "
+              "skipping Wayland passthrough", file=sys.stderr)
+        return []
+
+    # Mirror the socket at the same path inside the container so that
+    # XDG_RUNTIME_DIR and WAYLAND_DISPLAY need no adjustment.
+    socket_container = socket_host
+    name = "wayland-" + hashlib.md5(socket_host.encode()).hexdigest()[:8]
+    devices = _get_devices(container)
+    existing = devices.get(name)
+    if not (existing and existing.get("source") == socket_host
+            and existing.get("path") == socket_container):
+        # Ensure the parent directory exists inside the container, owned by
+        # container_user. Run mkdir as root so it can create /run/user/NNN,
+        # then chown to the target user.
+        subprocess.run(
+            _lxc(["exec", container, "--",
+                  "bash", "-c",
+                  f"mkdir -p {xdg_runtime_dir} && "
+                  f"chown {container_user}:{container_user} {xdg_runtime_dir} && "
+                  f"chmod 700 {xdg_runtime_dir}"]),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            _lxc(["config", "device", "remove", container, name]),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        run(_lxc(["config", "device", "add", container, name,
+                  "disk", f"source={socket_host}", f"path={socket_container}"]),
+            stdout=subprocess.DEVNULL)
+        print(f"Mounted Wayland socket {socket_host} -> container:{socket_container}",
+              file=sys.stderr)
+
+    return [
+        f"--env=WAYLAND_DISPLAY={wayland_display}",
+        f"--env=XDG_RUNTIME_DIR={xdg_runtime_dir}",
+    ]
+
+
 def main(config_host_dir, config_container_path,
          config_device_name, command, install_cmds,
          container=None, skip_permissions=False,
          container_user=0, container_home="/root", work_prefix=None,
-         base_container=BASE_CONTAINER, config_overlays=None, project=None):
+         base_container=BASE_CONTAINER, config_overlays=None, project=None,
+         wayland_passthrough=False):
     """Top-level entry point for a tool script.
 
     Args:
@@ -352,6 +414,10 @@ def main(config_host_dir, config_container_path,
         project:               LXD project to place containers in. Created
                                (sharing the default project's profiles and
                                images) if missing. None uses the active project.
+        wayland_passthrough:   If True, bind-mount the host Wayland socket into
+                               the container and set WAYLAND_DISPLAY and
+                               XDG_RUNTIME_DIR in the exec environment, enabling
+                               clipboard integration via wl-clipboard.
     """
     tool_name = os.path.basename(command)
     cwd = os.getcwd()
@@ -401,5 +467,7 @@ def main(config_host_dir, config_container_path,
     if container_user != 0:
         exec_cmd += [f"--user={container_user}",
                      f"--env=HOME={container_home}"]
+    if wayland_passthrough:
+        exec_cmd += _add_wayland_socket(session_container, container_user)
     result = subprocess.run(exec_cmd + ["--"] + run_cmd)
     sys.exit(result.returncode)
