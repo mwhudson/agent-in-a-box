@@ -23,6 +23,7 @@ lxd_ai.main(
          ["runuser", "-u", "ubuntu", "--",
           "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
     ],
+    skip_permissions=True,
     container_user=1000,
     container_home="/home/ubuntu",
     work_prefix="/work",
