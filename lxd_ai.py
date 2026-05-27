@@ -95,7 +95,7 @@ def get_device_paths(container):
     }
 
 
-def add_device(container, host_path, work_prefix=None):
+def add_device(container, host_path, work_prefix=None, readonly=False):
     name = _device_name(host_path)
 
     # If the device is already configured for this host path, reuse its
@@ -124,10 +124,13 @@ def add_device(container, host_path, work_prefix=None):
         _lxc(["config", "device", "remove", container, name]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    run(_lxc(["config", "device", "add", container, name,
-              "disk", f"source={host_path}", f"path={container_path}"]),
-        stdout=subprocess.DEVNULL)
-    print(f"Mounted {host_path} -> container:{container_path}", file=sys.stderr)
+    add_cmd = ["config", "device", "add", container, name,
+               "disk", f"source={host_path}", f"path={container_path}"]
+    if readonly:
+        add_cmd.append("readonly=true")
+    run(_lxc(add_cmd), stdout=subprocess.DEVNULL)
+    mode = " (read-only)" if readonly else ""
+    print(f"Mounted {host_path} -> container:{container_path}{mode}", file=sys.stderr)
     return container_path
 
 

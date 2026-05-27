@@ -121,12 +121,13 @@ credentials are stored on the host and reused afterwards.
 Mount additional host directories into a session that's already running:
 
 ```
-lxd-claude-mount [--or] [--for DIR] DIR [DIR ...]
+lxd-claude-mount [--or] [--for DIR] [--read-only] DIR [DIR ...]
 ```
 
 - By default it targets the container for the current directory.
 - `--for DIR` — target the container for a different project directory.
 - `--or` — target an OpenRouter session container.
+- `--read-only` — mount the directories read-only (the container cannot modify them).
 
 ### lxd-copilot
 
