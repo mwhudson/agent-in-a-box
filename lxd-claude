@@ -3,18 +3,73 @@
 # directory (and optionally others) mounted into it.
 #
 # Usage:
-#   lxd-claude [--also DIR]... [-- CLAUDE_ARGS...]
+#   lxd-claude [--or] [--also DIR]... [-- CLAUDE_ARGS...]
 #
+# --or runs claude configured to use OpenRouter instead of the Claude API.
 # See lxd_ai.py for full details.
 
+import getpass
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lxd_ai
 
+DEFAULT_OR_MODEL = "anthropic/claude-sonnet-4-6"
+
+
+def _ensure_openrouter_config(config_host_dir):
+    """Write ~/.claude/settings.json with OpenRouter config if not already present."""
+    settings_path = os.path.join(config_host_dir, ".claude", "settings.json")
+    if os.path.exists(settings_path):
+        return
+
+    print("OpenRouter config not found — setting up now.", file=sys.stderr)
+    print(file=sys.stderr)
+
+    api_key = getpass.getpass("OpenRouter API key (sk-or-...): ").strip()
+    if not api_key:
+        sys.exit("Error: API key is required")
+
+    model_prompt = f"Model [{DEFAULT_OR_MODEL}]: "
+    model = input(model_prompt).strip() or DEFAULT_OR_MODEL
+
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    settings = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_AUTH_TOKEN": api_key,
+            "ANTHROPIC_MODEL": model,
+        }
+    }
+    with open(settings_path, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    print(f"Wrote OpenRouter config to {settings_path}", file=sys.stderr)
+    print(file=sys.stderr)
+
+
+# Strip --or before lxd_ai sees argv; it would otherwise be passed to claude.
+use_openrouter = False
+filtered = []
+for arg in sys.argv[1:]:
+    if arg == "--or":
+        use_openrouter = True
+    else:
+        filtered.append(arg)
+sys.argv[1:] = filtered
+
+if use_openrouter:
+    config_host_dir = os.path.expanduser("~/.local/share/lxd-claude-or/home")
+    base_container = "claude-or"
+    _ensure_openrouter_config(config_host_dir)
+else:
+    config_host_dir = os.path.expanduser("~/.local/share/lxd-claude/home")
+    base_container = "claude"
+
 lxd_ai.main(
-    config_host_dir=os.path.expanduser("~/.local/share/lxd-claude/home"),
+    config_host_dir=config_host_dir,
     config_container_path="/home/ubuntu",
     config_device_name="claudeconfig",
     command="/home/ubuntu/.local/bin/claude",
@@ -27,4 +82,5 @@ lxd_ai.main(
     container_user=1000,
     container_home="/home/ubuntu",
     work_prefix="/work",
+    base_container=base_container,
 )

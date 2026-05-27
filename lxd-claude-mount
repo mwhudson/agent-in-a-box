@@ -2,10 +2,11 @@
 # lxd-claude-mount: Mount additional directories into a running lxd-claude session.
 #
 # Usage:
-#   lxd-claude-mount [--for DIR] DIR [DIR ...]
+#   lxd-claude-mount [--or] [--for DIR] DIR [DIR ...]
 #
 # By default, targets the container for the current directory. Use --for to
 # specify a different project directory if running from elsewhere.
+# Use --or to target an OpenRouter session container.
 
 import argparse
 import os
@@ -17,6 +18,9 @@ import lxd_ai
 parser = argparse.ArgumentParser(
     description="Mount directories into a running lxd-claude session.")
 parser.add_argument(
+    "--or", dest="use_openrouter", action="store_true",
+    help="target an OpenRouter session container (created with lxd-claude --or)")
+parser.add_argument(
     "--for", dest="for_dir", metavar="DIR", default=None,
     help="project directory whose container to target (default: current directory)")
 parser.add_argument(
@@ -24,8 +28,9 @@ parser.add_argument(
     help="host directories to mount into the container")
 args = parser.parse_args()
 
+prefix = "claude-or" if args.use_openrouter else "claude"
 for_dir = os.path.realpath(args.for_dir) if args.for_dir else os.getcwd()
-container = lxd_ai.container_name_for_dir(for_dir)
+container = lxd_ai.container_name_for_dir(for_dir, prefix=prefix)
 
 if not lxd_ai.container_exists(container):
     sys.exit(f"Error: no container for '{for_dir}' (expected '{container}')")
