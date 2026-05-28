@@ -149,7 +149,7 @@ def add_device(container, host_path, work_prefix=None, readonly=False):
     return container_path
 
 
-def add_config_overlay(container, host_path, container_path):
+def add_config_overlay(container, host_path, container_path, container_user=0):
     """Bind-mount a host file or directory at an explicit container path.
 
     Used to overlay versioned config (e.g. CLAUDE.md, commands/) onto the
@@ -164,6 +164,17 @@ def add_config_overlay(container, host_path, container_path):
     if (existing and existing.get("source") == host_path
             and existing.get("path") == container_path):
         return
+    # Create the mountpoint's parent dirs as container_user first. Otherwise
+    # LXD creates any missing parents as container root, which falls outside
+    # the idmap and shows up unreadable on the host.
+    parent = os.path.dirname(container_path)
+    if parent and parent != "/" and container_user != 0:
+        subprocess.run(
+            _lxc(["exec", container,
+                  f"--user={container_user}", f"--group={container_user}",
+                  "--", "mkdir", "-p", parent]),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     subprocess.run(
         _lxc(["config", "device", "remove", container, name]),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -493,11 +504,16 @@ def main(config_host_dir, config_container_path,
 
     for host_path, overlay_path in (config_overlays or []):
         if os.path.exists(host_path):
-            add_config_overlay(session_container, host_path, overlay_path)
+            add_config_overlay(session_container, host_path, overlay_path,
+                               container_user=container_user)
 
     exec_cmd = _lxc(["exec", session_container, f"--cwd={container_cwd}"])
     if container_user != 0:
+        # --user sets only the uid; without --group, lxc exec defaults to
+        # gid 0, so files would be created in the root group and land outside
+        # the idmap on the host. Set the group to match the user.
         exec_cmd += [f"--user={container_user}",
+                     f"--group={container_user}",
                      f"--env=HOME={container_home}"]
     if wayland_passthrough:
         exec_cmd += _add_wayland_socket(session_container, container_user)
