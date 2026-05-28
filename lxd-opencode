@@ -22,6 +22,7 @@
 #
 # See lxd_ai.py for full details.
 
+import json
 import os
 import sys
 
@@ -29,19 +30,33 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import lxd_ai
 
+# Host directory bind-mounted as the container's /home/ubuntu, so anything we
+# drop in here appears in the container's home without a separate mount.
+config_host_dir = os.path.expanduser("~/.local/share/lxd-opencode/home")
+
+# Ensure a permissive opencode config exists so the agent runs without
+# permission prompts — safe because the container can only see the directories
+# mounted into it. It's written straight into the mounted home (no overlay
+# needed) and only when absent, so any hand-edits (extra MCPs, etc.) survive.
+opencode_config = os.path.join(
+    config_host_dir, ".config", "opencode", "opencode.json")
+if not os.path.exists(opencode_config):
+    os.makedirs(os.path.dirname(opencode_config), exist_ok=True)
+    with open(opencode_config, "w") as f:
+        json.dump({
+            "$schema": "https://opencode.ai/config.json",
+            "permission": "allow",
+        }, f, indent=2)
+        f.write("\n")
+    print(f"Created permissive opencode config: {opencode_config}",
+          file=sys.stderr)
+
 # Overlay this repo's versioned opencode config onto the container's
 # ~/.config/opencode. These live alongside the script (opencode/) so they're
 # found regardless of the working directory, and bind-mounting keeps them
 # editable from either side. Missing entries are skipped by lxd_ai.
-#
-# opencode.json carries `"permission": "allow"`, so the agent runs without
-# permission prompts — safe because the container can only see the directories
-# mounted into it. AGENTS.md and commands/ are picked up automatically from
-# the global opencode config dir.
 repo_opencode = os.path.join(SCRIPT_DIR, "opencode")
 config_overlays = [
-    (os.path.join(repo_opencode, "opencode.json"),
-     "/home/ubuntu/.config/opencode/opencode.json"),
     (os.path.join(repo_opencode, "AGENTS.md"),
      "/home/ubuntu/.config/opencode/AGENTS.md"),
     (os.path.join(repo_opencode, "commands"),
@@ -49,7 +64,7 @@ config_overlays = [
 ]
 
 lxd_ai.main(
-    config_host_dir=os.path.expanduser("~/.local/share/lxd-opencode/home"),
+    config_host_dir=config_host_dir,
     config_container_path="/home/ubuntu",
     config_device_name="opencodeconfig",
     command="/home/ubuntu/.opencode/bin/opencode",

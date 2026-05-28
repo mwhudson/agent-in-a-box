@@ -77,26 +77,36 @@ Notes:
 - Missing entries are skipped, so it's fine to delete `claude/CLAUDE.md` or
   leave `claude/commands/` empty.
 
-## Versioned opencode config (opencode.json + AGENTS.md)
+## Versioned opencode config (AGENTS.md + commands)
 
 The `opencode/` directory plays the same role for `lxd-opencode`, bind-mounted
 into the container's `~/.config/opencode`:
 
 ```
 opencode/
-  opencode.json   -> mounted at ~/.config/opencode/opencode.json  (global config)
   AGENTS.md       -> mounted at ~/.config/opencode/AGENTS.md       (global instructions)
   commands/       -> mounted at ~/.config/opencode/commands/       (custom commands)
 ```
 
-`opencode/opencode.json` sets `"permission": "allow"`, so opencode runs without
-permission prompts. opencode has no Claude-style `--dangerously-skip-permissions`
-flag; this config is the equivalent, and it's safe for the same reason — the
-container can only see the directories you've mounted into it. `AGENTS.md` is
-opencode's equivalent of `CLAUDE.md` (auto-loaded as global instructions). As
-with the Claude overlay, credentials are *not* versioned (they stay in
-`~/.local/share/lxd-opencode/home/.local/share/opencode/auth.json`), and missing
-entries are skipped.
+`AGENTS.md` is opencode's equivalent of `CLAUDE.md` (auto-loaded as global
+instructions). As with the Claude overlay, credentials are *not* versioned (they
+stay in `~/.local/share/lxd-opencode/home/.local/share/opencode/auth.json`), and
+missing entries are skipped.
+
+`opencode.json` is *not* versioned in this repo. On first run, `lxd-opencode`
+writes a permissive config —
+
+```json
+{ "$schema": "https://opencode.ai/config.json", "permission": "allow" }
+```
+
+— to `~/.local/share/lxd-opencode/home/.config/opencode/opencode.json`, which is
+inside the bind-mounted home so it needs no separate overlay. The
+`"permission": "allow"` setting lets opencode run without permission prompts
+(opencode has no Claude-style `--dangerously-skip-permissions` flag; this is the
+equivalent), safe for the same reason — the container can only see the
+directories you've mounted into it. It's only written when absent, so you can
+edit it (e.g. to add MCP servers) and your changes persist.
 
 ## Requirements
 
