@@ -1,4 +1,4 @@
-# lxd-claude
+# agent-in-a-box
 
 Run coding agents (Claude Code, opencode, GitHub Copilot CLI) inside disposable
 [LXD](https://canonical.com/lxd) containers, with the current directory mounted
@@ -110,13 +110,14 @@ The scripts expect `lxd_ai.py` to sit next to them (they add their own directory
 to `sys.path`). Symlink the entry points onto your `PATH`, e.g.:
 
 ```sh
-git clone <this-repo> ~/src/lxd-claude
-ln -s ~/src/lxd-claude/lxd-claude      ~/.local/bin/lxd-claude
-ln -s ~/src/lxd-claude/lxd-opencode    ~/.local/bin/lxd-opencode
-ln -s ~/src/lxd-claude/lxd-claude-mount  ~/.local/bin/lxd-claude-mount
-ln -s ~/src/lxd-claude/lxd-opencode-mount ~/.local/bin/lxd-opencode-mount
-ln -s ~/src/lxd-claude/lxd-copilot      ~/.local/bin/lxd-copilot
-ln -s ~/src/lxd-claude/lxd-ai-update   ~/.local/bin/lxd-ai-update
+git clone https://github.com/mwhudson/agent-in-a-box ~/src/agent-in-a-box
+cd agent-in-a-box
+ln -s $(pwd)/lxd-claude      ~/.local/bin/lxd-claude
+ln -s $(pwd)/lxd-opencode    ~/.local/bin/lxd-opencode
+ln -s $(pwd)/lxd-claude-mount  ~/.local/bin/lxd-claude-mount
+ln -s $(pwd)/lxd-opencode-mount ~/.local/bin/lxd-opencode-mount
+ln -s $(pwd)/lxd-copilot      ~/.local/bin/lxd-copilot
+ln -s $(pwd)/lxd-ai-update   ~/.local/bin/lxd-ai-update
 ```
 
 (Symlinks work because each script resolves its real location to find
