@@ -62,7 +62,7 @@ AGENTS = {
     },
     "copilot": {
         "container": "copilot",
-        "container_user": 0,
+        "container_user": 1000,
         "update_cmds": [
             ("Updating copilot ...",
              ["npm", "install", "-g", "@github/copilot"]),
@@ -87,7 +87,7 @@ if args.agents:
 else:
     targets = list(AGENTS)
 
-lxd_ai.use_project("lxd-ai")
+lxd_ai.use_project(lxd_ai.PROJECT)
 
 updated = 0
 skipped = 0

@@ -138,13 +138,16 @@ ln -s $(pwd)/lxd-ai-update   ~/.local/bin/lxd-ai-update
 ### lxd-claude
 
 ```
-lxd-claude [--or] [--also DIR]... [--shell] [-- CLAUDE_ARGS...]
+lxd-claude [--or] [--also DIR]... [--shell] [--remove] [-- CLAUDE_ARGS...]
 ```
 
 Run from inside the project directory you want the agent to work in.
 
 - `--also DIR` — also mount `DIR` into the container (repeatable).
 - `--shell` — open an interactive shell in the container instead of running Claude.
+- `--remove` — delete the session container for the current directory and exit.
+  The `claude` base/template container is left intact, so the next run clones a
+  fresh one quickly.
 - `--or` — run Claude against [OpenRouter](https://openrouter.ai) instead of the
   Claude API. Uses a separate `claude-or` base container; on first use it prompts
   for your OpenRouter API key and model and writes them to
@@ -157,7 +160,7 @@ credentials are stored on the host and reused afterwards.
 ### lxd-opencode
 
 ```
-lxd-opencode [--also DIR]... [--shell] [-- OPENCODE_ARGS...]
+lxd-opencode [--also DIR]... [--shell] [--remove] [-- OPENCODE_ARGS...]
 ```
 
 Works just like `lxd-claude` — per-directory session containers cloned from an
@@ -166,6 +169,7 @@ owned by you on the host.
 
 - `--also DIR` — also mount `DIR` into the container (repeatable).
 - `--shell` — open an interactive shell in the container instead of opencode.
+- `--remove` — delete the session container for the current directory and exit.
 - Anything after `--` is passed straight through to `opencode`.
 
 On first run, authenticate inside the container with `opencode auth login`;
@@ -219,12 +223,20 @@ containers are not affected.
 ### lxd-copilot
 
 ```
-lxd-copilot [--also DIR]... [-- COPILOT_ARGS...]
+lxd-copilot [--also DIR]... [--shell] [--remove] [-- COPILOT_ARGS...]
 ```
 
-Runs the GitHub Copilot CLI. Unlike `lxd-claude`, it uses a single shared
-container named `copilot` (not one per directory). Config/auth is persisted
-under `~/.local/share/lxd-copilot/config`.
+Runs the GitHub Copilot CLI. Works just like `lxd-claude` and `lxd-opencode` —
+per-directory session containers cloned from a `copilot` base, your working
+directory mounted at `/work/<basename>`, files owned by you on the host.
+
+- `--also DIR` — also mount `DIR` into the container (repeatable).
+- `--shell` — open an interactive shell in the container instead of copilot.
+- `--remove` — delete the session container for the current directory and exit.
+- Anything after `--` is passed straight through to `copilot`.
+
+Config/auth is persisted on the host under `~/.local/share/lxd-copilot/home`
+and reused across sessions.
 
 ## License
 

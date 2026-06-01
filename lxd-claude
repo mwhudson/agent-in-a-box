@@ -77,13 +77,11 @@ for arg in sys.argv[1:]:
 sys.argv[1:] = filtered
 
 if use_openrouter:
-    config_host_dir = os.path.expanduser("~/.local/share/lxd-claude-or/home")
-    base_container = "claude-or"
-    _ensure_openrouter_config(config_host_dir)
+    agent = "claude-or"
+    _ensure_openrouter_config(lxd_ai.agent_home_dir(agent))
     config_overlays = None
 else:
-    config_host_dir = os.path.expanduser("~/.local/share/lxd-claude/home")
-    base_container = "claude"
+    agent = "claude"
     # Overlay this repo's versioned Claude config onto the container's
     # ~/.claude. These live alongside the script (claude/) so they're found
     # regardless of the working directory, and bind-mounting keeps them
@@ -96,10 +94,8 @@ else:
          "/home/ubuntu/.claude/commands"),
     ]
 
-lxd_ai.main(
-    config_host_dir=config_host_dir,
-    config_container_path="/home/ubuntu",
-    config_device_name="claudeconfig",
+lxd_ai.run_agent(
+    agent,
     command="/home/ubuntu/.local/bin/claude",
     install_cmds=[
         ("Installing claude ...",
@@ -107,10 +103,5 @@ lxd_ai.main(
           "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
     ],
     skip_permissions=True,
-    container_user=1000,
-    container_home="/home/ubuntu",
-    work_prefix="/work",
-    base_container=base_container,
     config_overlays=config_overlays,
-    project="lxd-ai",
 )

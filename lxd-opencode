@@ -32,7 +32,7 @@ import lxd_ai
 
 # Host directory bind-mounted as the container's /home/ubuntu, so anything we
 # drop in here appears in the container's home without a separate mount.
-config_host_dir = os.path.expanduser("~/.local/share/lxd-opencode/home")
+config_host_dir = lxd_ai.agent_home_dir("opencode")
 
 # Ensure a permissive opencode config exists so the agent runs without
 # permission prompts — safe because the container can only see the directories
@@ -63,10 +63,8 @@ config_overlays = [
      "/home/ubuntu/.config/opencode/commands"),
 ]
 
-lxd_ai.main(
-    config_host_dir=config_host_dir,
-    config_container_path="/home/ubuntu",
-    config_device_name="opencodeconfig",
+lxd_ai.run_agent(
+    "opencode",
     command="/home/ubuntu/.opencode/bin/opencode",
     install_cmds=[
         ("Installing opencode ...",
@@ -75,11 +73,6 @@ lxd_ai.main(
         ("Installing wl-clipboard ...",
          ["apt-get", "install", "-y", "-q", "wl-clipboard"]),
     ],
-    container_user=1000,
-    container_home="/home/ubuntu",
-    work_prefix="/work",
-    base_container="opencode",
     config_overlays=config_overlays,
     wayland_passthrough=True,
-    project="lxd-ai",
 )

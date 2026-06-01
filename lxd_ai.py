@@ -28,9 +28,29 @@ import yaml
 
 BASE_CONTAINER = "claude"
 
+# Conventions shared by every agent wrapper (lxd-claude, lxd-opencode,
+# lxd-copilot, and any future agent). A new agent only needs a name, the
+# binary to run, and its install steps; run_agent() derives everything else
+# from these. The mount/update helpers reference the same constants so the
+# convention lives in exactly one place.
+PROJECT = "lxd-ai"
+CONTAINER_USER = 1000
+CONTAINER_HOME = "/home/ubuntu"
+WORK_PREFIX = "/work"
+
 # LXD project that all tool containers live in. Set via use_project(); while
 # None, lxc commands run against the client's active/default project.
 _PROJECT = None
+
+
+def agent_home_dir(agent):
+    """Host dir bind-mounted as the agent container's home (/home/ubuntu).
+
+    Holds the agent's persistent config/auth between sessions. Wrappers that
+    need to pre-seed config (e.g. a default settings file) write into here
+    before calling run_agent().
+    """
+    return os.path.expanduser(f"~/.local/share/lxd-{agent}/home")
 
 
 def run(cmd, **kwargs):
@@ -201,6 +221,20 @@ def remove_all_dir_devices(container):
                 )
 
 
+def remove_session_container(container):
+    """Delete a container (and its mounts), as requested by --remove.
+
+    Targets only the named session container, leaving the base/template
+    container intact so a fresh one can be cloned quickly next time.
+    """
+    if not container_exists(container):
+        print(f"No container '{container}' to remove.", file=sys.stderr)
+        return
+    print(f"Removing container '{container}' ...", file=sys.stderr)
+    run(_lxc(["delete", "--force", container]))
+    print(f"Removed container '{container}'.", file=sys.stderr)
+
+
 def container_exists(container):
     r = subprocess.run(
         _lxc(["info", container]),
@@ -322,6 +356,7 @@ def _parse_args(tool_name, config_host_dir, container_label):
     also_dirs = []
     tool_args = []
     shell = False
+    remove = False
     argv = sys.argv[1:]
 
     i = 0
@@ -333,7 +368,7 @@ def _parse_args(tool_name, config_host_dir, container_label):
         elif arg in ("-h", "--help"):
             prog = os.path.basename(sys.argv[0])
             print(f"""\
-Usage: {prog} [--also DIR]... [--shell] [-- {tool_name.upper()}_ARGS...]
+Usage: {prog} [--also DIR]... [--shell] [--remove] [-- {tool_name.upper()}_ARGS...]
 
 Mounts the current directory into the LXD container {container_label} and runs
 {tool_name} in that directory inside the container.
@@ -346,6 +381,7 @@ Options:
   --also DIR    Also mount DIR into the container (repeatable)
   --shell       Open an interactive shell in the container instead of running
                 {tool_name}
+  --remove      Delete the container {container_label} and exit
   -h, --help    Show this help
 
 Arguments after -- are passed directly to {tool_name}.""")
@@ -358,11 +394,13 @@ Arguments after -- are passed directly to {tool_name}.""")
             continue
         elif arg == "--shell":
             shell = True
+        elif arg == "--remove":
+            remove = True
         else:
             tool_args.append(arg)
         i += 1
 
-    return also_dirs, tool_args, shell
+    return also_dirs, tool_args, shell, remove
 
 
 def _add_wayland_socket(container, container_user):
@@ -469,9 +507,13 @@ def main(config_host_dir, config_container_path,
 
     if container is None:
         session_container = container_name_for_dir(cwd, prefix=base_container)
-        also_dirs, tool_args, shell = _parse_args(
+        also_dirs, tool_args, shell, remove = _parse_args(
             tool_name, config_host_dir,
             f"'{session_container}' (derived from current directory)")
+
+        if remove:
+            remove_session_container(session_container)
+            return
 
         if not container_exists(base_container):
             setup_base_container(config_host_dir, config_container_path,
@@ -480,8 +522,12 @@ def main(config_host_dir, config_container_path,
         ensure_session_container(session_container, base_container=base_container)
     else:
         session_container = container
-        also_dirs, tool_args, shell = _parse_args(
+        also_dirs, tool_args, shell, remove = _parse_args(
             tool_name, config_host_dir, f"'{container}'")
+
+        if remove:
+            remove_session_container(session_container)
+            return
 
         if not container_exists(container):
             setup_container(container, config_host_dir, config_container_path,
@@ -519,3 +565,35 @@ def main(config_host_dir, config_container_path,
         exec_cmd += _add_wayland_socket(session_container, container_user)
     result = subprocess.run(exec_cmd + ["--"] + run_cmd)
     sys.exit(result.returncode)
+
+
+def run_agent(agent, command, install_cmds, *,
+              skip_permissions=False, config_overlays=None,
+              wayland_passthrough=False):
+    """Run a standard per-directory agent container.
+
+    Encapsulates the convention shared by all agent wrappers: a per-directory
+    session container cloned from a '<agent>' base, run as the 'ubuntu' user
+    with the working directory mounted under /work and the agent's config/auth
+    persisted in its home on the host. Only the agent name, the binary to run,
+    and the install steps differ between agents; everything else is derived
+    here from the constants above.
+
+    skip_permissions, config_overlays and wayland_passthrough are passed
+    straight through to main(); see main() for their meaning.
+    """
+    main(
+        config_host_dir=agent_home_dir(agent),
+        config_container_path=CONTAINER_HOME,
+        config_device_name=f"{agent}config",
+        command=command,
+        install_cmds=install_cmds,
+        skip_permissions=skip_permissions,
+        container_user=CONTAINER_USER,
+        container_home=CONTAINER_HOME,
+        work_prefix=WORK_PREFIX,
+        base_container=agent,
+        config_overlays=config_overlays,
+        wayland_passthrough=wayland_passthrough,
+        project=PROJECT,
+    )

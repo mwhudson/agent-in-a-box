@@ -43,7 +43,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 # Target the same LXD project the session containers were created in.
-lxd_ai.use_project("lxd-ai")
+lxd_ai.use_project(lxd_ai.PROJECT)
 
 for_dir = os.path.realpath(args.for_dir) if args.for_dir else os.getcwd()
 container = lxd_ai.container_name_for_dir(for_dir, prefix="opencode")
@@ -54,5 +54,5 @@ if lxd_ai.container_status(container) != "RUNNING":
     sys.exit(f"Error: container '{container}' exists but is not running")
 
 for path in args.dirs:
-    lxd_ai.add_device(container, os.path.realpath(path), work_prefix="/work",
-                      readonly=args.read_only)
+    lxd_ai.add_device(container, os.path.realpath(path),
+                      work_prefix=lxd_ai.WORK_PREFIX, readonly=args.read_only)
