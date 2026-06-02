@@ -26,3 +26,7 @@ My level of ownership varies a lot between repos, and you can't know it unless I
 - By default, make the change that was asked for. Don't opportunistically refactor, reformat, or "improve" unrelated code unless I ask or my role for this repo grants that latitude.
 - When you find something broken or surprising next to your task, surface it instead of silently fixing or working around it.
 - If you're unsure how much latitude you have here, it's fine to ask me to set a role.
+
+## Committing
+
+Commit freely at natural checkpoints — once a piece of work is coherent and the code is in a good state, go ahead and commit without waiting to be asked. A series of small, clearly-described commits is easier for me to review and reshape than one large pile of uncommitted changes. Don't worry about getting authorship or signatures right: these commits are made inside a container, and I'll redo them outside it (correcting the author info and GPG-signing where needed) before anything is pushed. Just focus on a clear message saying what changed and why, and leave pushing to me.
