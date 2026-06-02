@@ -12,9 +12,8 @@ not the rest of your machine.
 | --- | --- |
 | `lxd-claude` | Run [Claude Code](https://claude.ai/code) in a per-directory container. |
 | `lxd-opencode` | Run [opencode](https://opencode.ai) in a per-directory container. |
-| `lxd-claude-mount` | Mount extra host directories into an already-running `lxd-claude` session. |
-| `lxd-opencode-mount` | Mount extra host directories into an already-running `lxd-opencode` session. |
-| `lxd-copilot` | Run the [GitHub Copilot CLI](https://github.com/github/copilot-cli) in a shared container. |
+| `lxd-ai-mount` | Mount extra host directories into the agent containers for a project directory. |
+| `lxd-copilot` | Run the [GitHub Copilot CLI](https://github.com/github/copilot-cli) in a per-directory container. |
 | `lxd-ai-update` | Update template containers (apt upgrade + agent binary). |
 | `lxd_ai.py` | Shared helper module imported by the scripts above. |
 
@@ -124,8 +123,7 @@ git clone https://github.com/mwhudson/agent-in-a-box ~/src/agent-in-a-box
 cd agent-in-a-box
 ln -s $(pwd)/lxd-claude      ~/.local/bin/lxd-claude
 ln -s $(pwd)/lxd-opencode    ~/.local/bin/lxd-opencode
-ln -s $(pwd)/lxd-claude-mount  ~/.local/bin/lxd-claude-mount
-ln -s $(pwd)/lxd-opencode-mount ~/.local/bin/lxd-opencode-mount
+ln -s $(pwd)/lxd-ai-mount    ~/.local/bin/lxd-ai-mount
 ln -s $(pwd)/lxd-copilot      ~/.local/bin/lxd-copilot
 ln -s $(pwd)/lxd-ai-update   ~/.local/bin/lxd-ai-update
 ```
@@ -174,33 +172,26 @@ owned by you on the host.
 
 On first run, authenticate inside the container with `opencode auth login`;
 credentials persist on the host under `~/.local/share/lxd-opencode/`.
-Use `lxd-opencode-mount` to mount additional directories into a running session
-(see below).
+Use `lxd-ai-mount` to mount additional directories into existing session
+containers (see below).
 
-### lxd-claude-mount
+### lxd-ai-mount
 
-Mount additional host directories into a session that's already running:
-
-```
-lxd-claude-mount [--or] [--for DIR] [--read-only] DIR [DIR ...]
-```
-
-- By default it targets the container for the current directory.
-- `--for DIR` — target the container for a different project directory.
-- `--or` — target an OpenRouter session container.
-- `--read-only` — mount the directories read-only (the container cannot modify them).
-
-### lxd-opencode-mount
-
-Mount additional host directories into an opencode session that's already running:
+Mount additional host directories into the agent containers for a project
+directory:
 
 ```
-lxd-opencode-mount [--for DIR] [--read-only] DIR [DIR ...]
+lxd-ai-mount [--for DIR] [--read-only] DIR [DIR ...]
 ```
 
-- By default it targets the container for the current directory.
-- `--for DIR` — target the container for a different project directory.
-- `--read-only` — mount the directories read-only (the container cannot modify them).
+Each directory is mounted into *every* agent container (`claude`, `claude-or`,
+`opencode`, `copilot`) that exists for the target project directory, so you
+don't have to repeat the mount per agent. Running containers pick the mounts up
+immediately; stopped ones apply them the next time they start.
+
+- By default it targets the containers for the current directory.
+- `--for DIR` — target the containers for a different project directory.
+- `--read-only` — mount the directories read-only (containers cannot modify them).
 
 ### lxd-ai-update
 

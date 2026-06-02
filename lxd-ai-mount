@@ -1,0 +1,69 @@
+#!/usr/bin/python3
+# Copyright (C) 2026 Canonical Ltd.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# lxd-ai-mount: Mount additional directories into the agent containers for a
+# project directory.
+#
+# Usage:
+#   lxd-ai-mount [--for DIR] [--read-only] DIR [DIR ...]
+#
+# Mounts each DIR into every agent container (claude, opencode, copilot, ...)
+# that exists for the target project directory. By default targets the current
+# directory; use --for to target a different one. Running containers pick the
+# mounts up immediately; stopped ones apply them at next start.
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import lxd_ai
+
+parser = argparse.ArgumentParser(
+    description="Mount directories into the agent containers for a project directory.")
+parser.add_argument(
+    "--for", dest="for_dir", metavar="DIR", default=None,
+    help="project directory whose containers to target (default: current directory)")
+parser.add_argument(
+    "--read-only", dest="read_only", action="store_true",
+    help="mount the directories read-only (containers cannot modify them)")
+parser.add_argument(
+    "dirs", nargs="+", metavar="DIR",
+    help="host directories to mount into the containers")
+args = parser.parse_args()
+
+# Target the same LXD project the session containers were created in.
+lxd_ai.use_project(lxd_ai.PROJECT)
+
+for_dir = os.path.realpath(args.for_dir) if args.for_dir else os.getcwd()
+mount_paths = [os.path.realpath(p) for p in args.dirs]
+
+mounted_any = False
+for agent in lxd_ai.AGENTS:
+    container = lxd_ai.container_name_for_dir(for_dir, prefix=agent)
+    if not lxd_ai.container_exists(container):
+        continue
+    mounted_any = True
+    print(f"=== {agent} ({container}) ===", file=sys.stderr)
+    if lxd_ai.container_status(container) != "RUNNING":
+        print("Note: container is not running; mounts apply when it next starts.",
+              file=sys.stderr)
+    for path in mount_paths:
+        lxd_ai.add_device(container, path, work_prefix=lxd_ai.WORK_PREFIX,
+                          readonly=args.read_only)
+
+if not mounted_any:
+    sys.exit(f"Error: no agent containers found for '{for_dir}'")

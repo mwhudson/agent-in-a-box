@@ -38,6 +38,11 @@ CONTAINER_USER = 1000
 CONTAINER_HOME = "/home/ubuntu"
 WORK_PREFIX = "/work"
 
+# Known agents, by base-container name (also the per-directory container
+# prefix). A new agent following the standard pattern should be added here so
+# the shared tooling (lxd-ai-mount) discovers its containers.
+AGENTS = ("claude", "claude-or", "opencode", "copilot")
+
 # LXD project that all tool containers live in. Set via use_project(); while
 # None, lxc commands run against the client's active/default project.
 _PROJECT = None
