@@ -21,9 +21,12 @@
 #   lxd-ai-mount [--for DIR] [--read-only] DIR [DIR ...]
 #
 # Mounts each DIR into every agent container (claude, opencode, copilot, ...)
-# that exists for the target project directory. By default targets the current
-# directory; use --for to target a different one. Running containers pick the
-# mounts up immediately; stopped ones apply them at next start.
+# that exists for the target project directory. Mounts are read-only by
+# default; pass --rw for read-write. Re-running on an already-mounted directory
+# reconciles its mode, so `lxd-ai-mount --rw DIR` / `--ro DIR` flips an existing
+# mount. By default targets the current directory; use --for to target a
+# different one. Running containers pick the changes up immediately; stopped
+# ones apply them at next start.
 
 import argparse
 import os
@@ -37,9 +40,14 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--for", dest="for_dir", metavar="DIR", default=None,
     help="project directory whose containers to target (default: current directory)")
-parser.add_argument(
-    "--read-only", dest="read_only", action="store_true",
-    help="mount the directories read-only (containers cannot modify them)")
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument(
+    "--ro", dest="readonly", action="store_true",
+    help="mount the directories read-only (the default)")
+mode.add_argument(
+    "--rw", dest="readonly", action="store_false",
+    help="mount the directories read-write (containers can modify them)")
+parser.set_defaults(readonly=True)
 parser.add_argument(
     "dirs", nargs="+", metavar="DIR",
     help="host directories to mount into the containers")
@@ -63,7 +71,7 @@ for agent in lxd_ai.AGENTS:
               file=sys.stderr)
     for path in mount_paths:
         lxd_ai.add_device(container, path, work_prefix=lxd_ai.WORK_PREFIX,
-                          readonly=args.read_only)
+                          readonly=args.readonly)
 
 if not mounted_any:
     sys.exit(f"Error: no agent containers found for '{for_dir}'")

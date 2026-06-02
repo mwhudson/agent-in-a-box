@@ -181,7 +181,7 @@ Mount additional host directories into the agent containers for a project
 directory:
 
 ```
-lxd-ai-mount [--for DIR] [--read-only] DIR [DIR ...]
+lxd-ai-mount [--for DIR] [--ro | --rw] DIR [DIR ...]
 ```
 
 Each directory is mounted into *every* agent container (`claude`, `claude-or`,
@@ -189,9 +189,15 @@ Each directory is mounted into *every* agent container (`claude`, `claude-or`,
 don't have to repeat the mount per agent. Running containers pick the mounts up
 immediately; stopped ones apply them the next time they start.
 
+Mounts are **read-only by default** — handy for reference code you want the
+agent to read but not change. Re-running on an already-mounted directory just
+reconciles its mode, so `lxd-ai-mount --rw DIR` flips an existing read-only
+mount to read-write (and `--ro DIR` flips it back) without re-specifying anything else.
+
 - By default it targets the containers for the current directory.
 - `--for DIR` — target the containers for a different project directory.
-- `--read-only` — mount the directories read-only (containers cannot modify them).
+- `--ro` — mount read-only (the default).
+- `--rw` — mount read-write (containers can modify the directories).
 
 ### lxd-ai-update
 

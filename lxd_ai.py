@@ -141,10 +141,21 @@ def add_device(container, host_path, work_prefix=None, readonly=False):
     # If the device is already configured for this host path, reuse its
     # existing container path. Computing a fresh path here would see the
     # device's own mount as "occupied" and bump to a non-existent suffixed
-    # path (e.g. /work/foo-2), leaving the caller with a bad cwd.
+    # path (e.g. /work/foo-2), leaving the caller with a bad cwd. Reconcile
+    # the readonly flag in place if it changed (e.g. re-mounting --ro/--rw).
     devices = _get_devices(container)
-    if name in devices and devices[name].get("source") == host_path:
-        return devices[name]["path"]
+    existing = devices.get(name)
+    if existing and existing.get("source") == host_path:
+        container_path = existing["path"]
+        current_ro = str(existing.get("readonly", "false")).lower() == "true"
+        if current_ro != readonly:
+            run(_lxc(["config", "device", "set", container, name,
+                      "readonly", "true" if readonly else "false"]),
+                stdout=subprocess.DEVNULL)
+            mode = "read-only" if readonly else "read-write"
+            print(f"Set {host_path} -> container:{container_path} to {mode}",
+                  file=sys.stderr)
+        return container_path
 
     if work_prefix is None:
         container_path = host_path
