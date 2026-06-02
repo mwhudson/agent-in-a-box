@@ -2,6 +2,10 @@
 
 I move between many different codebases rather than living in one. In any given session you are most likely in a repo you have not seen before, working alongside conventions, tooling, and history that you did not establish. Treat each codebase as unfamiliar territory and let *it* tell you how things are done — do not carry assumptions from other projects (or from training data) into this one.
 
+## Look in `/work` for related code
+
+You're running in a container with this project mounted under `/work`. Any *other* directories under `/work` are sibling source trees I've deliberately mounted into this session because they may be relevant — a library this project depends on, a related service, or another repo worth cross-referencing. When something you need isn't in the current project (a definition, the implementation behind an API you call, behaviour you rely on), check whether it lives in another `/work/*` directory before treating it as external or unknowable. And if code that would help isn't mounted anywhere under `/work`, just ask me to mount it — I can add directories to your running session without restarting it, and they'll appear under `/work`. Read it freely for context; the scope rules below still apply, so don't change code outside the current project without asking.
+
 ## Verify before you change
 
 - **Read the actual code before editing it.** Confirm that the function, type, flag, config key, or file you're about to touch exists and behaves the way you think. Don't infer an API from its name.
