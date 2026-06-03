@@ -57,17 +57,15 @@ def maybe_migrate():
 def _migrate():
     print(f"Migrating from the old '{OLD_PROJECT}' layout to '{PROJECT}' ...",
           file=sys.stderr)
-    _rename_project()
-    _move_config_dirs()
-    _rename_containers()
-    print("Migration complete.\n", file=sys.stderr)
-
-
-def _rename_project():
-    lxd.run(["lxc", "project", "rename", OLD_PROJECT, PROJECT])
-    print(f"  Renamed LXD project {OLD_PROJECT} -> {PROJECT}", file=sys.stderr)
-    # Route subsequent instance commands at the new project name.
+    # An LXD project can't be renamed while it holds instances, so create the
+    # new project (sharing the default project's profiles/images) and move the
+    # instances across, then drop the now-empty old project.
     lxd.use_project(PROJECT)
+    _move_instances()
+    _move_config_dirs()
+    lxd.run(["lxc", "project", "delete", OLD_PROJECT])
+    print(f"  Deleted empty project {OLD_PROJECT}", file=sys.stderr)
+    print("Migration complete.\n", file=sys.stderr)
 
 
 def _move_config_dirs():
@@ -106,13 +104,30 @@ def _new_container_name(name):
     return None
 
 
-def _rename_containers():
+def _move_instances():
+    """Move every instance from the old project into the new one.
+
+    `lxc move <src> <dst> --target-project` both moves the instance across
+    projects and (when the names differ) renames it, so a single command also
+    applies the <agent>-<hash>-<basename> -> <agent>-<basename>-<hash> reorder.
+    Instances are stopped first: cross-project moves need a stopped instance,
+    and the next `aiab run` restarts the session container anyway.
+    """
     result = subprocess.run(
-        lxd.lxc_argv(["list", "--format=csv", "--columns=n"]),
+        ["lxc", "--project", OLD_PROJECT, "list", "--format=csv",
+         "--columns=n,s"],
         capture_output=True, text=True,
     )
-    for name in result.stdout.split():
-        new = _new_container_name(name)
-        if new and new != name:
-            lxd.run(lxd.lxc_argv(["rename", name, new]))
-            print(f"  Renamed container {name} -> {new}", file=sys.stderr)
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, _, state = line.partition(",")
+        if state.strip().upper() == "RUNNING":
+            lxd.run(["lxc", "--project", OLD_PROJECT, "stop", name])
+        new = _new_container_name(name) or name
+        lxd.run(["lxc", "--project", OLD_PROJECT, "move", name, new,
+                 "--target-project", PROJECT])
+        if new != name:
+            print(f"  Moved {name} -> {PROJECT}:{new}", file=sys.stderr)
+        else:
+            print(f"  Moved {name} -> project {PROJECT}", file=sys.stderr)
