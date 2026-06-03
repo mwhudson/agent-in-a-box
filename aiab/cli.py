@@ -27,6 +27,7 @@ import sys
 from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX
 from . import agents
 from . import lxd
+from . import state
 from .migrate import maybe_migrate
 
 CONFIG_CONTAINER_PATH = CONTAINER_HOME  # agent home dir is mounted here
@@ -72,12 +73,15 @@ def cmd_run(args, passthrough):
         run_cmd = [cfg["command"]] + agent_args
 
     container_cwd = lxd.add_device(session, cwd, work_prefix=WORK_PREFIX)
+
+    # Record any run-time --also mounts for this directory, then (re)apply
+    # every mount recorded for it — so a freshly created or cloned container,
+    # and other agents started here later, all pick up the same set.
     for d in args.also:
-        lxd.add_device(session, _realdir(d), work_prefix=WORK_PREFIX,
-                       readonly=True)
+        state.set_mount(cwd, d, readonly=True)
     for d in args.also_rw:
-        lxd.add_device(session, _realdir(d), work_prefix=WORK_PREFIX,
-                       readonly=False)
+        state.set_mount(cwd, d, readonly=False)
+    _apply_recorded_mounts(session, cwd)
 
     for host_path, overlay_path in cfg["overlays"]:
         if os.path.exists(host_path):
@@ -116,9 +120,29 @@ def _agent_containers(for_dir):
             yield agent, container
 
 
+def _apply_recorded_mounts(container, for_dir):
+    """Add every mount recorded for for_dir to a container.
+
+    Skips (with a warning) any whose source no longer exists, so a recreated
+    container still comes up.
+    """
+    for m in state.get_mounts(for_dir):
+        if not os.path.isdir(m["source"]):
+            print(f"Warning: recorded mount {m['source']} not found; skipping",
+                  file=sys.stderr)
+            continue
+        lxd.add_device(container, m["source"], work_prefix=WORK_PREFIX,
+                       readonly=m["readonly"])
+
+
 def cmd_mount(args, passthrough):
     for_dir = _realdir(args.for_dir)
     paths = [os.path.realpath(p) for p in args.dirs]
+
+    # Persist for the directory first, so a later run / another agent (and a
+    # recreated container) get the same mounts.
+    for path in paths:
+        state.set_mount(for_dir, path, readonly=args.readonly)
 
     found = False
     for agent, container in _agent_containers(for_dir):
@@ -131,24 +155,27 @@ def cmd_mount(args, passthrough):
             lxd.add_device(container, path, work_prefix=WORK_PREFIX,
                            readonly=args.readonly)
     if not found:
-        sys.exit(f"Error: no agent containers found for '{for_dir}'")
+        print("No containers exist for this directory yet; the mounts are "
+              "recorded and will apply when you next run an agent here.",
+              file=sys.stderr)
 
 
 def cmd_unmount(args, passthrough):
     for_dir = _realdir(args.for_dir)
     paths = [os.path.realpath(p) for p in args.dirs]
 
-    found = False
+    # Drop from the persistent record so it isn't replayed on the next run.
+    for path in paths:
+        if not state.remove_mount(for_dir, path):
+            print(f"Not recorded: {path}", file=sys.stderr)
+
     for agent, container in _agent_containers(for_dir):
-        found = True
         print(f"=== {agent} ({container}) ===", file=sys.stderr)
         for path in paths:
             if lxd.remove_dir_device(container, path):
                 print(f"Unmounted {path}", file=sys.stderr)
             else:
                 print(f"Not mounted: {path}", file=sys.stderr)
-    if not found:
-        sys.exit(f"Error: no agent containers found for '{for_dir}'")
 
 
 # --------------------------------------------------------------------------

@@ -171,6 +171,11 @@ aiab run <agent> [--also DIR]... [--also-rw DIR]... [--shell] [-- AGENT_ARGS...]
 - `--shell` — open an interactive shell in the container instead of the agent.
 - Anything after `--` is passed straight through to the agent.
 
+`--also` / `--also-rw` mounts are remembered for the directory (see [`aiab
+mount`](#aiab-mount--aiab-unmount) below), so they're re-applied on later runs
+and for other agents in the same directory. Mounts recorded for the directory
+are re-applied on every run regardless.
+
 The base container is created automatically on first use. Authenticate inside
 the container on first run; credentials are stored under
 `~/.local/share/aiab/<agent>/home` and reused afterwards.
@@ -197,20 +202,29 @@ aiab mount   [--for DIR] [--ro | --rw] DIR [DIR ...]
 aiab unmount [--for DIR] DIR [DIR ...]
 ```
 
-`mount` adds each `DIR` into *every* agent container (`claude`, `claude-or`,
-`opencode`, `copilot`) that exists for the target project directory, so you
-don't have to repeat the mount per agent. Running containers pick the mounts up
-immediately; stopped ones apply them the next time they start.
+`mount` records each `DIR` as an **extra mount for the project directory** and
+adds it to every agent container (`claude`, `claude-or`, `opencode`,
+`copilot`) that already exists for it. Because the set is recorded (in
+`~/.local/share/aiab/mounts.json`, keyed by the directory), it also reaches
+containers that don't exist yet: a different agent started for the same
+directory, or a container deleted and recreated, gets the same mounts
+automatically — `aiab run` replays them every time it brings a container up.
+Run-time `--also` / `--also-rw` mounts are recorded the same way.
+
+Running containers pick the mounts up immediately; stopped ones apply them the
+next time they start. It's fine to `mount` before any container exists — the
+mounts are just recorded for later.
 
 Mounts are **read-only by default** — handy for reference code you want the
-agent to read but not change. Re-running on an already-mounted directory just
+agent to read but not change. Re-running on an already-recorded directory just
 reconciles its mode, so `aiab mount --rw DIR` flips an existing read-only mount
 to read-write (and `--ro DIR` flips it back).
 
-`unmount` removes those mounts again.
+`unmount` drops each `DIR` from the directory's record and removes it from any
+existing containers, so it isn't replayed on the next run.
 
-- By default both target the containers for the current directory; use `--for
-  DIR` to target a different project directory.
+- By default both target the current directory; use `--for DIR` to target a
+  different project directory.
 - `--ro` / `--rw` — read-only (the default) or read-write (`mount` only).
 
 ### aiab upgrade-templates
