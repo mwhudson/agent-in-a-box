@@ -162,10 +162,12 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ### aiab run
 
 ```
-aiab run <agent> [--also DIR]... [--also-rw DIR]... [--shell] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--also DIR]... [--also-rw DIR]... [--shell] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `claude-or`, `opencode`, or `copilot`.
+- `--for DIR` — run the agent for `DIR` instead of the current directory; `DIR`
+  is the container's working directory, mounted at `/work/<basename>`.
 - `--also DIR` — also mount `DIR` **read-only** into the container (repeatable).
 - `--also-rw DIR` — also mount `DIR` read-write (repeatable).
 - `--shell` — open an interactive shell in the container instead of the agent.

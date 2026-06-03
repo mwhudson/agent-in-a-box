@@ -50,8 +50,8 @@ def cmd_run(args, passthrough):
     if cfg.prepare:
         cfg.prepare(config_host_dir)
 
-    cwd = os.getcwd()
-    session = lxd.container_name_for_dir(cwd, prefix=agent)
+    for_dir = _realdir(args.for_dir)
+    session = lxd.container_name_for_dir(for_dir, prefix=agent)
 
     if not lxd.container_exists(agent):
         lxd.setup_base_container(
@@ -72,16 +72,16 @@ def cmd_run(args, passthrough):
             agent_args = ["--dangerously-skip-permissions"] + agent_args
         run_cmd = [cfg.command] + agent_args
 
-    container_cwd = lxd.add_device(session, cwd, work_prefix=WORK_PREFIX)
+    container_cwd = lxd.add_device(session, for_dir, work_prefix=WORK_PREFIX)
 
     # Record any run-time --also mounts for this directory, then (re)apply
     # every mount recorded for it — so a freshly created or cloned container,
     # and other agents started here later, all pick up the same set.
     for d in args.also:
-        state.set_mount(cwd, d, readonly=True)
+        state.set_mount(for_dir, d, readonly=True)
     for d in args.also_rw:
-        state.set_mount(cwd, d, readonly=False)
-    _apply_recorded_mounts(session, cwd)
+        state.set_mount(for_dir, d, readonly=False)
+    _apply_recorded_mounts(session, for_dir)
 
     for host_path, overlay_path in cfg.overlays:
         if os.path.exists(host_path):
@@ -300,6 +300,9 @@ def build_parser():
     p_run = sub.add_parser(
         "run", help="run an agent in a container for the current directory")
     p_run.add_argument("agent", choices=agent_names, help="which agent to run")
+    p_run.add_argument(
+        "--for", dest="for_dir", metavar="DIR", default=None,
+        help="run the agent for DIR (default: current directory)")
     p_run.add_argument(
         "--also", metavar="DIR", action="append", default=[],
         help="also mount DIR (read-only) into the container (repeatable)")

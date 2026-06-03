@@ -45,7 +45,7 @@ _aiab() {
 
     case "$sub" in
         run)
-            COMPREPLY=( $(compgen -W "$agents --also --also-rw --shell" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$agents --for --also --also-rw --shell" -- "$cur") )
             _aiab_dirs
             ;;
         remove)
