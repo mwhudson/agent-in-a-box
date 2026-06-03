@@ -47,8 +47,8 @@ def cmd_run(args, passthrough):
     config_host_dir = lxd.agent_home_dir(agent)
 
     # One-time prepare hook (OpenRouter key prompt, opencode permissive config).
-    if cfg["prepare"]:
-        cfg["prepare"](config_host_dir)
+    if cfg.prepare:
+        cfg.prepare(config_host_dir)
 
     cwd = os.getcwd()
     session = lxd.container_name_for_dir(cwd, prefix=agent)
@@ -59,7 +59,7 @@ def cmd_run(args, passthrough):
             config_host_dir=config_host_dir,
             config_container_path=CONFIG_CONTAINER_PATH,
             config_device_name=f"{agent}config",
-            install_cmds=cfg["install_cmds"],
+            install_cmds=cfg.install_cmds,
             container_user=CONTAINER_USER,
         )
     lxd.ensure_session_container(session, base_container=agent)
@@ -68,9 +68,9 @@ def cmd_run(args, passthrough):
         run_cmd = ["bash", "-l"]
     else:
         agent_args = list(passthrough)
-        if cfg["skip_permissions"]:
+        if cfg.skip_permissions:
             agent_args = ["--dangerously-skip-permissions"] + agent_args
-        run_cmd = [cfg["command"]] + agent_args
+        run_cmd = [cfg.command] + agent_args
 
     container_cwd = lxd.add_device(session, cwd, work_prefix=WORK_PREFIX)
 
@@ -83,7 +83,7 @@ def cmd_run(args, passthrough):
         state.set_mount(cwd, d, readonly=False)
     _apply_recorded_mounts(session, cwd)
 
-    for host_path, overlay_path in cfg["overlays"]:
+    for host_path, overlay_path in cfg.overlays:
         if os.path.exists(host_path):
             lxd.add_config_overlay(session, host_path, overlay_path,
                                    container_user=CONTAINER_USER)
@@ -92,7 +92,7 @@ def cmd_run(args, passthrough):
                              f"--user={CONTAINER_USER}",
                              f"--group={CONTAINER_USER}",
                              f"--env=HOME={CONTAINER_HOME}"])
-    if cfg["wayland"]:
+    if cfg.wayland:
         exec_cmd += lxd.add_wayland_socket(session, CONTAINER_USER)
     result = subprocess.run(exec_cmd + ["--"] + run_cmd)
     sys.exit(result.returncode)
@@ -194,7 +194,7 @@ def cmd_upgrade_templates(args, passthrough):
         print(f"=== {agent} ===", file=sys.stderr)
         ok = lxd.update_base_container(
             base_container=agent,
-            update_cmds=cfg["upgrade_cmds"],
+            update_cmds=cfg.upgrade_cmds,
             container_user=CONTAINER_USER,
         )
         updated += ok

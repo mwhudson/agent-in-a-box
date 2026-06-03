@@ -26,6 +26,8 @@ import getpass
 import json
 import os
 import sys
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 from . import CONTAINER_HOME
 
@@ -100,40 +102,58 @@ def _overlays(*pairs):
     return [(os.path.join(REPO_ROOT, src), dst) for src, dst in pairs]
 
 
-# The registry. Keys are agent names; they double as the base/template
-# container name and the per-directory container prefix.
-#
-# Fields:
-#   command           binary to run inside the container
-#   install_cmds      (description, cmd) pairs run when building the template
-#   upgrade_cmds      (description, cmd) pairs run by `aiab upgrade-templates`
-#                     (defaults to install_cmds when omitted)
-#   skip_permissions  prepend --dangerously-skip-permissions to the agent
-#   wayland           bind-mount the host Wayland socket (clipboard support)
-#   overlays          versioned config bind-mounted onto the container home
-#   prepare           optional hook(config_host_dir) run before launch
+@dataclass
+class Agent:
+    """A known agent.
+
+    The agent's name (its key in AGENTS) doubles as the base/template container
+    name and the per-directory container prefix.
+    """
+    # Binary to run inside the container.
+    command: str
+    # (description, cmd) pairs run when building the template container.
+    install_cmds: list
+    # (description, cmd) pairs run by `aiab upgrade-templates`. Defaults to
+    # install_cmds (set in __post_init__) when not given.
+    upgrade_cmds: Optional[list] = None
+    # Prepend --dangerously-skip-permissions to the agent command.
+    skip_permissions: bool = False
+    # Bind-mount the host Wayland socket (clipboard support).
+    wayland: bool = False
+    # Versioned config (host_path, container_path) pairs bind-mounted onto the
+    # container home.
+    overlays: list = field(default_factory=list)
+    # Optional hook(config_host_dir) run before launch.
+    prepare: Optional[Callable] = None
+
+    def __post_init__(self):
+        if self.upgrade_cmds is None:
+            self.upgrade_cmds = self.install_cmds
+
+
+# The registry. Keys are agent names.
 AGENTS = {
-    "claude": {
-        "command": f"{CONTAINER_HOME}/.local/bin/claude",
-        "install_cmds": _claude_install(),
-        "skip_permissions": True,
+    "claude": Agent(
+        command=f"{CONTAINER_HOME}/.local/bin/claude",
+        install_cmds=_claude_install(),
+        skip_permissions=True,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
-        "overlays": _overlays(
+        overlays=_overlays(
             ("claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
             ("claude/commands", f"{CONTAINER_HOME}/.claude/commands"),
         ),
-    },
-    "claude-or": {
+    ),
+    "claude-or": Agent(
         # Claude pointed at OpenRouter instead of the Claude API. Same binary,
         # separate template/config so credentials don't mix. No repo overlay.
-        "command": f"{CONTAINER_HOME}/.local/bin/claude",
-        "install_cmds": _claude_install(),
-        "skip_permissions": True,
-        "prepare": _ensure_openrouter_config,
-    },
-    "opencode": {
-        "command": f"{CONTAINER_HOME}/.opencode/bin/opencode",
-        "install_cmds": [
+        command=f"{CONTAINER_HOME}/.local/bin/claude",
+        install_cmds=_claude_install(),
+        skip_permissions=True,
+        prepare=_ensure_openrouter_config,
+    ),
+    "opencode": Agent(
+        command=f"{CONTAINER_HOME}/.opencode/bin/opencode",
+        install_cmds=[
             ("Installing opencode ...",
              ["runuser", "-u", "ubuntu", "--",
               "bash", "-c", "curl -fsSL https://opencode.ai/install | bash"]),
@@ -142,21 +162,21 @@ AGENTS = {
         ],
         # Re-running the installer is enough to upgrade; no need to reinstall
         # wl-clipboard, which apt dist-upgrade already covers.
-        "upgrade_cmds": [
+        upgrade_cmds=[
             ("Updating opencode ...",
              ["runuser", "-u", "ubuntu", "--",
               "bash", "-c", "curl -fsSL https://opencode.ai/install | bash"]),
         ],
-        "wayland": True,
-        "prepare": _ensure_opencode_permissive_config,
-        "overlays": _overlays(
+        wayland=True,
+        prepare=_ensure_opencode_permissive_config,
+        overlays=_overlays(
             ("opencode/AGENTS.md", f"{CONTAINER_HOME}/.config/opencode/AGENTS.md"),
             ("opencode/commands", f"{CONTAINER_HOME}/.config/opencode/commands"),
         ),
-    },
-    "copilot": {
-        "command": "copilot",
-        "install_cmds": [
+    ),
+    "copilot": Agent(
+        command="copilot",
+        install_cmds=[
             ("Installing Node.js 22 ...",
              ["bash", "-c",
               "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
@@ -165,25 +185,16 @@ AGENTS = {
              ["npm", "install", "-g", "@github/copilot"]),
         ],
         # Node is already in the template; just refresh the copilot package.
-        "upgrade_cmds": [
+        upgrade_cmds=[
             ("Updating copilot ...",
              ["npm", "install", "-g", "@github/copilot"]),
         ],
-    },
+    ),
 }
 
 AGENT_NAMES = tuple(AGENTS)
 
 
 def get(agent):
-    """Return the registry entry for an agent, with defaults filled in."""
-    cfg = AGENTS[agent]
-    return {
-        "command": cfg["command"],
-        "install_cmds": cfg["install_cmds"],
-        "upgrade_cmds": cfg.get("upgrade_cmds", cfg["install_cmds"]),
-        "skip_permissions": cfg.get("skip_permissions", False),
-        "wayland": cfg.get("wayland", False),
-        "overlays": cfg.get("overlays", []),
-        "prepare": cfg.get("prepare"),
-    }
+    """Return the Agent for a name. Raises KeyError if unknown."""
+    return AGENTS[agent]
