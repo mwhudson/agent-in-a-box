@@ -115,7 +115,8 @@ edit it (e.g. to add MCP servers) and your changes persist.
 ## Requirements
 
 - LXD, installed and initialised (`lxd init`), with your user able to run `lxc`.
-- Python 3.
+- Python 3, with [Click](https://click.palletsprojects.com/) and PyYAML
+  (on Debian/Ubuntu: `apt install python3-click python3-yaml`).
 - Network access from containers (to install the agents and reach their APIs).
 
 ## Install

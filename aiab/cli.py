@@ -15,14 +15,15 @@
 #
 # aiab.cli - the `aiab` command-line front end.
 #
-# One argparse tree with a subcommand per verb (run, remove, mount, unmount,
+# A Click group with a command per verb (run, remove, mount, unmount,
 # upgrade-templates, list, lxc). The engine lives in aiab.lxd and the per-agent
 # data in aiab.agents; this module just parses arguments and orchestrates.
 
-import argparse
 import os
 import subprocess
 import sys
+
+import click
 
 from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX
 from . import agents
@@ -32,17 +33,64 @@ from .migrate import maybe_migrate
 
 CONFIG_CONTAINER_PATH = CONTAINER_HOME  # agent home dir is mounted here
 
+AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
+
 
 def _realdir(path):
     return os.path.realpath(path) if path else os.getcwd()
+
+
+def _setup():
+    """Per-invocation setup, run before each command body (see _Command).
+
+    Migrate from the old lxd-* layout first, if present: maybe_migrate() keys
+    off whether the 'aiab' project exists yet, so it must run before
+    use_project() (which would create that project and defeat the trigger).
+    """
+    maybe_migrate()
+    lxd.use_project(PROJECT)
+
+
+class _Command(click.Command):
+    """A Command that runs _setup() before invoking its body.
+
+    Command.invoke() runs only after a successful parse, so `aiab ... --help`
+    (which exits during parsing) never triggers migration or project creation.
+    """
+    def invoke(self, ctx):
+        _setup()
+        return super().invoke(ctx)
+
+
+class _Group(click.Group):
+    command_class = _Command
+
+
+@click.group(cls=_Group)
+def main():
+    """Run coding agents in disposable per-directory LXD containers."""
 
 
 # --------------------------------------------------------------------------
 # run
 # --------------------------------------------------------------------------
 
-def cmd_run(args, passthrough):
-    agent = args.agent
+@main.command()
+@click.argument("agent", type=AGENT_CHOICE)
+@click.option("--for", "for_dir", metavar="DIR", default=None,
+              help="run the agent for DIR (default: current directory)")
+@click.option("--also", "also", metavar="DIR", multiple=True,
+              help="also mount DIR (read-only) into the container (repeatable)")
+@click.option("--also-rw", "also_rw", metavar="DIR", multiple=True,
+              help="also mount DIR (read-write) into the container (repeatable)")
+@click.option("--shell", is_flag=True,
+              help="open an interactive shell instead of running the agent")
+@click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
+def run(agent, for_dir, also, also_rw, shell, agent_args):
+    """Run an agent in a container for a directory.
+
+    Anything after `--` is passed straight through to the agent.
+    """
     cfg = agents.get(agent)
     config_host_dir = lxd.agent_home_dir(agent)
 
@@ -50,7 +98,7 @@ def cmd_run(args, passthrough):
     if cfg.prepare:
         cfg.prepare(config_host_dir)
 
-    for_dir = _realdir(args.for_dir)
+    for_dir = _realdir(for_dir)
     session = lxd.container_name_for_dir(for_dir, prefix=agent)
 
     if not lxd.container_exists(agent):
@@ -64,22 +112,22 @@ def cmd_run(args, passthrough):
         )
     lxd.ensure_session_container(session, base_container=agent)
 
-    if args.shell:
+    if shell:
         run_cmd = ["bash", "-l"]
     else:
-        agent_args = list(passthrough)
+        cmd_args = list(agent_args)
         if cfg.skip_permissions:
-            agent_args = ["--dangerously-skip-permissions"] + agent_args
-        run_cmd = [cfg.command] + agent_args
+            cmd_args = ["--dangerously-skip-permissions"] + cmd_args
+        run_cmd = [cfg.command] + cmd_args
 
     container_cwd = lxd.add_device(session, for_dir, work_prefix=WORK_PREFIX)
 
     # Record any run-time --also mounts for this directory, then (re)apply
     # every mount recorded for it — so a freshly created or cloned container,
     # and other agents started here later, all pick up the same set.
-    for d in args.also:
+    for d in also:
         state.set_mount(for_dir, d, readonly=True)
-    for d in args.also_rw:
+    for d in also_rw:
         state.set_mount(for_dir, d, readonly=False)
     _apply_recorded_mounts(session, for_dir)
 
@@ -102,9 +150,14 @@ def cmd_run(args, passthrough):
 # remove
 # --------------------------------------------------------------------------
 
-def cmd_remove(args, passthrough):
-    target = _realdir(args.for_dir)
-    session = lxd.container_name_for_dir(target, prefix=args.agent)
+@main.command()
+@click.argument("agent", type=AGENT_CHOICE)
+@click.option("--for", "for_dir", metavar="DIR", default=None,
+              help="target the container for DIR (default: current directory)")
+def remove(agent, for_dir):
+    """Delete the session container for a directory."""
+    target = _realdir(for_dir)
+    session = lxd.container_name_for_dir(target, prefix=agent)
     lxd.remove_session_container(session)
 
 
@@ -135,14 +188,21 @@ def _apply_recorded_mounts(container, for_dir):
                        readonly=m["readonly"])
 
 
-def cmd_mount(args, passthrough):
-    for_dir = _realdir(args.for_dir)
-    paths = [os.path.realpath(p) for p in args.dirs]
+@main.command()
+@click.option("--for", "for_dir", metavar="DIR", default=None,
+              help="target the containers for DIR (default: current directory)")
+@click.option("--ro/--rw", "readonly", default=True,
+              help="mount read-only (the default) or read-write")
+@click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
+def mount(for_dir, readonly, dirs):
+    """Mount extra directories into a directory's containers."""
+    for_dir = _realdir(for_dir)
+    paths = [os.path.realpath(p) for p in dirs]
 
     # Persist for the directory first, so a later run / another agent (and a
     # recreated container) get the same mounts.
     for path in paths:
-        state.set_mount(for_dir, path, readonly=args.readonly)
+        state.set_mount(for_dir, path, readonly=readonly)
 
     found = False
     for agent, container in _agent_containers(for_dir):
@@ -153,16 +213,21 @@ def cmd_mount(args, passthrough):
                   "starts.", file=sys.stderr)
         for path in paths:
             lxd.add_device(container, path, work_prefix=WORK_PREFIX,
-                           readonly=args.readonly)
+                           readonly=readonly)
     if not found:
         print("No containers exist for this directory yet; the mounts are "
               "recorded and will apply when you next run an agent here.",
               file=sys.stderr)
 
 
-def cmd_unmount(args, passthrough):
-    for_dir = _realdir(args.for_dir)
-    paths = [os.path.realpath(p) for p in args.dirs]
+@main.command()
+@click.option("--for", "for_dir", metavar="DIR", default=None,
+              help="target the containers for DIR (default: current directory)")
+@click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
+def unmount(for_dir, dirs):
+    """Remove extra directory mounts from a directory's containers."""
+    for_dir = _realdir(for_dir)
+    paths = [os.path.realpath(p) for p in dirs]
 
     # Drop from the persistent record so it isn't replayed on the next run.
     for path in paths:
@@ -182,12 +247,14 @@ def cmd_unmount(args, passthrough):
 # upgrade-templates
 # --------------------------------------------------------------------------
 
-def cmd_upgrade_templates(args, passthrough):
-    unknown = [a for a in args.agents if a not in agents.AGENT_NAMES]
-    if unknown:
-        sys.exit(f"Error: unknown agent(s): {', '.join(unknown)}. "
-                 f"Known: {', '.join(agents.AGENT_NAMES)}")
-    targets = args.agents or list(agents.AGENT_NAMES)
+@main.command("upgrade-templates")
+@click.argument("which", nargs=-1, type=AGENT_CHOICE, metavar="[AGENT]...")
+def upgrade_templates(which):
+    """apt upgrade + reinstall the agent in template containers.
+
+    With no arguments, updates all template containers that currently exist.
+    """
+    targets = which or agents.AGENT_NAMES
     updated = skipped = 0
     for agent in targets:
         cfg = agents.get(agent)
@@ -249,11 +316,15 @@ def _print_container(name, state):
         print(f"  mount:  {_fmt_mount(dev)}")
 
 
-def cmd_list(args, passthrough):
+@main.command(name="list")
+@click.option("--for", "for_dir", metavar="DIR", default=None,
+              help="show only the containers for DIR")
+def list_(for_dir):
+    """List aiab containers with their source dir and mounts."""
     states = _container_states()
-    if args.for_dir:
-        for_dir = _realdir(args.for_dir)
-        wanted = {lxd.container_name_for_dir(for_dir, prefix=a)
+    if for_dir:
+        target = _realdir(for_dir)
+        wanted = {lxd.container_name_for_dir(target, prefix=a)
                   for a in agents.AGENT_NAMES}
         names = [n for n in states if n in wanted]
     else:
@@ -262,7 +333,7 @@ def cmd_list(args, passthrough):
         names = [n for n in states if n not in agents.AGENT_NAMES]
 
     if not names:
-        where = f" for {_realdir(args.for_dir)}" if args.for_dir else ""
+        where = f" for {_realdir(for_dir)}" if for_dir else ""
         print(f"No aiab containers{where}.", file=sys.stderr)
         return
 
@@ -274,122 +345,17 @@ def cmd_list(args, passthrough):
 # lxc passthrough
 # --------------------------------------------------------------------------
 
-def cmd_lxc(args, passthrough):
-    # main() splits off a trailing `-- ...` group before argparse; for lxc that
-    # separator is meaningful (e.g. `lxc exec NAME -- cmd`), so put it back.
-    lxc_args = list(args.rest)
-    if passthrough:
-        lxc_args += ["--"] + passthrough
-    result = subprocess.run(lxd.lxc_argv(lxc_args))
+@main.command(
+    context_settings=dict(ignore_unknown_options=True,
+                          allow_interspersed_args=False),
+    add_help_option=False,
+)
+@click.argument("rest", nargs=-1, type=click.UNPROCESSED)
+def lxc(rest):
+    """Run lxc against the 'aiab' project (e.g. aiab lxc list)."""
+    result = subprocess.run(lxd.lxc_argv(list(rest)))
     sys.exit(result.returncode)
 
 
-# --------------------------------------------------------------------------
-# argument parser
-# --------------------------------------------------------------------------
-
-def build_parser():
-    parser = argparse.ArgumentParser(
-        prog="aiab",
-        description="Run coding agents in disposable per-directory LXD "
-                    "containers.")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    agent_names = list(agents.AGENT_NAMES)
-
-    p_run = sub.add_parser(
-        "run", help="run an agent in a container for the current directory")
-    p_run.add_argument("agent", choices=agent_names, help="which agent to run")
-    p_run.add_argument(
-        "--for", dest="for_dir", metavar="DIR", default=None,
-        help="run the agent for DIR (default: current directory)")
-    p_run.add_argument(
-        "--also", metavar="DIR", action="append", default=[],
-        help="also mount DIR (read-only) into the container (repeatable)")
-    p_run.add_argument(
-        "--also-rw", metavar="DIR", action="append", default=[],
-        help="also mount DIR (read-write) into the container (repeatable)")
-    p_run.add_argument(
-        "--shell", action="store_true",
-        help="open an interactive shell instead of running the agent")
-    p_run.set_defaults(func=cmd_run)
-
-    p_remove = sub.add_parser(
-        "remove", help="delete the session container for a directory")
-    p_remove.add_argument("agent", choices=agent_names)
-    p_remove.add_argument(
-        "--for", dest="for_dir", metavar="DIR", default=None,
-        help="target the container for DIR (default: current directory)")
-    p_remove.set_defaults(func=cmd_remove)
-
-    p_mount = sub.add_parser(
-        "mount", help="mount extra directories into a directory's containers")
-    p_mount.add_argument(
-        "--for", dest="for_dir", metavar="DIR", default=None,
-        help="target the containers for DIR (default: current directory)")
-    mode = p_mount.add_mutually_exclusive_group()
-    mode.add_argument("--ro", dest="readonly", action="store_true",
-                      help="mount read-only (the default)")
-    mode.add_argument("--rw", dest="readonly", action="store_false",
-                      help="mount read-write (containers can modify them)")
-    p_mount.set_defaults(readonly=True)
-    p_mount.add_argument("dirs", nargs="+", metavar="DIR",
-                         help="host directories to mount")
-    p_mount.set_defaults(func=cmd_mount)
-
-    p_unmount = sub.add_parser(
-        "unmount", help="remove extra directory mounts from a directory's "
-                        "containers")
-    p_unmount.add_argument(
-        "--for", dest="for_dir", metavar="DIR", default=None,
-        help="target the containers for DIR (default: current directory)")
-    p_unmount.add_argument("dirs", nargs="+", metavar="DIR",
-                           help="host directories to unmount")
-    p_unmount.set_defaults(func=cmd_unmount)
-
-    p_upgrade = sub.add_parser(
-        "upgrade-templates",
-        help="apt upgrade + reinstall the agent in template containers")
-    p_upgrade.add_argument(
-        "agents", nargs="*", metavar="AGENT", default=[],
-        help=f"template(s) to upgrade: {', '.join(agent_names)} "
-             "(default: all that exist)")
-    p_upgrade.set_defaults(func=cmd_upgrade_templates)
-
-    p_list = sub.add_parser(
-        "list", help="list aiab containers with their source dir and mounts")
-    p_list.add_argument(
-        "--for", dest="for_dir", metavar="DIR", default=None,
-        help="show only the containers for DIR")
-    p_list.set_defaults(func=cmd_list)
-
-    p_lxc = sub.add_parser(
-        "lxc", help=f"run lxc against the '{PROJECT}' project "
-                    "(e.g. aiab lxc list)")
-    p_lxc.add_argument("rest", nargs=argparse.REMAINDER,
-                       help="arguments passed to lxc --project " + PROJECT)
-    p_lxc.set_defaults(func=cmd_lxc)
-
-    return parser
-
-
-def main():
-    # Split off a trailing `-- ...` group up front so subcommand options never
-    # collide with arguments meant for the agent (run) or lxc (lxc).
-    argv = sys.argv[1:]
-    if "--" in argv:
-        i = argv.index("--")
-        head, passthrough = argv[:i], argv[i + 1:]
-    else:
-        head, passthrough = argv, []
-
-    parser = build_parser()
-    args = parser.parse_args(head)
-
-    # Migrate from the old lxd-* layout first, if present: maybe_migrate()
-    # keys off whether the 'aiab' project exists yet, so it must run before
-    # use_project() (which would create that project and defeat the trigger).
-    maybe_migrate()
-    lxd.use_project(PROJECT)
-
-    args.func(args, passthrough)
+if __name__ == "__main__":
+    main()
