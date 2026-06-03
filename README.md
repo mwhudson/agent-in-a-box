@@ -234,8 +234,20 @@ updates; existing session containers are not affected.
 aiab list [--for DIR]
 ```
 
-Lists the `aiab` containers (name, state, addresses, type, snapshots). With
-`--for DIR`, shows only the containers for that project directory.
+Lists the `aiab` session containers, and for each its working-directory source
+mount and any extra mounts (added via `--also`/`--also-rw` or `aiab mount`):
+
+```
+claude-myproj-ab12cd  [RUNNING]
+  source: /home/me/myproj -> /work/myproj
+  mount:  /home/me/ref    -> /work/ref (ro)
+opencode-myproj-ef34gh  [STOPPED]
+  source: /home/me/myproj -> /work/myproj
+```
+
+The bare base/template containers are omitted. With `--for DIR`, shows only the
+containers for that project directory. For the raw LXD view, use `aiab lxc
+list`.
 
 ### aiab lxc
 

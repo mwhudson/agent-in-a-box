@@ -179,13 +179,68 @@ def cmd_upgrade_templates(args, passthrough):
 # list
 # --------------------------------------------------------------------------
 
+def _container_states():
+    """Return a {name: state} map for every instance in the project."""
+    result = subprocess.run(
+        lxd.lxc_argv(["list", "--format=csv", "--columns=n,s"]),
+        capture_output=True, text=True, check=True)
+    states = {}
+    for line in result.stdout.splitlines():
+        if line.strip():
+            name, _, state = line.partition(",")
+            states[name] = state
+    return states
+
+
+def _fmt_mount(dev):
+    line = f"{dev.get('source', '?')} -> {dev.get('path', '?')}"
+    if str(dev.get("readonly", "false")).lower() == "true":
+        line += " (ro)"
+    return line
+
+
+def _print_container(name, state):
+    devices = lxd._get_devices(name)
+    # The working-directory mount is the dir-* device whose path hash matches
+    # the container name's trailing hash (both derive from the same path; the
+    # name uses md5[:6], the device md5[:8]). Everything else dir-* is an extra.
+    suffix = name.rsplit("-", 1)[-1]
+    source = None
+    extras = []
+    for dev_name, dev in sorted(devices.items()):
+        if dev.get("type") != "disk" or not dev_name.startswith("dir-"):
+            continue
+        if dev_name[4:10] == suffix:
+            source = dev
+        else:
+            extras.append(dev)
+
+    print(f"{name}  [{state}]")
+    print(f"  source: {_fmt_mount(source)}" if source
+          else "  source: (none)")
+    for dev in extras:
+        print(f"  mount:  {_fmt_mount(dev)}")
+
+
 def cmd_list(args, passthrough):
-    names = []
+    states = _container_states()
     if args.for_dir:
         for_dir = _realdir(args.for_dir)
-        names = [lxd.container_name_for_dir(for_dir, prefix=a)
-                 for a in agents.AGENT_NAMES]
-    subprocess.run(lxd.lxc_argv(["list"] + names + ["--columns=ns4tS"]))
+        wanted = {lxd.container_name_for_dir(for_dir, prefix=a)
+                  for a in agents.AGENT_NAMES}
+        names = [n for n in states if n in wanted]
+    else:
+        # Skip the bare base/template containers (named exactly after an agent);
+        # they hold no project mounts.
+        names = [n for n in states if n not in agents.AGENT_NAMES]
+
+    if not names:
+        where = f" for {_realdir(args.for_dir)}" if args.for_dir else ""
+        print(f"No aiab containers{where}.", file=sys.stderr)
+        return
+
+    for name in sorted(names):
+        _print_container(name, states[name])
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +326,8 @@ def build_parser():
              "(default: all that exist)")
     p_upgrade.set_defaults(func=cmd_upgrade_templates)
 
-    p_list = sub.add_parser("list", help="list aiab containers")
+    p_list = sub.add_parser(
+        "list", help="list aiab containers with their source dir and mounts")
     p_list.add_argument(
         "--for", dest="for_dir", metavar="DIR", default=None,
         help="show only the containers for DIR")
