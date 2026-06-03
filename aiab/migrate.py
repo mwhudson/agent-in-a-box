@@ -61,8 +61,10 @@ def _migrate():
     # new project (sharing the default project's profiles/images) and move the
     # instances across, then drop the now-empty old project.
     lxd.use_project(PROJECT)
-    _move_instances()
+    # Move the host config dirs first, so the new source paths exist before we
+    # repoint each container's config mount at them in _move_instances().
     _move_config_dirs()
+    _move_instances()
     lxd.run(["lxc", "project", "delete", OLD_PROJECT])
     print(f"  Deleted empty project {OLD_PROJECT}", file=sys.stderr)
     print("Migration complete.\n", file=sys.stderr)
@@ -112,6 +114,11 @@ def _move_instances():
     applies the <agent>-<hash>-<basename> -> <agent>-<basename>-<hash> reorder.
     Instances are stopped first: cross-project moves need a stopped instance,
     and the next `aiab run` restarts the session container anyway.
+
+    Each container's config device bind-mounts the agent's host home dir;
+    _move_config_dirs() relocated that dir, so the device's source is updated
+    to the new path here (all containers share it, having been cloned from the
+    same base).
     """
     result = subprocess.run(
         ["lxc", "--project", OLD_PROJECT, "list", "--format=csv",
@@ -131,3 +138,20 @@ def _move_instances():
             print(f"  Moved {name} -> {PROJECT}:{new}", file=sys.stderr)
         else:
             print(f"  Moved {name} -> project {PROJECT}", file=sys.stderr)
+
+        agent = _agent_for(new)
+        if agent:
+            source = lxd.agent_home_dir(agent)
+            lxd.run(lxd.lxc_argv(["config", "device", "set", new,
+                                  f"{agent}config", f"source={source}"]),
+                    stdout=subprocess.DEVNULL)
+            print(f"  Repointed {new}:{agent}config -> {source}",
+                  file=sys.stderr)
+
+
+def _agent_for(name):
+    """Return the agent a container belongs to, by longest-prefix match."""
+    for agent in sorted(AGENT_NAMES, key=len, reverse=True):
+        if name == agent or name.startswith(agent + "-"):
+            return agent
+    return None
