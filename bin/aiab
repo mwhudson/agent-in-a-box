@@ -14,29 +14,17 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-# lxd-copilot: Run GitHub Copilot CLI in a per-directory 'copilot' LXD
-# container with the current directory (and optionally others) mounted into it.
-#
-# Usage:
-#   lxd-copilot [--also DIR]... [--shell] [--remove] [-- COPILOT_ARGS...]
-#
-# See lxd_ai.py for full details.
+# aiab launcher. Symlink this onto your PATH; it finds the repo (the parent of
+# this script's real directory), puts it on sys.path, and runs the package.
+# Resolving the real path means it works regardless of where the symlink lives.
 
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import lxd_ai
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
-lxd_ai.run_agent(
-    "copilot",
-    command="copilot",
-    install_cmds=[
-        ("Installing Node.js 22 ...",
-         ["bash", "-c",
-          "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
-          " && apt-get install -y -q nodejs"]),
-        ("Installing copilot ...",
-         ["npm", "install", "-g", "@github/copilot"]),
-    ],
-)
+from aiab.cli import main
+
+if __name__ == "__main__":
+    main()
