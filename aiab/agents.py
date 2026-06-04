@@ -24,16 +24,16 @@
 
 import getpass
 import json
-import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 from . import CONTAINER_HOME
 
 # Repo root (the directory containing this package), used to locate the
 # versioned config overlays that ship alongside the code.
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_OR_MODEL = "anthropic/claude-sonnet-4-6"
 
@@ -48,8 +48,8 @@ def _claude_install():
 
 def _ensure_openrouter_config(config_host_dir):
     """Write ~/.claude/settings.json with OpenRouter config if not present."""
-    settings_path = os.path.join(config_host_dir, ".claude", "settings.json")
-    if os.path.exists(settings_path):
+    settings_path = Path(config_host_dir) / ".claude" / "settings.json"
+    if settings_path.exists():
         return
 
     print("OpenRouter config not found — setting up now.", file=sys.stderr)
@@ -61,7 +61,7 @@ def _ensure_openrouter_config(config_host_dir):
 
     model = input(f"Model [{DEFAULT_OR_MODEL}]: ").strip() or DEFAULT_OR_MODEL
 
-    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings = {
         "env": {
             "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
@@ -69,7 +69,7 @@ def _ensure_openrouter_config(config_host_dir):
             "ANTHROPIC_MODEL": model,
         }
     }
-    with open(settings_path, "w") as f:
+    with settings_path.open("w") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
     print(f"Wrote OpenRouter config to {settings_path}", file=sys.stderr)
@@ -84,11 +84,11 @@ def _ensure_opencode_permissive_config(config_host_dir):
     see the directories mounted into it. Written straight into the mounted
     home (no overlay needed) and only when absent, so hand-edits survive.
     """
-    config = os.path.join(config_host_dir, ".config", "opencode", "opencode.json")
-    if os.path.exists(config):
+    config = Path(config_host_dir) / ".config" / "opencode" / "opencode.json"
+    if config.exists():
         return
-    os.makedirs(os.path.dirname(config), exist_ok=True)
-    with open(config, "w") as f:
+    config.parent.mkdir(parents=True, exist_ok=True)
+    with config.open("w") as f:
         json.dump({
             "$schema": "https://opencode.ai/config.json",
             "permission": "allow",
@@ -99,7 +99,7 @@ def _ensure_opencode_permissive_config(config_host_dir):
 
 def _overlays(*pairs):
     """Build (host_path, container_path) overlay pairs rooted at REPO_ROOT."""
-    return [(os.path.join(REPO_ROOT, src), dst) for src, dst in pairs]
+    return [(REPO_ROOT / src, dst) for src, dst in pairs]
 
 
 @dataclass

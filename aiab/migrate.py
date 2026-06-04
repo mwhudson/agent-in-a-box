@@ -25,11 +25,11 @@
 # sees the old layout. It is keyed solely off the project pair, so once 'aiab'
 # exists it does nothing.
 
-import os
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from . import PROJECT
 from . import lxd
@@ -71,14 +71,14 @@ def _migrate():
 
 
 def _move_config_dirs():
-    base = os.path.expanduser("~/.local/share")
-    new_root = os.path.join(base, PROJECT)
+    base = Path.home() / ".local" / "share"
+    new_root = base / PROJECT
     for agent in AGENT_NAMES:
-        old = os.path.join(base, f"lxd-{agent}")
-        new = os.path.join(new_root, agent)
-        if os.path.isdir(old) and not os.path.exists(new):
-            os.makedirs(new_root, exist_ok=True)
-            shutil.move(old, new)
+        old = base / f"lxd-{agent}"
+        new = new_root / agent
+        if old.is_dir() and not new.exists():
+            new_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old), str(new))
             print(f"  Moved config {old} -> {new}", file=sys.stderr)
 
 

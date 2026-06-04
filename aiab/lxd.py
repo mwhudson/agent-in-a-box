@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -88,7 +89,7 @@ def agent_home_dir(agent):
     need to pre-seed config (e.g. a default settings file) write into here
     before launching the agent.
     """
-    return os.path.expanduser(f"~/.local/share/aiab/{agent}/home")
+    return Path.home() / ".local" / "share" / "aiab" / agent / "home"
 
 
 def container_name_for_dir(path, prefix):
@@ -98,13 +99,14 @@ def container_name_for_dir(path, prefix):
     completion keys off the memorable part, with a short path hash appended to
     disambiguate same-named directories in different locations.
     """
-    h = hashlib.md5(path.encode()).hexdigest()[:6]
-    basename = re.sub(r'[^a-z0-9]+', '-', os.path.basename(path).lower()).strip('-')
+    path = Path(path)
+    h = hashlib.md5(str(path).encode()).hexdigest()[:6]
+    basename = re.sub(r'[^a-z0-9]+', '-', path.name.lower()).strip('-')
     return f"{prefix}-{basename[:49]}-{h}"
 
 
 def _device_name(path):
-    digest = hashlib.md5(path.encode()).hexdigest()[:8]
+    digest = hashlib.md5(os.fspath(path).encode()).hexdigest()[:8]
     return f"dir-{digest}"
 
 
@@ -127,6 +129,9 @@ def get_device_paths(container):
 
 
 def add_device(container, host_path, work_prefix=None, readonly=False):
+    # The source is handed to lxc and compared against the strings it reports
+    # in `config show`, so normalise to a plain string up front.
+    host_path = os.fspath(host_path)
     name = _device_name(host_path)
 
     # If the device is already configured for this host path, reuse its
@@ -151,7 +156,7 @@ def add_device(container, host_path, work_prefix=None, readonly=False):
     if work_prefix is None:
         container_path = host_path
     else:
-        base = os.path.basename(host_path)
+        base = Path(host_path).name
         candidate = f"{work_prefix}/{base}"
         occupied = get_device_paths(container)
         if candidate in occupied:
@@ -199,6 +204,9 @@ def add_config_overlay(container, host_path, container_path, container_user=0):
     sessions, and uses a 'cfg-' prefix so remove_all_dir_devices leaves it
     alone.
     """
+    # host_path is handed to lxc / compared against config-show output; the
+    # container_path is a path *inside* the container (always POSIX).
+    host_path = os.fspath(host_path)
     name = "cfg-" + hashlib.md5(container_path.encode()).hexdigest()[:8]
     devices = _get_devices(container)
     existing = devices.get(name)
@@ -208,7 +216,7 @@ def add_config_overlay(container, host_path, container_path, container_user=0):
     # Create the mountpoint's parent dirs as container_user first. Otherwise
     # LXD creates any missing parents as container root, which falls outside
     # the idmap and shows up unreadable on the host.
-    parent = os.path.dirname(container_path)
+    parent = str(PurePosixPath(container_path).parent)
     if parent and parent != "/" and container_user != 0:
         subprocess.run(
             lxc_argv(["exec", container,
@@ -286,7 +294,7 @@ def setup_container(container, config_host_dir, config_container_path,
 
     # Mount a dedicated config directory for persistent authentication.
     # On first use the agent will prompt for credentials inside the container.
-    os.makedirs(config_host_dir, exist_ok=True)
+    Path(config_host_dir).mkdir(parents=True, exist_ok=True)
     run(lxc_argv(["config", "device", "add", container, config_device_name,
                   "disk", f"source={config_host_dir}",
                   f"path={config_container_path}"]),
@@ -381,11 +389,13 @@ def add_wayland_socket(container, container_user):
               file=sys.stderr)
         return []
 
-    socket_host = os.path.join(xdg_runtime_dir, wayland_display)
-    if not os.path.exists(socket_host):
-        print(f"Warning: Wayland socket {socket_host} not found; "
+    socket_path = Path(xdg_runtime_dir) / wayland_display
+    if not socket_path.exists():
+        print(f"Warning: Wayland socket {socket_path} not found; "
               "skipping Wayland passthrough", file=sys.stderr)
         return []
+    # Handed to lxc and mirrored at the same path inside the container.
+    socket_host = str(socket_path)
 
     # Mirror the socket at the same path inside the container so that
     # XDG_RUNTIME_DIR and WAYLAND_DISPLAY need no adjustment.

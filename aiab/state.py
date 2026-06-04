@@ -27,37 +27,43 @@
 #   { "<dir real path>": [ {"source": "<host path>", "readonly": bool}, ... ] }
 
 import json
-import os
+from pathlib import Path
 
-_PATH = os.path.expanduser("~/.local/share/aiab/mounts.json")
+_PATH = Path.home() / ".local" / "share" / "aiab" / "mounts.json"
 
 
 def _load():
     try:
-        with open(_PATH) as f:
+        with _PATH.open() as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
 
 def _save(data):
-    os.makedirs(os.path.dirname(_PATH), exist_ok=True)
-    tmp = _PATH + ".tmp"
-    with open(tmp, "w") as f:
+    _PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PATH.with_name(_PATH.name + ".tmp")
+    with tmp.open("w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
-    os.replace(tmp, _PATH)
+    tmp.replace(_PATH)
+
+
+# Keys and sources are stored (and compared) as resolved path *strings*, so the
+# JSON stays human-readable and round-trips through json.load as plain str.
+def _key(path):
+    return str(Path(path).resolve())
 
 
 def get_mounts(directory):
     """Return the recorded mounts for a directory as [{source, readonly}]."""
-    return _load().get(os.path.realpath(directory), [])
+    return _load().get(_key(directory), [])
 
 
 def set_mount(directory, source, readonly):
     """Record a mount for a directory, or update its mode if already present."""
-    key = os.path.realpath(directory)
-    source = os.path.realpath(source)
+    key = _key(directory)
+    source = _key(source)
     data = _load()
     mounts = data.get(key, [])
     for m in mounts:
@@ -72,8 +78,8 @@ def set_mount(directory, source, readonly):
 
 def remove_mount(directory, source):
     """Drop a recorded mount for a directory. Return True if it was present."""
-    key = os.path.realpath(directory)
-    source = os.path.realpath(source)
+    key = _key(directory)
+    source = _key(source)
     data = _load()
     mounts = data.get(key, [])
     kept = [m for m in mounts if m["source"] != source]

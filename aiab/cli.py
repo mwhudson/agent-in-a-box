@@ -19,9 +19,9 @@
 # upgrade-templates, list, lxc). The engine lives in aiab.lxd and the per-agent
 # data in aiab.agents; this module just parses arguments and orchestrates.
 
-import os
 import subprocess
 import sys
+from pathlib import Path
 
 import click
 
@@ -37,7 +37,7 @@ AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
 
 def _realdir(path):
-    return os.path.realpath(path) if path else os.getcwd()
+    return Path(path).resolve() if path else Path.cwd()
 
 
 def _setup():
@@ -132,7 +132,7 @@ def run(agent, for_dir, also, also_rw, shell, agent_args):
     _apply_recorded_mounts(session, for_dir)
 
     for host_path, overlay_path in cfg.overlays:
-        if os.path.exists(host_path):
+        if host_path.exists():
             lxd.add_config_overlay(session, host_path, overlay_path,
                                    container_user=CONTAINER_USER)
 
@@ -180,7 +180,7 @@ def _apply_recorded_mounts(container, for_dir):
     container still comes up.
     """
     for m in state.get_mounts(for_dir):
-        if not os.path.isdir(m["source"]):
+        if not Path(m["source"]).is_dir():
             print(f"Warning: recorded mount {m['source']} not found; skipping",
                   file=sys.stderr)
             continue
@@ -197,7 +197,7 @@ def _apply_recorded_mounts(container, for_dir):
 def mount(for_dir, readonly, dirs):
     """Mount extra directories into a directory's containers."""
     for_dir = _realdir(for_dir)
-    paths = [os.path.realpath(p) for p in dirs]
+    paths = [Path(p).resolve() for p in dirs]
 
     # Persist for the directory first, so a later run / another agent (and a
     # recreated container) get the same mounts.
@@ -227,7 +227,7 @@ def mount(for_dir, readonly, dirs):
 def unmount(for_dir, dirs):
     """Remove extra directory mounts from a directory's containers."""
     for_dir = _realdir(for_dir)
-    paths = [os.path.realpath(p) for p in dirs]
+    paths = [Path(p).resolve() for p in dirs]
 
     # Drop from the persistent record so it isn't replayed on the next run.
     for path in paths:
