@@ -26,13 +26,29 @@
 # State is a single JSON file:
 #   { "<dir real path>": [ {"source": "<host path>", "readonly": bool}, ... ] }
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import TypedDict
+
+from . import StrPath
 
 _PATH = Path.home() / ".local" / "share" / "aiab" / "mounts.json"
 
 
-def _load():
+class Mount(TypedDict):
+    """One recorded mount: a host source path and whether it's read-only."""
+
+    source: str
+    readonly: bool
+
+
+# The whole state file: project dir (resolved path string) -> its mounts.
+State = dict[str, list[Mount]]
+
+
+def _load() -> State:
     try:
         with _PATH.open() as f:
             return json.load(f)
@@ -40,7 +56,7 @@ def _load():
         return {}
 
 
-def _save(data):
+def _save(data: State) -> None:
     _PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _PATH.with_name(_PATH.name + ".tmp")
     with tmp.open("w") as f:
@@ -51,16 +67,16 @@ def _save(data):
 
 # Keys and sources are stored (and compared) as resolved path *strings*, so the
 # JSON stays human-readable and round-trips through json.load as plain str.
-def _key(path):
+def _key(path: StrPath) -> str:
     return str(Path(path).resolve())
 
 
-def get_mounts(directory):
+def get_mounts(directory: StrPath) -> list[Mount]:
     """Return the recorded mounts for a directory as [{source, readonly}]."""
     return _load().get(_key(directory), [])
 
 
-def set_mount(directory, source, readonly):
+def set_mount(directory: StrPath, source: StrPath, readonly: bool) -> None:
     """Record a mount for a directory, or update its mode if already present."""
     key = _key(directory)
     source = _key(source)
@@ -76,7 +92,7 @@ def set_mount(directory, source, readonly):
     _save(data)
 
 
-def remove_mount(directory, source):
+def remove_mount(directory: StrPath, source: StrPath) -> bool:
     """Drop a recorded mount for a directory. Return True if it was present."""
     key = _key(directory)
     source = _key(source)

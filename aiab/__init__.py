@@ -19,17 +19,22 @@
 # one-time migration from the old lxd-* tools (migrate), and the command-line
 # front end (cli). The `bin/aiab` launcher just imports cli.main().
 #
-# Only plain constants live here so that submodules can import them without
-# triggering a circular import through this __init__.
+# Only plain constants (and a shared type alias) live here so that submodules
+# can import them without triggering a circular import through this __init__.
+
+import os
+
+# Anything accepted where a filesystem path is expected: a str or a Path.
+StrPath = str | os.PathLike[str]
 
 # LXD project that all aiab containers live in. Keeps them grouped and out of
 # the user's 'default' project.
-PROJECT = "aiab"
+PROJECT: str = "aiab"
 
 # Conventions shared by every agent container. The working directory (and any
 # extra mounts) land under WORK_PREFIX; the container runs as CONTAINER_USER
 # with CONTAINER_HOME as its home, mapped to the host user via raw.idmap so
 # files created in mounts are owned by the host user.
-CONTAINER_USER = 1000
-CONTAINER_HOME = "/home/ubuntu"
-WORK_PREFIX = "/work"
+CONTAINER_USER: int = 1000
+CONTAINER_HOME: str = "/home/ubuntu"
+WORK_PREFIX: str = "/work"

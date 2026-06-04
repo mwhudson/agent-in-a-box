@@ -25,6 +25,8 @@
 # sees the old layout. It is keyed solely off the project pair, so once 'aiab'
 # exists it does nothing.
 
+from __future__ import annotations
+
 import re
 import shutil
 import sys
@@ -34,13 +36,13 @@ from . import PROJECT
 from .agents import AGENT_NAMES
 from .lxd import Lxd, agent_home_dir
 
-OLD_PROJECT = "lxd-ai"
+OLD_PROJECT: str = "lxd-ai"
 
 # <hash> is the 6-hex md5 prefix produced by container_name_for_dir.
-_HASH_RE = re.compile(r"[0-9a-f]{6}")
+_HASH_RE: re.Pattern[str] = re.compile(r"[0-9a-f]{6}")
 
 
-def maybe_migrate():
+def maybe_migrate() -> None:
     """Migrate from the old lxd-* layout if (and only if) it's present.
 
     Trigger: the old 'lxd-ai' project exists and the new 'aiab' project does
@@ -53,9 +55,11 @@ def maybe_migrate():
     _migrate()
 
 
-def _migrate():
-    print(f"Migrating from the old '{OLD_PROJECT}' layout to '{PROJECT}' ...",
-          file=sys.stderr)
+def _migrate() -> None:
+    print(
+        f"Migrating from the old '{OLD_PROJECT}' layout to '{PROJECT}' ...",
+        file=sys.stderr,
+    )
     # An LXD project can't be renamed while it holds instances, so create the
     # new project (sharing the default project's profiles/images) and move the
     # instances across, then drop the now-empty old project.
@@ -70,7 +74,7 @@ def _migrate():
     print("Migration complete.\n", file=sys.stderr)
 
 
-def _move_config_dirs():
+def _move_config_dirs() -> None:
     base = Path.home() / ".local" / "share"
     new_root = base / PROJECT
     for agent in AGENT_NAMES:
@@ -82,7 +86,7 @@ def _move_config_dirs():
             print(f"  Moved config {old} -> {new}", file=sys.stderr)
 
 
-def _new_container_name(name):
+def _new_container_name(name: str) -> str | None:
     """Reorder an old session-container name to the new scheme.
 
     <agent>-<hash>-<basename>  ->  <agent>-<basename>-<hash>
@@ -98,7 +102,7 @@ def _new_container_name(name):
         prefix = agent + "-"
         if not name.startswith(prefix):
             continue
-        rest = name[len(prefix):]
+        rest = name[len(prefix) :]
         h, sep, basename = rest.partition("-")
         if not sep or not _HASH_RE.fullmatch(h):
             return None  # not our hash-prefixed scheme; leave alone
@@ -106,7 +110,7 @@ def _new_container_name(name):
     return None
 
 
-def _move_instances(new):
+def _move_instances(new: Lxd) -> None:
     """Move every instance from the old project into the new one.
 
     `lxc move <src> <dst> --target-project` both moves the instance across
@@ -135,11 +139,13 @@ def _move_instances(new):
         if agent:
             source = agent_home_dir(agent)
             new.container(new_name).set_device_source(f"{agent}config", source)
-            print(f"  Repointed {new_name}:{agent}config -> {source}",
-                  file=sys.stderr)
+            print(
+                f"  Repointed {new_name}:{agent}config -> {source}",
+                file=sys.stderr,
+            )
 
 
-def _agent_for(name):
+def _agent_for(name: str) -> str | None:
     """Return the agent a container belongs to, by longest-prefix match."""
     for agent in sorted(AGENT_NAMES, key=len, reverse=True):
         if name == agent or name.startswith(agent + "-"):

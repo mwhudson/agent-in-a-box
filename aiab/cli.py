@@ -21,9 +21,13 @@
 # aiab.agents; this module just parses arguments and orchestrates. The Lxd
 # connection is built once per invocation and passed to commands via ctx.obj.
 
+from __future__ import annotations
+
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -34,12 +38,12 @@ from . import provision
 from . import state
 from .migrate import maybe_migrate
 
-CONFIG_CONTAINER_PATH = CONTAINER_HOME  # agent home dir is mounted here
+CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
 
-def _realdir(path):
+def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
 
 
@@ -51,7 +55,8 @@ class _Command(click.Command):
     creation. Migration must run before ensure_project() — it keys off whether
     the 'aiab' project exists yet, and ensure_project() would create it.
     """
-    def invoke(self, ctx):
+
+    def invoke(self, ctx: click.Context) -> Any:
         maybe_migrate()
         conn = lxd.Lxd(PROJECT)
         conn.ensure_project()
@@ -64,7 +69,7 @@ class _Group(click.Group):
 
 
 @click.group(cls=_Group)
-def main():
+def main() -> None:
     """Run coding agents in disposable per-directory LXD containers."""
 
 
@@ -72,19 +77,46 @@ def main():
 # run
 # --------------------------------------------------------------------------
 
+
 @main.command()
 @click.argument("agent", type=AGENT_CHOICE)
-@click.option("--for", "for_dir", metavar="DIR", default=None,
-              help="run the agent for DIR (default: current directory)")
-@click.option("--also", "also", metavar="DIR", multiple=True,
-              help="also mount DIR (read-only) into the container (repeatable)")
-@click.option("--also-rw", "also_rw", metavar="DIR", multiple=True,
-              help="also mount DIR (read-write) into the container (repeatable)")
-@click.option("--shell", is_flag=True,
-              help="open an interactive shell instead of running the agent")
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="run the agent for DIR (default: current directory)",
+)
+@click.option(
+    "--also",
+    "also",
+    metavar="DIR",
+    multiple=True,
+    help="also mount DIR (read-only) into the container (repeatable)",
+)
+@click.option(
+    "--also-rw",
+    "also_rw",
+    metavar="DIR",
+    multiple=True,
+    help="also mount DIR (read-write) into the container (repeatable)",
+)
+@click.option(
+    "--shell",
+    is_flag=True,
+    help="open an interactive shell instead of running the agent",
+)
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_obj
-def run(conn, agent, for_dir, also, also_rw, shell, agent_args):
+def run(
+    conn: lxd.Lxd,
+    agent: str,
+    for_dir: str | None,
+    also: tuple[str, ...],
+    also_rw: tuple[str, ...],
+    shell: bool,
+    agent_args: tuple[str, ...],
+) -> None:
     """Run an agent in a container for a directory.
 
     Anything after `--` is passed straight through to the agent.
@@ -96,9 +128,9 @@ def run(conn, agent, for_dir, also, also_rw, shell, agent_args):
     if cfg.prepare:
         cfg.prepare(config_host_dir)
 
-    for_dir = _realdir(for_dir)
+    work_dir = _realdir(for_dir)
     base = conn.container(agent)
-    session = conn.container_for_dir(for_dir, agent)
+    session = conn.container_for_dir(work_dir, agent)
 
     if not base.exists():
         provision.provision_base(
@@ -119,28 +151,33 @@ def run(conn, agent, for_dir, also, also_rw, shell, agent_args):
             cmd_args = ["--dangerously-skip-permissions"] + cmd_args
         run_cmd = [cfg.command] + cmd_args
 
-    container_cwd = session.add_device(for_dir, work_prefix=WORK_PREFIX)
+    container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
 
     # Record any run-time --also mounts for this directory, then (re)apply
     # every mount recorded for it — so a freshly created or cloned container,
     # and other agents started here later, all pick up the same set.
     for d in also:
-        state.set_mount(for_dir, d, readonly=True)
+        state.set_mount(work_dir, d, readonly=True)
     for d in also_rw:
-        state.set_mount(for_dir, d, readonly=False)
-    _apply_recorded_mounts(session, for_dir)
+        state.set_mount(work_dir, d, readonly=False)
+    _apply_recorded_mounts(session, work_dir)
 
     for host_path, overlay_path in cfg.overlays:
         if host_path.exists():
-            session.add_config_overlay(host_path, overlay_path,
-                                       container_user=CONTAINER_USER)
+            session.add_config_overlay(
+                host_path, overlay_path, container_user=CONTAINER_USER
+            )
 
     env = {"HOME": CONTAINER_HOME}
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
-    rc = session.run_interactive(run_cmd, cwd=container_cwd,
-                                 user=CONTAINER_USER, group=CONTAINER_USER,
-                                 env=env)
+    rc = session.run_interactive(
+        run_cmd,
+        cwd=container_cwd,
+        user=CONTAINER_USER,
+        group=CONTAINER_USER,
+        env=env,
+    )
     sys.exit(rc)
 
 
@@ -148,12 +185,18 @@ def run(conn, agent, for_dir, also, also_rw, shell, agent_args):
 # remove
 # --------------------------------------------------------------------------
 
+
 @main.command()
 @click.argument("agent", type=AGENT_CHOICE)
-@click.option("--for", "for_dir", metavar="DIR", default=None,
-              help="target the container for DIR (default: current directory)")
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="target the container for DIR (default: current directory)",
+)
 @click.pass_obj
-def remove(conn, agent, for_dir):
+def remove(conn: lxd.Lxd, agent: str, for_dir: str | None) -> None:
     """Delete the session container for a directory.
 
     The base/template container is left intact, so the next run clones a fresh
@@ -172,7 +215,10 @@ def remove(conn, agent, for_dir):
 # mount / unmount
 # --------------------------------------------------------------------------
 
-def _agent_containers(conn, for_dir):
+
+def _agent_containers(
+    conn: lxd.Lxd, for_dir: Path
+) -> Iterator[tuple[str, lxd.Container]]:
     """Yield (agent, Container) for every existing agent container of a dir."""
     for agent in agents.AGENT_NAMES:
         container = conn.container_for_dir(for_dir, agent)
@@ -180,7 +226,7 @@ def _agent_containers(conn, for_dir):
             yield agent, container
 
 
-def _apply_recorded_mounts(container, for_dir):
+def _apply_recorded_mounts(container: lxd.Container, for_dir: Path) -> None:
     """Add every mount recorded for for_dir to a container.
 
     Skips (with a warning) any whose source no longer exists, so a recreated
@@ -188,62 +234,84 @@ def _apply_recorded_mounts(container, for_dir):
     """
     for m in state.get_mounts(for_dir):
         if not Path(m["source"]).is_dir():
-            print(f"Warning: recorded mount {m['source']} not found; skipping",
-                  file=sys.stderr)
+            print(
+                f"Warning: recorded mount {m['source']} not found; skipping",
+                file=sys.stderr,
+            )
             continue
-        container.add_device(m["source"], work_prefix=WORK_PREFIX,
-                             readonly=m["readonly"])
+        container.add_device(
+            m["source"], work_prefix=WORK_PREFIX, readonly=m["readonly"]
+        )
 
 
 @main.command()
-@click.option("--for", "for_dir", metavar="DIR", default=None,
-              help="target the containers for DIR (default: current directory)")
-@click.option("--ro/--rw", "readonly", default=True,
-              help="mount read-only (the default) or read-write")
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="target the containers for DIR (default: current directory)",
+)
+@click.option(
+    "--ro/--rw",
+    "readonly",
+    default=True,
+    help="mount read-only (the default) or read-write",
+)
 @click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
 @click.pass_obj
-def mount(conn, for_dir, readonly, dirs):
+def mount(
+    conn: lxd.Lxd, for_dir: str | None, readonly: bool, dirs: tuple[str, ...]
+) -> None:
     """Mount extra directories into a directory's containers."""
-    for_dir = _realdir(for_dir)
+    target = _realdir(for_dir)
     paths = [Path(p).resolve() for p in dirs]
 
     # Persist for the directory first, so a later run / another agent (and a
     # recreated container) get the same mounts.
     for path in paths:
-        state.set_mount(for_dir, path, readonly=readonly)
+        state.set_mount(target, path, readonly=readonly)
 
     found = False
-    for agent, container in _agent_containers(conn, for_dir):
+    for agent, container in _agent_containers(conn, target):
         found = True
         print(f"=== {agent} ({container.name}) ===", file=sys.stderr)
         if container.status() != "RUNNING":
-            print("Note: container is not running; mounts apply when it next "
-                  "starts.", file=sys.stderr)
+            print(
+                "Note: container is not running; mounts apply when it next " "starts.",
+                file=sys.stderr,
+            )
         for path in paths:
-            container.add_device(path, work_prefix=WORK_PREFIX,
-                                 readonly=readonly)
+            container.add_device(path, work_prefix=WORK_PREFIX, readonly=readonly)
     if not found:
-        print("No containers exist for this directory yet; the mounts are "
-              "recorded and will apply when you next run an agent here.",
-              file=sys.stderr)
+        print(
+            "No containers exist for this directory yet; the mounts are "
+            "recorded and will apply when you next run an agent here.",
+            file=sys.stderr,
+        )
 
 
 @main.command()
-@click.option("--for", "for_dir", metavar="DIR", default=None,
-              help="target the containers for DIR (default: current directory)")
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="target the containers for DIR (default: current directory)",
+)
 @click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
 @click.pass_obj
-def unmount(conn, for_dir, dirs):
+def unmount(conn: lxd.Lxd, for_dir: str | None, dirs: tuple[str, ...]) -> None:
     """Remove extra directory mounts from a directory's containers."""
-    for_dir = _realdir(for_dir)
+    target = _realdir(for_dir)
     paths = [Path(p).resolve() for p in dirs]
 
     # Drop from the persistent record so it isn't replayed on the next run.
     for path in paths:
-        if not state.remove_mount(for_dir, path):
+        if not state.remove_mount(target, path):
             print(f"Not recorded: {path}", file=sys.stderr)
 
-    for agent, container in _agent_containers(conn, for_dir):
+    for agent, container in _agent_containers(conn, target):
         print(f"=== {agent} ({container.name}) ===", file=sys.stderr)
         for path in paths:
             if container.remove_dir_device(path):
@@ -256,10 +324,11 @@ def unmount(conn, for_dir, dirs):
 # upgrade-templates
 # --------------------------------------------------------------------------
 
+
 @main.command("upgrade-templates")
 @click.argument("which", nargs=-1, type=AGENT_CHOICE, metavar="[AGENT]...")
 @click.pass_obj
-def upgrade_templates(conn, which):
+def upgrade_templates(conn: lxd.Lxd, which: tuple[str, ...]) -> None:
     """apt upgrade + reinstall the agent in template containers.
 
     With no arguments, updates all template containers that currently exist.
@@ -283,14 +352,15 @@ def upgrade_templates(conn, which):
 # list
 # --------------------------------------------------------------------------
 
-def _fmt_mount(dev):
+
+def _fmt_mount(dev: dict[str, str]) -> str:
     line = f"{dev.get('source', '?')} -> {dev.get('path', '?')}"
     if str(dev.get("readonly", "false")).lower() == "true":
         line += " (ro)"
     return line
 
 
-def _print_container(conn, name, status):
+def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
     devices = conn.container(name).devices()
     # The working-directory mount is the dir-* device whose path hash matches
     # the container name's trailing hash (both derive from the same path; the
@@ -307,23 +377,26 @@ def _print_container(conn, name, status):
             extras.append(dev)
 
     print(f"{name}  [{status}]")
-    print(f"  source: {_fmt_mount(source)}" if source
-          else "  source: (none)")
+    print(f"  source: {_fmt_mount(source)}" if source else "  source: (none)")
     for dev in extras:
         print(f"  mount:  {_fmt_mount(dev)}")
 
 
 @main.command(name="list")
-@click.option("--for", "for_dir", metavar="DIR", default=None,
-              help="show only the containers for DIR")
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="show only the containers for DIR",
+)
 @click.pass_obj
-def list_(conn, for_dir):
+def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
     """List aiab containers with their source dir and mounts."""
     states = conn.instances()
     if for_dir:
         target = _realdir(for_dir)
-        wanted = {conn.container_for_dir(target, a).name
-                  for a in agents.AGENT_NAMES}
+        wanted = {conn.container_for_dir(target, a).name for a in agents.AGENT_NAMES}
         names = [n for n in states if n in wanted]
     else:
         # Skip the bare base/template containers (named exactly after an agent);
@@ -343,14 +416,14 @@ def list_(conn, for_dir):
 # lxc passthrough
 # --------------------------------------------------------------------------
 
+
 @main.command(
-    context_settings=dict(ignore_unknown_options=True,
-                          allow_interspersed_args=False),
+    context_settings=dict(ignore_unknown_options=True, allow_interspersed_args=False),
     add_help_option=False,
 )
 @click.argument("rest", nargs=-1, type=click.UNPROCESSED)
 @click.pass_obj
-def lxc(conn, rest):
+def lxc(conn: lxd.Lxd, rest: tuple[str, ...]) -> None:
     """Run lxc against the 'aiab' project (e.g. aiab lxc list)."""
     result = subprocess.run(conn.argv(list(rest)))
     sys.exit(result.returncode)

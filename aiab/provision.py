@@ -20,24 +20,53 @@
 # leaves that module a generic LXD wrapper that knows nothing about agents;
 # the per-agent install/upgrade commands come from aiab.agents via the cli.
 
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+from . import StrPath
+from .lxd import Container
 
-def provision_base(container, *, config_host_dir, config_container_path,
-                   config_device_name, install_cmds, container_user=0):
+# An install/upgrade step: a description and the argv to run in the container.
+Step = tuple[str, list[str]]
+
+
+def provision_base(
+    container: Container,
+    *,
+    config_host_dir: StrPath,
+    config_container_path: str,
+    config_device_name: str,
+    install_cmds: list[Step],
+    container_user: int = 0,
+) -> None:
     """Create a base template container, install the agent, then stop it."""
-    _create(container, config_host_dir, config_container_path,
-            config_device_name, install_cmds, container_user)
-    print(f"Stopping base container '{container.name}' (template) ...",
-          file=sys.stderr)
+    _create(
+        container,
+        config_host_dir,
+        config_container_path,
+        config_device_name,
+        install_cmds,
+        container_user,
+    )
+    print(
+        f"Stopping base container '{container.name}' (template) ...",
+        file=sys.stderr,
+    )
     container.stop()
 
 
-def _create(container, config_host_dir, config_container_path,
-            config_device_name, install_cmds, container_user):
+def _create(
+    container: Container,
+    config_host_dir: StrPath,
+    config_container_path: str,
+    config_device_name: str,
+    install_cmds: list[Step],
+    container_user: int,
+) -> None:
     """Create and configure a fresh container, then install the agent.
 
     install_cmds is a list of (description, cmd) pairs where cmd is run via
@@ -46,20 +75,22 @@ def _create(container, config_host_dir, config_container_path,
     uid = os.getuid()
     gid = os.getgid()
 
-    print(f"Creating container '{container.name}' from ubuntu:24.04 ...",
-          file=sys.stderr)
+    print(
+        f"Creating container '{container.name}' from ubuntu:24.04 ...",
+        file=sys.stderr,
+    )
     container.create("ubuntu:24.04")
 
     # Map the host user's UID/GID to the container user so that files created
     # inside mounted directories appear owned by the host user.
     container.set_config(
-        "raw.idmap", f"uid {uid} {container_user}\ngid {gid} {container_user}")
+        "raw.idmap", f"uid {uid} {container_user}\ngid {gid} {container_user}"
+    )
 
     # Mount a dedicated config directory for persistent authentication.
     # On first use the agent will prompt for credentials inside the container.
     Path(config_host_dir).mkdir(parents=True, exist_ok=True)
-    container.add_config_dir(config_host_dir, config_container_path,
-                             config_device_name)
+    container.add_config_dir(config_host_dir, config_container_path, config_device_name)
     print(f"Container config: {config_host_dir}", file=sys.stderr)
 
     print(f"Starting container '{container.name}' ...", file=sys.stderr)
@@ -70,8 +101,7 @@ def _create(container, config_host_dir, config_container_path,
 
     print("Updating packages ...", file=sys.stderr)
     container.exec(["apt-get", "update", "-q"], stdout=subprocess.DEVNULL)
-    container.exec(["apt-get", "dist-upgrade", "-y", "-q"],
-                   stdout=subprocess.DEVNULL)
+    container.exec(["apt-get", "dist-upgrade", "-y", "-q"], stdout=subprocess.DEVNULL)
 
     for description, cmd in install_cmds:
         print(description, file=sys.stderr)
@@ -80,7 +110,9 @@ def _create(container, config_host_dir, config_container_path,
     print(f"Container '{container.name}' is ready.\n", file=sys.stderr)
 
 
-def update_template(container, *, update_cmds, container_user=0):
+def update_template(
+    container: Container, *, update_cmds: list[Step], container_user: int = 0
+) -> bool:
     """Update an existing template container and stop it again.
 
     Starts the container, runs apt-get update/dist-upgrade, then runs
@@ -88,8 +120,10 @@ def update_template(container, *, update_cmds, container_user=0):
     (and prints a note) if the container does not exist.
     """
     if not container.exists():
-        print(f"Skipping '{container.name}': container does not exist.",
-              file=sys.stderr)
+        print(
+            f"Skipping '{container.name}': container does not exist.",
+            file=sys.stderr,
+        )
         return False
 
     if container.status() != "RUNNING":
@@ -98,8 +132,7 @@ def update_template(container, *, update_cmds, container_user=0):
 
     print("Updating packages ...", file=sys.stderr)
     container.exec(["apt-get", "update", "-q"], stdout=subprocess.DEVNULL)
-    container.exec(["apt-get", "dist-upgrade", "-y", "-q"],
-                   stdout=subprocess.DEVNULL)
+    container.exec(["apt-get", "dist-upgrade", "-y", "-q"], stdout=subprocess.DEVNULL)
 
     for description, cmd in update_cmds:
         print(description, file=sys.stderr)

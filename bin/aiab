@@ -24,7 +24,7 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-from aiab.cli import main
+from aiab.cli import main  # noqa: E402  (must follow the sys.path insert above)
 
 if __name__ == "__main__":
     main()

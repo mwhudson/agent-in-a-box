@@ -23,21 +23,26 @@
 # LXD wrapper that knows nothing about agents. The cli module orchestrates it
 # all; the agents module supplies the per-agent data.
 
+from __future__ import annotations
+
 import hashlib
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import yaml
 
+from . import StrPath
 
-def run(cmd, **kwargs):
+
+def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kwargs)
 
 
-def agent_home_dir(agent):
+def agent_home_dir(agent: str) -> Path:
     """Host dir bind-mounted as the agent container's home (/home/ubuntu).
 
     Holds the agent's persistent config/auth between sessions. Callers that
@@ -47,7 +52,7 @@ def agent_home_dir(agent):
     return Path.home() / ".local" / "share" / "aiab" / agent / "home"
 
 
-def container_name_for_dir(path, prefix):
+def container_name_for_dir(path: StrPath, prefix: str) -> str:
     """Return a stable, human-readable LXD container name for a directory.
 
     Shaped <prefix>-<basename>-<hash>: the basename comes first so tab
@@ -56,11 +61,11 @@ def container_name_for_dir(path, prefix):
     """
     path = Path(path)
     h = hashlib.md5(str(path).encode()).hexdigest()[:6]
-    basename = re.sub(r'[^a-z0-9]+', '-', path.name.lower()).strip('-')
+    basename = re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-")
     return f"{prefix}-{basename[:49]}-{h}"
 
 
-def _device_name(path):
+def _device_name(path: StrPath) -> str:
     digest = hashlib.md5(os.fspath(path).encode()).hexdigest()[:8]
     return f"dir-{digest}"
 
@@ -75,25 +80,26 @@ class Lxd:
     new projects side by side.
     """
 
-    def __init__(self, project):
+    def __init__(self, project: str) -> None:
         self.project = project
 
-    def argv(self, args):
+    def argv(self, args: list[str]) -> list[str]:
         """Build an `lxc --project <project> ...` argv."""
         return ["lxc", "--project", self.project, *args]
 
-    def run(self, args, **kwargs):
+    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         """Run an `lxc` command in this project (checked)."""
         return run(self.argv(args), **kwargs)
 
-    def project_exists(self):
+    def project_exists(self) -> bool:
         r = subprocess.run(
             ["lxc", "project", "show", self.project],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         return r.returncode == 0
 
-    def ensure_project(self):
+    def ensure_project(self) -> None:
         """Create the project if missing.
 
         Configured to share the default project's profiles and images so
@@ -102,25 +108,40 @@ class Lxd:
         """
         if self.project_exists():
             return
-        print(f"Creating LXD project '{self.project}' "
-              "(sharing default profiles and images) ...", file=sys.stderr)
-        run(["lxc", "project", "create", self.project,
-             "-c", "features.images=false",
-             "-c", "features.profiles=false"])
+        print(
+            f"Creating LXD project '{self.project}' "
+            "(sharing default profiles and images) ...",
+            file=sys.stderr,
+        )
+        run(
+            [
+                "lxc",
+                "project",
+                "create",
+                self.project,
+                "-c",
+                "features.images=false",
+                "-c",
+                "features.profiles=false",
+            ]
+        )
 
-    def delete_project(self):
+    def delete_project(self) -> None:
         run(["lxc", "project", "delete", self.project])
 
-    def container(self, name):
+    def container(self, name: str) -> Container:
         return Container(self, name)
 
-    def container_for_dir(self, path, prefix):
+    def container_for_dir(self, path: StrPath, prefix: str) -> Container:
         return Container(self, container_name_for_dir(path, prefix))
 
-    def instances(self):
+    def instances(self) -> dict[str, str]:
         """Return a {name: status} map for every instance in the project."""
-        result = run(self.argv(["list", "--format=csv", "--columns=n,s"]),
-                     capture_output=True, text=True)
+        result = run(
+            self.argv(["list", "--format=csv", "--columns=n,s"]),
+            capture_output=True,
+            text=True,
+        )
         states = {}
         for line in result.stdout.splitlines():
             if line.strip():
@@ -132,51 +153,55 @@ class Lxd:
 class Container:
     """A single LXD instance, addressed by name within an Lxd connection."""
 
-    def __init__(self, lxd, name):
+    def __init__(self, lxd: Lxd, name: str) -> None:
         self.lxd = lxd
         self.name = name
 
-    def _argv(self, args):
+    def _argv(self, args: list[str]) -> list[str]:
         return self.lxd.argv(args)
 
     # -- existence / status / lifecycle --
 
-    def exists(self):
+    def exists(self) -> bool:
         r = subprocess.run(
             self._argv(["info", self.name]),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         return r.returncode == 0
 
-    def status(self):
+    def status(self) -> str:
         return run(
             self._argv(["list", self.name, "--format=csv", "--columns=s"]),
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
 
-    def create(self, image):
+    def create(self, image: str) -> None:
         run(self._argv(["init", image, self.name]))
 
-    def clone_from(self, base):
+    def clone_from(self, base: Container) -> None:
         run(self._argv(["copy", base.name, self.name]))
 
-    def start(self):
+    def start(self) -> None:
         run(self._argv(["start", self.name]))
 
-    def stop(self):
+    def stop(self) -> None:
         run(self._argv(["stop", self.name]))
 
-    def delete(self):
+    def delete(self) -> None:
         run(self._argv(["delete", "--force", self.name]))
 
-    def set_config(self, key, value):
+    def set_config(self, key: str, value: str) -> None:
         run(self._argv(["config", "set", self.name, key, value]))
 
-    def ensure_started(self, base):
+    def ensure_started(self, base: Container) -> None:
         """Clone from a base container if missing, then ensure it's running."""
         if not self.exists():
-            print(f"Creating session container '{self.name}' from base ...",
-                  file=sys.stderr)
+            print(
+                f"Creating session container '{self.name}' from base ...",
+                file=sys.stderr,
+            )
             self.clone_from(base)
             self.start()
         elif self.status() != "RUNNING":
@@ -185,31 +210,49 @@ class Container:
 
     # -- exec --
 
-    def exec(self, cmd, **kwargs):
+    def exec(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         """Run a command in the container (checked, non-interactive)."""
         return run(self._argv(["exec", self.name, "--"] + list(cmd)), **kwargs)
 
-    def run_interactive(self, cmd, *, cwd, user, group, env=None):
+    def run_interactive(
+        self,
+        cmd: list[str],
+        *,
+        cwd: str,
+        user: int,
+        group: int,
+        env: dict[str, str] | None = None,
+    ) -> int:
         """Run a command attached to the current terminal; return exit code.
 
         Unlike exec(), this inherits stdio so the agent gets a real interactive
         terminal, and it does not raise on a non-zero exit.
         """
-        argv = self._argv(["exec", self.name, f"--cwd={cwd}",
-                            f"--user={user}", f"--group={group}"])
+        argv = self._argv(
+            [
+                "exec",
+                self.name,
+                f"--cwd={cwd}",
+                f"--user={user}",
+                f"--group={group}",
+            ]
+        )
         for key, value in (env or {}).items():
             argv.append(f"--env={key}={value}")
         return subprocess.run(argv + ["--"] + list(cmd)).returncode
 
     # -- devices (mounts) --
 
-    def devices(self):
+    def devices(self) -> dict[str, dict[str, str]]:
         """Return the container's devices dict (from `config show`)."""
-        result = run(self._argv(["config", "show", self.name]),
-                     capture_output=True, text=True)
+        result = run(
+            self._argv(["config", "show", self.name]),
+            capture_output=True,
+            text=True,
+        )
         return yaml.safe_load(result.stdout).get("devices", {})
 
-    def _device_paths(self):
+    def _device_paths(self) -> set[str]:
         """Return the set of container paths already occupied by disk devices."""
         return {
             dev["path"]
@@ -217,7 +260,12 @@ class Container:
             if dev.get("type") == "disk" and "path" in dev
         }
 
-    def add_device(self, host_path, work_prefix=None, readonly=False):
+    def add_device(
+        self,
+        host_path: StrPath,
+        work_prefix: str | None = None,
+        readonly: bool = False,
+    ) -> str:
         # The source is handed to lxc and compared against the strings it
         # reports in `config show`, so normalise to a plain string up front.
         host_path = os.fspath(host_path)
@@ -234,12 +282,25 @@ class Container:
             container_path = existing["path"]
             current_ro = str(existing.get("readonly", "false")).lower() == "true"
             if current_ro != readonly:
-                run(self._argv(["config", "device", "set", self.name, name,
-                                "readonly", "true" if readonly else "false"]),
-                    stdout=subprocess.DEVNULL)
+                run(
+                    self._argv(
+                        [
+                            "config",
+                            "device",
+                            "set",
+                            self.name,
+                            name,
+                            "readonly",
+                            "true" if readonly else "false",
+                        ]
+                    ),
+                    stdout=subprocess.DEVNULL,
+                )
                 mode = "read-only" if readonly else "read-write"
-                print(f"Set {host_path} -> container:{container_path} to {mode}",
-                      file=sys.stderr)
+                print(
+                    f"Set {host_path} -> container:{container_path} to {mode}",
+                    file=sys.stderr,
+                )
             return container_path
 
         if work_prefix is None:
@@ -258,19 +319,30 @@ class Container:
         # Remove any leftover device from a previous crashed session, then add.
         subprocess.run(
             self._argv(["config", "device", "remove", self.name, name]),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        add_cmd = ["config", "device", "add", self.name, name,
-                   "disk", f"source={host_path}", f"path={container_path}"]
+        add_cmd = [
+            "config",
+            "device",
+            "add",
+            self.name,
+            name,
+            "disk",
+            f"source={host_path}",
+            f"path={container_path}",
+        ]
         if readonly:
             add_cmd.append("readonly=true")
         run(self._argv(add_cmd), stdout=subprocess.DEVNULL)
         mode = " (read-only)" if readonly else ""
-        print(f"Mounted {host_path} -> container:{container_path}{mode}",
-              file=sys.stderr)
+        print(
+            f"Mounted {host_path} -> container:{container_path}{mode}",
+            file=sys.stderr,
+        )
         return container_path
 
-    def remove_dir_device(self, host_path):
+    def remove_dir_device(self, host_path: StrPath) -> bool:
         """Remove the dir-* mount for host_path, if present.
 
         Returns True if a device was removed, False if there was nothing
@@ -279,22 +351,49 @@ class Container:
         name = _device_name(host_path)
         if name not in self.devices():
             return False
-        run(self._argv(["config", "device", "remove", self.name, name]),
-            stdout=subprocess.DEVNULL)
+        run(
+            self._argv(["config", "device", "remove", self.name, name]),
+            stdout=subprocess.DEVNULL,
+        )
         return True
 
-    def add_config_dir(self, source, container_path, name):
+    def add_config_dir(self, source: StrPath, container_path: str, name: str) -> None:
         """Add a named config disk device (e.g. the agent's persistent home)."""
-        run(self._argv(["config", "device", "add", self.name, name,
-                        "disk", f"source={source}", f"path={container_path}"]),
-            stdout=subprocess.DEVNULL)
+        run(
+            self._argv(
+                [
+                    "config",
+                    "device",
+                    "add",
+                    self.name,
+                    name,
+                    "disk",
+                    f"source={source}",
+                    f"path={container_path}",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
 
-    def set_device_source(self, device_name, source):
+    def set_device_source(self, device_name: str, source: StrPath) -> None:
         """Repoint an existing disk device at a new host source."""
-        run(self._argv(["config", "device", "set", self.name, device_name,
-                        f"source={source}"]), stdout=subprocess.DEVNULL)
+        run(
+            self._argv(
+                [
+                    "config",
+                    "device",
+                    "set",
+                    self.name,
+                    device_name,
+                    f"source={source}",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
 
-    def add_config_overlay(self, host_path, container_path, container_user=0):
+    def add_config_overlay(
+        self, host_path: StrPath, container_path: str, container_user: int = 0
+    ) -> None:
         """Bind-mount a host file or directory at an explicit container path.
 
         Used to overlay versioned config (e.g. CLAUDE.md, commands/) onto the
@@ -309,8 +408,11 @@ class Container:
         name = "cfg-" + hashlib.md5(container_path.encode()).hexdigest()[:8]
         devices = self.devices()
         existing = devices.get(name)
-        if (existing and existing.get("source") == host_path
-                and existing.get("path") == container_path):
+        if (
+            existing
+            and existing.get("source") == host_path
+            and existing.get("path") == container_path
+        ):
             return
         # Create the mountpoint's parent dirs as container_user first. Otherwise
         # LXD creates any missing parents as container root, which falls outside
@@ -318,23 +420,47 @@ class Container:
         parent = str(PurePosixPath(container_path).parent)
         if parent and parent != "/" and container_user != 0:
             subprocess.run(
-                self._argv(["exec", self.name,
-                            f"--user={container_user}",
-                            f"--group={container_user}",
-                            "--", "mkdir", "-p", parent]),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                self._argv(
+                    [
+                        "exec",
+                        self.name,
+                        f"--user={container_user}",
+                        f"--group={container_user}",
+                        "--",
+                        "mkdir",
+                        "-p",
+                        parent,
+                    ]
+                ),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         subprocess.run(
             self._argv(["config", "device", "remove", self.name, name]),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        run(self._argv(["config", "device", "add", self.name, name,
-                        "disk", f"source={host_path}", f"path={container_path}"]),
-            stdout=subprocess.DEVNULL)
-        print(f"Overlaid {host_path} -> container:{container_path}",
-              file=sys.stderr)
+        run(
+            self._argv(
+                [
+                    "config",
+                    "device",
+                    "add",
+                    self.name,
+                    name,
+                    "disk",
+                    f"source={host_path}",
+                    f"path={container_path}",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
+        print(
+            f"Overlaid {host_path} -> container:{container_path}",
+            file=sys.stderr,
+        )
 
-    def mount_wayland(self, container_user):
+    def mount_wayland(self, container_user: int) -> dict[str, str]:
         """Bind-mount the host Wayland socket; return env vars to set (or {}).
 
         Reads WAYLAND_DISPLAY and XDG_RUNTIME_DIR from the host environment and
@@ -345,14 +471,19 @@ class Container:
         xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
         wayland_display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
         if not xdg_runtime_dir:
-            print("Warning: XDG_RUNTIME_DIR not set; skipping Wayland passthrough",
-                  file=sys.stderr)
+            print(
+                "Warning: XDG_RUNTIME_DIR not set; skipping Wayland passthrough",
+                file=sys.stderr,
+            )
             return {}
 
         socket_path = Path(xdg_runtime_dir) / wayland_display
         if not socket_path.exists():
-            print(f"Warning: Wayland socket {socket_path} not found; "
-                  "skipping Wayland passthrough", file=sys.stderr)
+            print(
+                f"Warning: Wayland socket {socket_path} not found; "
+                "skipping Wayland passthrough",
+                file=sys.stderr,
+            )
             return {}
         # Handed to lxc and mirrored at the same path inside the container.
         socket_host = str(socket_path)
@@ -361,28 +492,55 @@ class Container:
         name = "wayland-" + hashlib.md5(socket_host.encode()).hexdigest()[:8]
         devices = self.devices()
         existing = devices.get(name)
-        if not (existing and existing.get("source") == socket_host
-                and existing.get("path") == socket_container):
+        if not (
+            existing
+            and existing.get("source") == socket_host
+            and existing.get("path") == socket_container
+        ):
             # Ensure the parent directory exists inside the container, owned by
             # container_user. Run mkdir as root so it can create /run/user/NNN,
             # then chown to the target user.
             subprocess.run(
-                self._argv(["exec", self.name, "--",
-                            "bash", "-c",
-                            f"mkdir -p {xdg_runtime_dir} && "
-                            f"chown {container_user}:{container_user} {xdg_runtime_dir} && "
-                            f"chmod 700 {xdg_runtime_dir}"]),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                self._argv(
+                    [
+                        "exec",
+                        self.name,
+                        "--",
+                        "bash",
+                        "-c",
+                        f"mkdir -p {xdg_runtime_dir} && "
+                        f"chown {container_user}:{container_user} {xdg_runtime_dir} && "
+                        f"chmod 700 {xdg_runtime_dir}",
+                    ]
+                ),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             subprocess.run(
                 self._argv(["config", "device", "remove", self.name, name]),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            run(self._argv(["config", "device", "add", self.name, name, "disk",
-                            f"source={socket_host}", f"path={socket_container}"]),
-                stdout=subprocess.DEVNULL)
-            print(f"Mounted Wayland socket {socket_host} -> "
-                  f"container:{socket_container}", file=sys.stderr)
+            run(
+                self._argv(
+                    [
+                        "config",
+                        "device",
+                        "add",
+                        self.name,
+                        name,
+                        "disk",
+                        f"source={socket_host}",
+                        f"path={socket_container}",
+                    ]
+                ),
+                stdout=subprocess.DEVNULL,
+            )
+            print(
+                f"Mounted Wayland socket {socket_host} -> "
+                f"container:{socket_container}",
+                file=sys.stderr,
+            )
 
         return {
             "WAYLAND_DISPLAY": wayland_display,

@@ -22,31 +22,46 @@
 # and migration modules iterate over this single table, so adding an agent
 # means adding one entry here.
 
+from __future__ import annotations
+
 import getpass
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
 
 from . import CONTAINER_HOME
 
 # Repo root (the directory containing this package), used to locate the
 # versioned config overlays that ship alongside the code.
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 
-DEFAULT_OR_MODEL = "anthropic/claude-sonnet-4-6"
+DEFAULT_OR_MODEL: str = "anthropic/claude-sonnet-4-6"
+
+# An install/upgrade step: a human-readable description and the argv to run
+# inside the container.
+Step = tuple[str, list[str]]
 
 
-def _claude_install():
+def _claude_install() -> list[Step]:
     return [
-        ("Installing claude ...",
-         ["runuser", "-u", "ubuntu", "--",
-          "bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]),
+        (
+            "Installing claude ...",
+            [
+                "runuser",
+                "-u",
+                "ubuntu",
+                "--",
+                "bash",
+                "-c",
+                "curl -fsSL https://claude.ai/install.sh | bash",
+            ],
+        ),
     ]
 
 
-def _ensure_openrouter_config(config_host_dir):
+def _ensure_openrouter_config(config_host_dir: Path) -> None:
     """Write ~/.claude/settings.json with OpenRouter config if not present."""
     settings_path = Path(config_host_dir) / ".claude" / "settings.json"
     if settings_path.exists():
@@ -76,7 +91,7 @@ def _ensure_openrouter_config(config_host_dir):
     print(file=sys.stderr)
 
 
-def _ensure_opencode_permissive_config(config_host_dir):
+def _ensure_opencode_permissive_config(config_host_dir: Path) -> None:
     """Write a permissive opencode.json into the container home if absent.
 
     Lets opencode run without permission prompts (it has no Claude-style
@@ -89,15 +104,19 @@ def _ensure_opencode_permissive_config(config_host_dir):
         return
     config.parent.mkdir(parents=True, exist_ok=True)
     with config.open("w") as f:
-        json.dump({
-            "$schema": "https://opencode.ai/config.json",
-            "permission": "allow",
-        }, f, indent=2)
+        json.dump(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "permission": "allow",
+            },
+            f,
+            indent=2,
+        )
         f.write("\n")
     print(f"Created permissive opencode config: {config}", file=sys.stderr)
 
 
-def _overlays(*pairs):
+def _overlays(*pairs: tuple[str, str]) -> list[tuple[Path, str]]:
     """Build (host_path, container_path) overlay pairs rooted at REPO_ROOT."""
     return [(REPO_ROOT / src, dst) for src, dst in pairs]
 
@@ -109,30 +128,31 @@ class Agent:
     The agent's name (its key in AGENTS) doubles as the base/template container
     name and the per-directory container prefix.
     """
+
     # Binary to run inside the container.
     command: str
-    # (description, cmd) pairs run when building the template container.
-    install_cmds: list
-    # (description, cmd) pairs run by `aiab upgrade-templates`. Defaults to
-    # install_cmds (set in __post_init__) when not given.
-    upgrade_cmds: Optional[list] = None
+    # Steps run when building the template container.
+    install_cmds: list[Step]
+    # Steps run by `aiab upgrade-templates`. Left empty, it defaults to
+    # install_cmds (filled in by __post_init__).
+    upgrade_cmds: list[Step] = field(default_factory=list)
     # Prepend --dangerously-skip-permissions to the agent command.
     skip_permissions: bool = False
     # Bind-mount the host Wayland socket (clipboard support).
     wayland: bool = False
     # Versioned config (host_path, container_path) pairs bind-mounted onto the
     # container home.
-    overlays: list = field(default_factory=list)
+    overlays: list[tuple[Path, str]] = field(default_factory=list)
     # Optional hook(config_host_dir) run before launch.
-    prepare: Optional[Callable] = None
+    prepare: Callable[[Path], None] | None = None
 
-    def __post_init__(self):
-        if self.upgrade_cmds is None:
+    def __post_init__(self) -> None:
+        if not self.upgrade_cmds:
             self.upgrade_cmds = self.install_cmds
 
 
 # The registry. Keys are agent names.
-AGENTS = {
+AGENTS: dict[str, Agent] = {
     "claude": Agent(
         command=f"{CONTAINER_HOME}/.local/bin/claude",
         install_cmds=_claude_install(),
@@ -154,47 +174,82 @@ AGENTS = {
     "opencode": Agent(
         command=f"{CONTAINER_HOME}/.opencode/bin/opencode",
         install_cmds=[
-            ("Installing opencode ...",
-             ["runuser", "-u", "ubuntu", "--",
-              "bash", "-c", "curl -fsSL https://opencode.ai/install | bash"]),
-            ("Installing wl-clipboard ...",
-             ["apt-get", "install", "-y", "-q", "wl-clipboard"]),
+            (
+                "Installing opencode ...",
+                [
+                    "runuser",
+                    "-u",
+                    "ubuntu",
+                    "--",
+                    "bash",
+                    "-c",
+                    "curl -fsSL https://opencode.ai/install | bash",
+                ],
+            ),
+            (
+                "Installing wl-clipboard ...",
+                ["apt-get", "install", "-y", "-q", "wl-clipboard"],
+            ),
         ],
         # Re-running the installer is enough to upgrade; no need to reinstall
         # wl-clipboard, which apt dist-upgrade already covers.
         upgrade_cmds=[
-            ("Updating opencode ...",
-             ["runuser", "-u", "ubuntu", "--",
-              "bash", "-c", "curl -fsSL https://opencode.ai/install | bash"]),
+            (
+                "Updating opencode ...",
+                [
+                    "runuser",
+                    "-u",
+                    "ubuntu",
+                    "--",
+                    "bash",
+                    "-c",
+                    "curl -fsSL https://opencode.ai/install | bash",
+                ],
+            ),
         ],
         wayland=True,
         prepare=_ensure_opencode_permissive_config,
         overlays=_overlays(
-            ("opencode/AGENTS.md", f"{CONTAINER_HOME}/.config/opencode/AGENTS.md"),
-            ("opencode/commands", f"{CONTAINER_HOME}/.config/opencode/commands"),
+            (
+                "opencode/AGENTS.md",
+                f"{CONTAINER_HOME}/.config/opencode/AGENTS.md",
+            ),
+            (
+                "opencode/commands",
+                f"{CONTAINER_HOME}/.config/opencode/commands",
+            ),
         ),
     ),
     "copilot": Agent(
         command="copilot",
         install_cmds=[
-            ("Installing Node.js 22 ...",
-             ["bash", "-c",
-              "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
-              " && apt-get install -y -q nodejs"]),
-            ("Installing copilot ...",
-             ["npm", "install", "-g", "@github/copilot"]),
+            (
+                "Installing Node.js 22 ...",
+                [
+                    "bash",
+                    "-c",
+                    "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"
+                    " && apt-get install -y -q nodejs",
+                ],
+            ),
+            (
+                "Installing copilot ...",
+                ["npm", "install", "-g", "@github/copilot"],
+            ),
         ],
         # Node is already in the template; just refresh the copilot package.
         upgrade_cmds=[
-            ("Updating copilot ...",
-             ["npm", "install", "-g", "@github/copilot"]),
+            (
+                "Updating copilot ...",
+                ["npm", "install", "-g", "@github/copilot"],
+            ),
         ],
     ),
 }
 
-AGENT_NAMES = tuple(AGENTS)
+AGENT_NAMES: tuple[str, ...] = tuple(AGENTS)
 
 
-def get(agent):
+def get(agent: str) -> Agent:
     """Return the Agent for a name. Raises KeyError if unknown."""
     return AGENTS[agent]
