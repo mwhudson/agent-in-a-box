@@ -27,13 +27,12 @@
 
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 from . import PROJECT
-from . import lxd
 from .agents import AGENT_NAMES
+from .lxd import Lxd, agent_home_dir
 
 OLD_PROJECT = "lxd-ai"
 
@@ -47,9 +46,9 @@ def maybe_migrate():
     Trigger: the old 'lxd-ai' project exists and the new 'aiab' project does
     not. Anything else (already migrated, or a fresh install) is a no-op.
     """
-    if lxd.project_exists(PROJECT):
+    if Lxd(PROJECT).project_exists():
         return
-    if not lxd.project_exists(OLD_PROJECT):
+    if not Lxd(OLD_PROJECT).project_exists():
         return
     _migrate()
 
@@ -60,12 +59,13 @@ def _migrate():
     # An LXD project can't be renamed while it holds instances, so create the
     # new project (sharing the default project's profiles/images) and move the
     # instances across, then drop the now-empty old project.
-    lxd.use_project(PROJECT)
+    new = Lxd(PROJECT)
+    new.ensure_project()
     # Move the host config dirs first, so the new source paths exist before we
     # repoint each container's config mount at them in _move_instances().
     _move_config_dirs()
-    _move_instances()
-    lxd.run(["lxc", "project", "delete", OLD_PROJECT])
+    _move_instances(new)
+    Lxd(OLD_PROJECT).delete_project()
     print(f"  Deleted empty project {OLD_PROJECT}", file=sys.stderr)
     print("Migration complete.\n", file=sys.stderr)
 
@@ -106,7 +106,7 @@ def _new_container_name(name):
     return None
 
 
-def _move_instances():
+def _move_instances(new):
     """Move every instance from the old project into the new one.
 
     `lxc move <src> <dst> --target-project` both moves the instance across
@@ -120,32 +120,22 @@ def _move_instances():
     to the new path here (all containers share it, having been cloned from the
     same base).
     """
-    result = subprocess.run(
-        ["lxc", "--project", OLD_PROJECT, "list", "--format=csv",
-         "--columns=n,s"],
-        capture_output=True, text=True,
-    )
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
-        name, _, state = line.partition(",")
-        if state.strip().upper() == "RUNNING":
-            lxd.run(["lxc", "--project", OLD_PROJECT, "stop", name])
-        new = _new_container_name(name) or name
-        lxd.run(["lxc", "--project", OLD_PROJECT, "move", name, new,
-                 "--target-project", PROJECT])
-        if new != name:
-            print(f"  Moved {name} -> {PROJECT}:{new}", file=sys.stderr)
+    old = Lxd(OLD_PROJECT)
+    for name, status in old.instances().items():
+        if status.strip().upper() == "RUNNING":
+            old.run(["stop", name])
+        new_name = _new_container_name(name) or name
+        old.run(["move", name, new_name, "--target-project", PROJECT])
+        if new_name != name:
+            print(f"  Moved {name} -> {PROJECT}:{new_name}", file=sys.stderr)
         else:
             print(f"  Moved {name} -> project {PROJECT}", file=sys.stderr)
 
-        agent = _agent_for(new)
+        agent = _agent_for(new_name)
         if agent:
-            source = lxd.agent_home_dir(agent)
-            lxd.run(lxd.lxc_argv(["config", "device", "set", new,
-                                  f"{agent}config", f"source={source}"]),
-                    stdout=subprocess.DEVNULL)
-            print(f"  Repointed {new}:{agent}config -> {source}",
+            source = agent_home_dir(agent)
+            new.container(new_name).set_device_source(f"{agent}config", source)
+            print(f"  Repointed {new_name}:{agent}config -> {source}",
                   file=sys.stderr)
 
 
