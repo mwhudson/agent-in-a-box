@@ -1,0 +1,26 @@
+# Configuration for the dev tooling (formatting and type checking).
+#
+# This file holds tool config only -- there is deliberately no [build-system]
+# table, so aiab stays a run-from-a-checkout tool (symlink bin/aiab) rather than
+# a pip-installable package. flake8 is configured separately in .flake8 (it
+# doesn't read pyproject.toml). See the README "Development" section for how to
+# run these.
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["aiab"]
+# A reasonable baseline: warn on obviously-untyped or dead constructs without
+# demanding full strictness across every internal helper.
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+check_untyped_defs = true
+
+# PyYAML ships no type stubs in this environment; we only use safe_load.
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
