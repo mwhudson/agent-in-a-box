@@ -192,6 +192,15 @@ class Container:
     def delete(self) -> None:
         run(self._argv(["delete", "--force", self.name]))
 
+    def rename(self, new_name: str) -> "Container":
+        """Rename the container; return a new Container handle with the new name.
+
+        The container must be stopped. Used to promote a -provisioning
+        temporary container to its final name once provisioning succeeds.
+        """
+        run(self._argv(["rename", self.name, new_name]))
+        return Container(self.lxd, new_name)
+
     def set_config(self, key: str, value: str) -> None:
         run(self._argv(["config", "set", self.name, key, value]))
 

@@ -43,20 +43,47 @@ def provision_base(
     install_cmds: list[Step],
     container_user: int = 0,
 ) -> None:
-    """Create a base template container, install the agent, then stop it."""
-    _create(
-        container,
-        config_host_dir,
-        config_container_path,
-        config_device_name,
-        install_cmds,
-        container_user,
-    )
-    print(
-        f"Stopping base container '{container.name}' (template) ...",
-        file=sys.stderr,
-    )
-    container.stop()
+    """Create a base template container, install the agent, then stop it.
+
+    Provisioning runs under a temporary '<name>-provisioning' container name
+    and is only renamed to the final name on success.  This means that a
+    half-built container left behind by a previous interrupted run is never
+    mistaken for a valid template — if '<name>' does not exist, provisioning
+    was never completed successfully.
+    """
+    tmp = Container(container.lxd, container.name + "-provisioning")
+    if tmp.exists():
+        print(
+            f"Removing incomplete previous provisioning attempt '{tmp.name}' ...",
+            file=sys.stderr,
+        )
+        tmp.delete()
+
+    try:
+        _create(
+            tmp,
+            config_host_dir,
+            config_container_path,
+            config_device_name,
+            install_cmds,
+            container_user,
+        )
+        print(
+            f"Stopping base container '{tmp.name}' (template) ...",
+            file=sys.stderr,
+        )
+        tmp.stop()
+    except Exception:
+        if tmp.exists():
+            print(
+                f"Provisioning failed; removing '{tmp.name}' ...",
+                file=sys.stderr,
+            )
+            tmp.delete()
+        raise
+
+    tmp.rename(container.name)
+    print(f"Base container '{container.name}' is ready.", file=sys.stderr)
 
 
 def _create(
@@ -106,8 +133,6 @@ def _create(
     for description, cmd in install_cmds:
         print(description, file=sys.stderr)
         container.exec(cmd, stdout=subprocess.DEVNULL)
-
-    print(f"Container '{container.name}' is ready.\n", file=sys.stderr)
 
 
 def update_template(
