@@ -362,16 +362,12 @@ def _fmt_mount(dev: dict[str, str]) -> str:
 
 def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
     devices = conn.container(name).devices()
-    # The working-directory mount is the dir-* device whose path hash matches
-    # the container name's trailing hash (both derive from the same path; the
-    # name uses md5[:6], the device md5[:8]). Everything else dir-* is an extra.
-    suffix = name.rsplit("-", 1)[-1]
     source = None
     extras = []
     for dev_name, dev in sorted(devices.items()):
         if dev.get("type") != "disk" or not dev_name.startswith("dir-"):
             continue
-        if dev_name[4:10] == suffix:
+        if lxd.is_source_device(dev_name, name):
             source = dev
         else:
             extras.append(dev)

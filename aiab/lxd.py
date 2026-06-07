@@ -70,6 +70,19 @@ def _device_name(path: StrPath) -> str:
     return f"dir-{digest}"
 
 
+def is_source_device(device_name: str, container_name: str) -> bool:
+    """Return True if device_name is the source-directory device for container_name.
+
+    Container names embed a 6-char path hash as their last component
+    (see container_name_for_dir); source-directory device names are
+    'dir-{md5[:8]}' of the same path (see _device_name).  The device
+    hash is longer, so we do a prefix match rather than equality — both
+    share the same leading 6 hex chars.
+    """
+    path_hash = container_name.rsplit("-", 1)[-1]
+    return device_name.startswith(f"dir-{path_hash}")
+
+
 class Lxd:
     """A connection to LXD scoped to a single project.
 
