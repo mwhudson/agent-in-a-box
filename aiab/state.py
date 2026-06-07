@@ -16,7 +16,7 @@
 # aiab.state - persistent per-directory mount records.
 #
 # The extra directories a user mounts into a project directory's containers
-# (via `aiab mount` or `aiab run --also`) are recorded here, keyed by the
+# (via `aiab mount` or `aiab run --add-mount`) are recorded here, keyed by the
 # project directory's real path, so they:
 #   (a) reach every agent started for that directory, not just the ones that
 #       happened to exist when the mount was added, and

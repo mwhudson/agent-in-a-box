@@ -88,18 +88,18 @@ def main() -> None:
     help="run the agent for DIR (default: current directory)",
 )
 @click.option(
-    "--also",
-    "also",
+    "--add-mount",
+    "add_mount",
     metavar="DIR",
     multiple=True,
-    help="also mount DIR (read-only) into the container (repeatable)",
+    help="mount DIR read-only and record it for this directory (repeatable)",
 )
 @click.option(
-    "--also-rw",
-    "also_rw",
+    "--add-mount-rw",
+    "add_mount_rw",
     metavar="DIR",
     multiple=True,
-    help="also mount DIR (read-write) into the container (repeatable)",
+    help="mount DIR read-write and record it for this directory (repeatable)",
 )
 @click.option(
     "--shell",
@@ -112,8 +112,8 @@ def run(
     conn: lxd.Lxd,
     agent: str,
     for_dir: str | None,
-    also: tuple[str, ...],
-    also_rw: tuple[str, ...],
+    add_mount: tuple[str, ...],
+    add_mount_rw: tuple[str, ...],
     shell: bool,
     agent_args: tuple[str, ...],
 ) -> None:
@@ -153,12 +153,12 @@ def run(
 
     container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
 
-    # Record any run-time --also mounts for this directory, then (re)apply
+    # Record any run-time --add-mount mounts for this directory, then (re)apply
     # every mount recorded for it — so a freshly created or cloned container,
     # and other agents started here later, all pick up the same set.
-    for d in also:
+    for d in add_mount:
         state.set_mount(work_dir, d, readonly=True)
-    for d in also_rw:
+    for d in add_mount_rw:
         state.set_mount(work_dir, d, readonly=False)
     _apply_recorded_mounts(session, work_dir)
 

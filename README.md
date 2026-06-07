@@ -163,18 +163,18 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ### aiab run
 
 ```
-aiab run <agent> [--for DIR] [--also DIR]... [--also-rw DIR]... [--shell] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--shell] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `claude-or`, `opencode`, or `copilot`.
 - `--for DIR` — run the agent for `DIR` instead of the current directory; `DIR`
   is the container's working directory, mounted at `/work/<basename>`.
-- `--also DIR` — also mount `DIR` **read-only** into the container (repeatable).
-- `--also-rw DIR` — also mount `DIR` read-write (repeatable).
+- `--add-mount DIR` — mount `DIR` **read-only** into the container and record it for this directory (repeatable).
+- `--add-mount-rw DIR` — mount `DIR` read-write and record it (repeatable).
 - `--shell` — open an interactive shell in the container instead of the agent.
 - Anything after `--` is passed straight through to the agent.
 
-`--also` / `--also-rw` mounts are remembered for the directory (see [`aiab
+`--add-mount` / `--add-mount-rw` mounts are remembered for the directory (see [`aiab
 mount`](#aiab-mount--aiab-unmount) below), so they're re-applied on later runs
 and for other agents in the same directory. Mounts recorded for the directory
 are re-applied on every run regardless.
@@ -212,7 +212,7 @@ adds it to every agent container (`claude`, `claude-or`, `opencode`,
 containers that don't exist yet: a different agent started for the same
 directory, or a container deleted and recreated, gets the same mounts
 automatically — `aiab run` replays them every time it brings a container up.
-Run-time `--also` / `--also-rw` mounts are recorded the same way.
+Run-time `--add-mount` / `--add-mount-rw` mounts are recorded the same way.
 
 Running containers pick the mounts up immediately; stopped ones apply them the
 next time they start. It's fine to `mount` before any container exists — the
@@ -252,7 +252,7 @@ aiab list [--for DIR]
 ```
 
 Lists the `aiab` session containers, and for each its working-directory source
-mount and any extra mounts (added via `--also`/`--also-rw` or `aiab mount`):
+mount and any extra mounts (added via `--add-mount`/`--add-mount-rw` or `aiab mount`):
 
 ```
 claude-myproj-ab12cd  [RUNNING]

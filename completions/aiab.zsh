@@ -26,8 +26,8 @@ _aiab() {
         run)
             _arguments \
                 '--for[run the agent for DIR]:directory:_files -/' \
-                '--also[mount DIR read-only]:directory:_files -/' \
-                '--also-rw[mount DIR read-write]:directory:_files -/' \
+                '--add-mount[mount DIR read-only and record it]:directory:_files -/' \
+                '--add-mount-rw[mount DIR read-write and record it]:directory:_files -/' \
                 '--shell[open a shell instead of the agent]' \
                 "1:agent:(${agents})"
             ;;
