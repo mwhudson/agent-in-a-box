@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -42,9 +44,44 @@ CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
+# Per-container lock files live here. Each 'aiab run' holds a shared flock
+# for the duration of its session; the last one to exit stops the container.
+_LOCK_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "locks"
+
 
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
+
+
+@contextlib.contextmanager
+def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
+    """Stop the session container on exit if no other aiab process is using it.
+
+    Each 'aiab run' holds a shared flock on a per-container lock file for the
+    duration of its session (agent or shell). On exit we try to upgrade to an
+    exclusive lock (non-blocking). If that succeeds we are the last process for
+    this container and stop it; if it fails another aiab process is still
+    running here and we leave the container up.
+
+    The OS releases flocks automatically on process death, so there are no
+    stale lock files to handle after a crash.
+    """
+    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    with (_LOCK_DIR / session.name).open("w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if session.status() == "RUNNING":
+                    print(
+                        f"Stopping container '{session.name}' ...",
+                        file=sys.stderr,
+                    )
+                    session.stop()
+            except OSError:
+                pass  # another aiab process is still using this container
 
 
 class _Command(click.Command):
@@ -171,13 +208,14 @@ def run(
     env = {"HOME": CONTAINER_HOME}
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
-    rc = session.run_interactive(
-        run_cmd,
-        cwd=container_cwd,
-        user=CONTAINER_USER,
-        group=CONTAINER_USER,
-        env=env,
-    )
+    with _auto_stop_on_exit(session):
+        rc = session.run_interactive(
+            run_cmd,
+            cwd=container_cwd,
+            user=CONTAINER_USER,
+            group=CONTAINER_USER,
+            env=env,
+        )
     sys.exit(rc)
 
 
