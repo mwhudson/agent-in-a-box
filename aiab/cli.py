@@ -27,6 +27,7 @@ import contextlib
 import fcntl
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,79 @@ def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
                 pass  # another aiab process is still using this container
 
 
+# -- git worktree helpers --
+
+# Worktrees are stored inside the mounted repo's .git directory so they need no
+# extra bind-mounts and are invisible to normal directory listings.
+_WORKTREE_DIR = ".git/aiab-worktrees"
+
+
+def _setup_worktree(
+    session: lxd.Container, repo_cwd: str, user: int
+) -> str:
+    """Create a git worktree inside the container; return its path.
+
+    The worktree is a detached HEAD at the current commit, stored under
+    <repo>/.git/aiab-worktrees/<session-id>/. A detached HEAD avoids
+    creating throwaway branch refs that litter the reflog.
+    """
+    session_id = str(int(time.time()))
+    worktree_path = f"{repo_cwd}/{_WORKTREE_DIR}/{session_id}"
+
+    # Verify it's actually a git repo.
+    r = subprocess.run(
+        session._argv([
+            "exec", session.name,
+            f"--cwd={repo_cwd}", f"--user={user}", f"--group={user}",
+            "--", "git", "rev-parse", "--git-dir",
+        ]),
+        capture_output=True,
+    )
+    if r.returncode != 0:
+        raise click.ClickException(
+            f"--worktree requires a git repository, but {repo_cwd} is not one"
+        )
+
+    # Create the worktree (detached HEAD at current commit).
+    session.exec([
+        "runuser", "-u", "ubuntu", "--",
+        "git", "-C", repo_cwd, "worktree", "add", "--detach", worktree_path,
+    ])
+    print(f"Created worktree at container:{worktree_path}", file=sys.stderr)
+    return worktree_path
+
+
+def _remove_worktree(
+    session: lxd.Container, repo_cwd: str, worktree_path: str, user: int
+) -> None:
+    """Remove a worktree created by _setup_worktree."""
+    try:
+        session.exec([
+            "runuser", "-u", "ubuntu", "--",
+            "git", "-C", repo_cwd, "worktree", "remove", "--force",
+            worktree_path,
+        ])
+        print(f"Removed worktree at container:{worktree_path}", file=sys.stderr)
+    except subprocess.CalledProcessError:
+        print(
+            f"Warning: could not remove worktree {worktree_path}",
+            file=sys.stderr,
+        )
+
+
+def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
+    """Prune stale worktree bookkeeping for a repo (e.g. after a crash)."""
+    subprocess.run(
+        session._argv([
+            "exec", session.name,
+            f"--cwd={repo_cwd}", f"--user={user}", f"--group={user}",
+            "--", "git", "worktree", "prune",
+        ]),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
@@ -139,6 +213,16 @@ def main() -> None:
     help="mount DIR read-write and record it for this directory (repeatable)",
 )
 @click.option(
+    "--worktree",
+    is_flag=True,
+    help="run the agent in a fresh git worktree (branched from HEAD)",
+)
+@click.option(
+    "--worktree-keep",
+    is_flag=True,
+    help="keep the worktree after the agent exits (implies --worktree)",
+)
+@click.option(
     "--shell",
     is_flag=True,
     help="open an interactive shell instead of running the agent",
@@ -151,6 +235,8 @@ def run(
     for_dir: str | None,
     add_mount: tuple[str, ...],
     add_mount_rw: tuple[str, ...],
+    worktree: bool,
+    worktree_keep: bool,
     shell: bool,
     agent_args: tuple[str, ...],
 ) -> None:
@@ -158,6 +244,9 @@ def run(
 
     Anything after `--` is passed straight through to the agent.
     """
+    # --worktree-keep implies --worktree.
+    if worktree_keep:
+        worktree = True
     cfg = agents.get(agent)
     config_host_dir = lxd.agent_home_dir(agent)
 
@@ -205,17 +294,25 @@ def run(
                 host_path, overlay_path, container_user=CONTAINER_USER
             )
 
+    # If --worktree was requested, create one inside the repo and use it as
+    # the agent's working directory instead of the repo root.
+    agent_cwd = container_cwd
+    if worktree:
+        agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
+
     env = {"HOME": CONTAINER_HOME}
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
     with _auto_stop_on_exit(session):
         rc = session.run_interactive(
             run_cmd,
-            cwd=container_cwd,
+            cwd=agent_cwd,
             user=CONTAINER_USER,
             group=CONTAINER_USER,
             env=env,
         )
+        if worktree and not worktree_keep:
+            _remove_worktree(session, container_cwd, agent_cwd, CONTAINER_USER)
     sys.exit(rc)
 
 
@@ -238,12 +335,23 @@ def remove(conn: lxd.Lxd, agent: str, for_dir: str | None) -> None:
     """Delete the session container for a directory.
 
     The base/template container is left intact, so the next run clones a fresh
-    one quickly.
+    one quickly. Any leftover git worktrees created by --worktree are pruned
+    from the host directory before deleting the container.
     """
-    session = conn.container_for_dir(_realdir(for_dir), agent)
+    work_dir = _realdir(for_dir)
+    session = conn.container_for_dir(work_dir, agent)
     if not session.exists():
         print(f"No container '{session.name}' to remove.", file=sys.stderr)
         return
+    # Prune stale worktrees before deleting — only possible if the container is
+    # running (exec needs a live container). Start it temporarily if needed.
+    was_stopped = session.status() != "RUNNING"
+    if was_stopped:
+        session.start()
+    container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
+    _prune_worktrees(session, container_cwd, CONTAINER_USER)
+    if was_stopped:
+        session.stop()
     print(f"Removing container '{session.name}' ...", file=sys.stderr)
     session.delete()
     print(f"Removed container '{session.name}'.", file=sys.stderr)
