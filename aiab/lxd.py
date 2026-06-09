@@ -512,57 +512,53 @@ class Container:
         socket_container = socket_host
 
         name = "wayland-" + hashlib.md5(socket_host.encode()).hexdigest()[:8]
-        devices = self.devices()
-        existing = devices.get(name)
-        if not (
-            existing
-            and existing.get("source") == socket_host
-            and existing.get("path") == socket_container
-        ):
-            # Ensure the parent directory exists inside the container, owned by
-            # container_user. Run mkdir as root so it can create /run/user/NNN,
-            # then chown to the target user.
-            subprocess.run(
-                self._argv(
-                    [
-                        "exec",
-                        self.name,
-                        "--",
-                        "bash",
-                        "-c",
-                        f"mkdir -p {xdg_runtime_dir} && "
-                        f"chown {container_user}:{container_user} {xdg_runtime_dir} && "
-                        f"chmod 700 {xdg_runtime_dir}",
-                    ]
-                ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                self._argv(["config", "device", "remove", self.name, name]),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            run(
-                self._argv(
-                    [
-                        "config",
-                        "device",
-                        "add",
-                        self.name,
-                        name,
-                        "disk",
-                        f"source={socket_host}",
-                        f"path={socket_container}",
-                    ]
-                ),
-                stdout=subprocess.DEVNULL,
-            )
-            print(
-                f"Mounted Wayland socket {socket_host} -> "
-                f"container:{socket_container}",
-                file=sys.stderr,
-            )
+
+        # Always recreate the directory and file mountpoint inside the
+        # container. /run is a fresh tmpfs on every container start, so both
+        # disappear after each restart. A file mountpoint must exist for LXD
+        # to bind-mount a socket (a directory mountpoint is not enough).
+        subprocess.run(
+            self._argv(
+                [
+                    "exec",
+                    self.name,
+                    "--",
+                    "bash",
+                    "-c",
+                    f"mkdir -p {xdg_runtime_dir} && "
+                    f"chown {container_user}:{container_user} {xdg_runtime_dir} && "
+                    f"chmod 700 {xdg_runtime_dir} && "
+                    f"touch {socket_container}",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Always remove-then-add the device so LXD performs a fresh live
+        # bind-mount now that the mountpoint exists. Without this, LXD already
+        # attempted (and silently failed) the mount at container-start time
+        # when /run was still empty, and will not retry.
+        subprocess.run(
+            self._argv(["config", "device", "remove", self.name, name]),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        run(
+            self._argv(
+                [
+                    "config",
+                    "device",
+                    "add",
+                    self.name,
+                    name,
+                    "disk",
+                    f"source={socket_host}",
+                    f"path={socket_container}",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
 
         return {
             "WAYLAND_DISPLAY": wayland_display,
