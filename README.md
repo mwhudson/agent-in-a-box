@@ -39,6 +39,12 @@ and the agent is launched there. The container's user is mapped to your host
 UID/GID (via `raw.idmap`), so files the agent creates in mounted directories are
 owned by you on the host.
 
+When the last session using a container exits, the container is stopped about
+five minutes later (by a small detached helper) rather than immediately — so
+exiting never waits on the stop, and starting another session shortly after
+reuses the still-running container. Starting a new session cancels the
+pending stop.
+
 Authentication is persisted on the host (under
 `~/.local/share/aiab/<agent>/home`) and mounted into the container, so you only
 log in once.

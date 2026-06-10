@@ -61,8 +61,17 @@ _CONTAINER_PATH: str = (
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
 # Per-container lock files live here. Each 'aiab run' holds a shared flock
-# for the duration of its session; the last one to exit stops the container.
+# for the duration of its session; when the last one exits, a detached helper
+# (aiab.stopper) stops the container after IDLE_STOP_DELAY unless a new
+# session has taken the lock again — so exiting doesn't block on the stop,
+# and back-to-back sessions reuse the still-running container.
 _LOCK_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "locks"
+
+# How long a container stays up after its last session exits (seconds).
+IDLE_STOP_DELAY: float = 5 * 60
+
+# The stopper helpers log here, named after the container.
+_STOPPER_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "stopper"
 
 # Host-side filtering proxies (one per restricted session container, see
 # aiab.netproxy) keep their pidfile/log here, named after the container. The
@@ -89,6 +98,19 @@ def _proxy_socket_name(container_name: str) -> str:
 
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
+
+
+def _helper_env() -> dict[str, str]:
+    """Env for detached helper processes (netproxy, stopper).
+
+    They run `python -m aiab.<module>`, so the aiab package must be
+    importable regardless of cwd.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in [str(agents.REPO_ROOT), env.get("PYTHONPATH")] if p
+    )
+    return env
 
 
 # -- filtering proxy lifecycle --
@@ -138,11 +160,6 @@ def _ensure_proxy(
         f"--socket={sock_name}",
         f"--dir={work_dir}",
     ] + [f"--api-domain={d}" for d in api_domains + BASELINE_DOMAINS]
-    # The child needs the aiab package importable regardless of cwd.
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in [str(agents.REPO_ROOT), env.get("PYTHONPATH")] if p
-    )
     with log.open("ab") as log_fd:
         proc = subprocess.Popen(
             argv,
@@ -150,7 +167,7 @@ def _ensure_proxy(
             stdout=log_fd,
             stderr=log_fd,
             start_new_session=True,
-            env=env,
+            env=_helper_env(),
         )
     (_PROXY_DIR / f"{session.name}.pid").write_text(f"{proc.pid}\n")
 
@@ -181,15 +198,35 @@ def _stop_proxy(container_name: str) -> None:
     (_PROXY_DIR / f"{container_name}.sock").unlink(missing_ok=True)
 
 
+def _spawn_stopper(container_name: str) -> None:
+    """Launch the detached helper that stops an idle container later."""
+    _STOPPER_DIR.mkdir(parents=True, exist_ok=True)
+    log = _STOPPER_DIR / f"{container_name}.log"
+    with log.open("ab") as log_fd:
+        subprocess.Popen(
+            [sys.executable, "-m", "aiab.stopper", container_name],
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+            env=_helper_env(),
+        )
+
+
 @contextlib.contextmanager
-def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
-    """Stop the session container on exit if no other aiab process is using it.
+def _stop_when_idle(session: lxd.Container) -> Iterator[None]:
+    """Hold the session lock; on exit, schedule a stop if we were the last.
 
     Each 'aiab run' holds a shared flock on a per-container lock file for the
-    duration of its session (agent or shell). On exit we try to upgrade to an
-    exclusive lock (non-blocking). If that succeeds we are the last process for
-    this container and stop it; if it fails another aiab process is still
-    running here and we leave the container up.
+    duration of its session (agent or shell). The lock is taken *before* the
+    container is started, so a pending stopper can never shoot down a
+    container that a new run has just brought up. On exit we try to upgrade
+    to an exclusive lock (non-blocking): if that fails another aiab process
+    is still using the container; if it succeeds we are the last one out and
+    spawn aiab.stopper, which stops the container IDLE_STOP_DELAY seconds
+    later unless a new session has taken the lock by then. The proxy teardown
+    moves to the stopper too, so a quick follow-up session can reuse a live
+    proxy.
 
     The OS releases flocks automatically on process death, so there are no
     stale lock files to handle after a crash.
@@ -205,19 +242,13 @@ def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
             except OSError:
                 pass  # another aiab process is still using this container
             else:
-                # Tear down the filtering proxy *before* stopping: kill the
-                # host-side proxy and detach its device first so no proxy
-                # connections (or the device's forkproxy process) can hold up
-                # a clean guest shutdown — and so no leftover device points
-                # at a socket that no longer exists.
-                _stop_proxy(session.name)
-                session.remove_device("netproxy")
-                if session.status() == "RUNNING":
-                    print(
-                        f"Stopping container '{session.name}' ...",
-                        file=sys.stderr,
-                    )
-                    session.stop(timeout=30)
+                _spawn_stopper(session.name)
+                print(
+                    f"Container '{session.name}' stops in "
+                    f"{int(IDLE_STOP_DELAY // 60)} minutes unless a new "
+                    "session starts.",
+                    file=sys.stderr,
+                )
 
 
 # -- git worktree helpers --
@@ -437,77 +468,80 @@ def run(
             install_cmds=cfg.install_cmds,
             container_user=CONTAINER_USER,
         )
-    session.ensure_started(base)
+    # The session lock is held from before the container starts, so a pending
+    # stopper from an earlier session can't stop it out from under us mid-setup.
+    with _stop_when_idle(session):
+        session.ensure_started(base)
 
-    if shell:
-        run_cmd = ["bash", "-l"]
-    else:
-        cmd_args = list(agent_args)
-        if cfg.skip_permissions:
-            cmd_args = ["--dangerously-skip-permissions"] + cmd_args
-        run_cmd = [cfg.command] + cmd_args
+        if shell:
+            run_cmd = ["bash", "-l"]
+        else:
+            cmd_args = list(agent_args)
+            if cfg.skip_permissions:
+                cmd_args = ["--dangerously-skip-permissions"] + cmd_args
+            run_cmd = [cfg.command] + cmd_args
 
-    container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
+        container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
 
-    # Record any run-time --add-mount mounts for this directory, then (re)apply
-    # every mount recorded for it — so a freshly created or cloned container,
-    # and other agents started here later, all pick up the same set.
-    for d in add_mount:
-        state.set_mount(work_dir, d, readonly=True)
-    for d in add_mount_rw:
-        state.set_mount(work_dir, d, readonly=False)
-    _apply_recorded_mounts(session, work_dir)
+        # Record any run-time --add-mount mounts for this directory, then
+        # (re)apply every mount recorded for it — so a freshly created or
+        # cloned container, and other agents started here later, all pick up
+        # the same set.
+        for d in add_mount:
+            state.set_mount(work_dir, d, readonly=True)
+        for d in add_mount_rw:
+            state.set_mount(work_dir, d, readonly=False)
+        _apply_recorded_mounts(session, work_dir)
 
-    # Mount the directory's persistent state dir (shared by all agents for
-    # this directory). /setup-container maintains the container setup script
-    # at STATE_MOUNT/setup.sh, so it survives container recreation.
-    session.add_config_overlay(
-        state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
-    )
+        # Mount the directory's persistent state dir (shared by all agents for
+        # this directory). /setup-container maintains the container setup
+        # script at STATE_MOUNT/setup.sh, so it survives container recreation.
+        session.add_config_overlay(
+            state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
+        )
 
-    for host_path, overlay_path in cfg.overlays:
-        if host_path.exists():
-            session.add_config_overlay(
-                host_path, overlay_path, container_user=CONTAINER_USER
+        for host_path, overlay_path in cfg.overlays:
+            if host_path.exists():
+                session.add_config_overlay(
+                    host_path, overlay_path, container_user=CONTAINER_USER
+                )
+
+        # Apply the directory's network policy (see `aiab net`). Restricted
+        # mode masks the profile NIC — no direct egress — and exposes a
+        # host-side filtering proxy inside the container instead.
+        policy = state.get_network(work_dir)
+        nic_names = conn.profile_nic_names()
+        proxy_env: dict[str, str] = {}
+        if policy["mode"] == state.MODE_RESTRICTED:
+            session.mask_profile_devices(nic_names)
+            sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
+            session.add_proxy_device(
+                "netproxy",
+                listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
+                connect=f"unix:{sock_name}",
             )
+            proxy_url = f"http://127.0.0.1:{netproxy.PROXY_PORT}"
+            for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                proxy_env[var] = proxy_url
+            proxy_env["NO_PROXY"] = proxy_env["no_proxy"] = "localhost,127.0.0.1"
+            print(
+                "Network is restricted; use 'aiab net' to inspect or adjust.",
+                file=sys.stderr,
+            )
+        else:
+            session.unmask_profile_devices(nic_names)
+            session.remove_device("netproxy")
 
-    # Apply the directory's network policy (see `aiab net`). Restricted mode
-    # masks the profile NIC — no direct egress — and exposes a host-side
-    # filtering proxy inside the container instead.
-    policy = state.get_network(work_dir)
-    nic_names = conn.profile_nic_names()
-    proxy_env: dict[str, str] = {}
-    if policy["mode"] == state.MODE_RESTRICTED:
-        session.mask_profile_devices(nic_names)
-        sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
-        session.add_proxy_device(
-            "netproxy",
-            listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
-            connect=f"unix:{sock_name}",
-        )
-        proxy_url = f"http://127.0.0.1:{netproxy.PROXY_PORT}"
-        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-            proxy_env[var] = proxy_url
-        proxy_env["NO_PROXY"] = proxy_env["no_proxy"] = "localhost,127.0.0.1"
-        print(
-            "Network is restricted; use 'aiab net' to inspect or adjust.",
-            file=sys.stderr,
-        )
-    else:
-        session.unmask_profile_devices(nic_names)
-        session.remove_device("netproxy")
+        # If --worktree was requested, create one inside the repo and use it
+        # as the agent's working directory instead of the repo root.
+        agent_cwd = container_cwd
+        if worktree:
+            agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
 
-    # If --worktree was requested, create one inside the repo and use it as
-    # the agent's working directory instead of the repo root.
-    agent_cwd = container_cwd
-    if worktree:
-        agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
-
-    env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
-    env.update(proxy_env)
-    if cfg.wayland:
-        env.update(session.mount_wayland(CONTAINER_USER))
-    with _auto_stop_on_exit(session):
+        env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
+        env.update(proxy_env)
+        if cfg.wayland:
+            env.update(session.mount_wayland(CONTAINER_USER))
         rc = session.run_interactive(
             run_cmd,
             cwd=agent_cwd,
