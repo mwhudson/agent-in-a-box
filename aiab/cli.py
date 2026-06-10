@@ -38,7 +38,7 @@ from typing import Any
 
 import click
 
-from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX
+from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX, STATE_MOUNT
 from . import agents
 from . import lxd
 from . import netproxy
@@ -442,6 +442,13 @@ def run(
     for d in add_mount_rw:
         state.set_mount(work_dir, d, readonly=False)
     _apply_recorded_mounts(session, work_dir)
+
+    # Mount the directory's persistent state dir (shared by all agents for
+    # this directory). /setup-container maintains the container setup script
+    # at STATE_MOUNT/setup.sh, so it survives container recreation.
+    session.add_config_overlay(
+        state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
+    )
 
     for host_path, overlay_path in cfg.overlays:
         if host_path.exists():
@@ -917,7 +924,8 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
 def gc(conn: lxd.Lxd) -> None:
     """Remove session containers whose source directories no longer exist.
 
-    Also prunes dead entries from the recorded mounts and network policy.
+    Also prunes dead entries from the recorded mounts and network policy, and
+    the per-directory state dirs (with their saved setup scripts).
     """
     states = conn.instances()
     session_names = [n for n in states if n not in agents.AGENT_NAMES]
@@ -963,11 +971,13 @@ def gc(conn: lxd.Lxd) -> None:
             file=sys.stderr,
         )
 
-    pruned_mounts, pruned_net = state.prune_stale()
+    pruned_mounts, pruned_net, pruned_state = state.prune_stale()
     for d in pruned_mounts:
         print(f"Pruned mount record for {d}", file=sys.stderr)
     for d in pruned_net:
         print(f"Pruned network record for {d}", file=sys.stderr)
+    for d in pruned_state:
+        print(f"Pruned state dir for {d}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

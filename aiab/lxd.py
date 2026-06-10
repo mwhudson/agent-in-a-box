@@ -52,17 +52,24 @@ def agent_home_dir(agent: str) -> Path:
     return Path.home() / ".local" / "share" / "aiab" / agent / "home"
 
 
-def container_name_for_dir(path: StrPath, prefix: str) -> str:
-    """Return a stable, human-readable LXD container name for a directory.
+def dir_slug(path: StrPath) -> str:
+    """Return a stable, human-readable identifier for a directory.
 
-    Shaped <prefix>-<basename>-<hash>: the basename comes first so tab
-    completion keys off the memorable part, with a short path hash appended to
-    disambiguate same-named directories in different locations.
+    Shaped <basename>-<hash>: the basename comes first so the memorable part
+    leads (and tab completion keys off it), with a short path hash appended to
+    disambiguate same-named directories in different locations. Used both for
+    container names (see container_name_for_dir) and for the per-directory
+    state dirs in aiab.state, so the two are easy to correlate.
     """
     path = Path(path)
     h = hashlib.md5(str(path).encode()).hexdigest()[:6]
     basename = re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-")
-    return f"{prefix}-{basename[:49]}-{h}"
+    return f"{basename[:49]}-{h}"
+
+
+def container_name_for_dir(path: StrPath, prefix: str) -> str:
+    """Return a stable LXD container name for a directory: <prefix>-<slug>."""
+    return f"{prefix}-{dir_slug(path)}"
 
 
 def _device_name(path: StrPath) -> str:

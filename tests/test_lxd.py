@@ -1,6 +1,6 @@
 # Tests for the pure helper functions in aiab.lxd.
 
-from aiab.lxd import container_name_for_dir, is_source_device
+from aiab.lxd import container_name_for_dir, dir_slug, is_source_device
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,23 @@ def test_name_length_within_lxd_limit():
     name = container_name_for_dir(long_path, "claude")
     # LXD container names are capped at 63 chars.
     assert len(name) <= 63
+
+
+# ---------------------------------------------------------------------------
+# dir_slug
+# ---------------------------------------------------------------------------
+
+
+def test_container_name_is_prefixed_slug():
+    # The per-directory state dirs (aiab.state) are named with the bare slug,
+    # so this keeps them correlatable with the container names.
+    path = "/home/user/my-project"
+    assert container_name_for_dir(path, "claude") == "claude-" + dir_slug(path)
+
+
+def test_dir_slug_sanitised():
+    import re
+    assert re.fullmatch(r"[a-z0-9-]+", dir_slug("/home/user/My Project!"))
 
 
 # ---------------------------------------------------------------------------

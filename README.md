@@ -51,6 +51,27 @@ project's profiles (network/storage) and image cache — containers work out of
 the box, they're just namespaced separately. List them with `aiab list` (or
 the raw `aiab lxc list`).
 
+## Per-directory state and the setup script (`/aiab`)
+
+Each project directory also gets a persistent state directory on the host
+(`~/.local/share/aiab/dirstate/<basename>-<hash>/`), mounted read-write at
+`/aiab` inside every session container for that directory — the same dir for
+every agent. It holds per-directory state the *agent* maintains that should
+survive container recreation; today that's the container setup script.
+
+The `/setup-container` slash command (shipped from this repo for both Claude
+and opencode, see below) maintains `/aiab/setup.sh`: when the script doesn't
+exist it works out the toolchain and dependency installs from the project's
+own docs and writes them there; when it does — notably in a freshly recreated
+container — it shows the saved script and offers to run it. Either way it only
+runs the script after you confirm in the session, so recreating a container's
+dev environment is `/setup-container` plus a "yes". Since the file lives on
+the host you can also inspect or edit it from outside the container (each
+state dir's `.source` file records the project directory it belongs to).
+
+[`aiab gc`](#aiab-gc) removes a directory's state dir (setup script included)
+along with its other records once the directory itself is gone.
+
 ## Versioned Claude config (CLAUDE.md + slash commands)
 
 The `claude/` directory in this repo is the source of truth for the global
@@ -340,9 +361,10 @@ aiab gc
 ```
 
 Removes every session container whose source directory no longer exists
-(stopping it first if necessary), and prunes the recorded mounts and network
-policies of deleted directories along with it. The base/template containers
-are never touched.
+(stopping it first if necessary), and prunes the recorded mounts, network
+policies, and [state dirs](#per-directory-state-and-the-setup-script-aiab) of
+deleted directories along with it. The base/template containers are never
+touched.
 
 ### aiab lxc
 

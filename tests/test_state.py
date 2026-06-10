@@ -1,7 +1,8 @@
-# Tests for aiab.state — the per-directory mount and network-policy records.
+# Tests for aiab.state — the per-directory mount, network-policy and state-dir
+# records.
 #
-# All tests redirect _PATH and _NET_PATH to a tmp dir so no real state is read
-# or written.
+# All tests redirect _PATH, _NET_PATH and _DIRSTATE_DIR to a tmp dir so no
+# real state is read or written.
 
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ def isolated_state(tmp_path, monkeypatch):
     """Redirect all state I/O to a temporary directory."""
     monkeypatch.setattr(state, "_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
+    monkeypatch.setattr(state, "_DIRSTATE_DIR", tmp_path / "dirstate")
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
     state.set_mount(gone, tmp_path / "src", readonly=True)
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, pruned_net = state.prune_stale()
+    pruned_mounts, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_mounts
     assert str(here) not in pruned_mounts
@@ -186,7 +188,7 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_network_mode(gone, state.MODE_RESTRICTED)
 
-    _, pruned_net = state.prune_stale()
+    _, pruned_net, _ = state.prune_stale()
 
     assert str(gone) in pruned_net
 
@@ -196,14 +198,69 @@ def test_prune_stale_no_op_when_clean(tmp_path):
     here.mkdir()
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, pruned_net = state.prune_stale()
-
-    assert pruned_mounts == []
-    assert pruned_net == []
+    assert state.prune_stale() == ([], [], [])
 
 
 def test_prune_stale_empty_files(tmp_path):
     # Should not raise when there's nothing in either file.
-    pruned_mounts, pruned_net = state.prune_stale()
-    assert pruned_mounts == []
-    assert pruned_net == []
+    assert state.prune_stale() == ([], [], [])
+
+
+# ---------------------------------------------------------------------------
+# dir_state_dir
+# ---------------------------------------------------------------------------
+
+
+def test_dir_state_dir_creates_dir_and_source(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    d = state.dir_state_dir(project)
+    assert d.is_dir()
+    assert (d / ".source").read_text().strip() == str(project)
+
+
+def test_dir_state_dir_is_stable(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    assert state.dir_state_dir(project) == state.dir_state_dir(project)
+
+
+def test_dir_state_dir_distinguishes_same_basename(tmp_path):
+    a = tmp_path / "a" / "project"
+    b = tmp_path / "b" / "project"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    assert state.dir_state_dir(a) != state.dir_state_dir(b)
+
+
+def test_dir_state_dir_preserves_contents(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (state.dir_state_dir(project) / "setup.sh").write_text("echo hi\n")
+    assert (state.dir_state_dir(project) / "setup.sh").read_text() == "echo hi\n"
+
+
+def test_prune_stale_removes_state_dir_for_deleted_dir(tmp_path):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    here = tmp_path / "here"
+    here.mkdir()
+    gone_state = state.dir_state_dir(gone)
+    here_state = state.dir_state_dir(here)
+    gone.rmdir()
+
+    _, _, pruned_state = state.prune_stale()
+
+    assert pruned_state == [str(gone)]
+    assert not gone_state.exists()
+    assert here_state.is_dir()
+
+
+def test_prune_stale_skips_state_dir_without_source(tmp_path):
+    stray = state._DIRSTATE_DIR / "stray"
+    stray.mkdir(parents=True)
+
+    _, _, pruned_state = state.prune_stale()
+
+    assert pruned_state == []
+    assert stray.is_dir()

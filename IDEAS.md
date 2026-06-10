@@ -5,18 +5,14 @@
 - **`aiab refresh`** — after `upgrade-templates`, existing session containers
   stay stale forever (the README just notes this). A command that recreates a
   session container from the updated template would be cheap to build, since
-  recorded mounts are already replayed automatically on recreation.
+  recorded mounts are already replayed automatically on recreation and
+  /setup-container restores the dev environment from its persisted script.
 - **Snapshot/reset** — `lxc snapshot` before a risky run, `aiab reset` to roll
   the session container back. Useful when an agent has installed packages or
   mutated container state you want to keep most of the time.
 
 ## Project usability
 
-- **Per-directory setup commands** — when a session container is (re)created,
-  the agent lands in a container with no project dependencies installed. A
-  recorded setup script (like mounts are recorded — e.g. run `apt install ...`
-  / `make deps` on first start) would make `remove` + recreate genuinely
-  cheap. Pairs naturally with `refresh`.
 - **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device, so
   a dev server the agent starts is reachable from the host browser. Right now
   there's no documented way to see a web app the agent is running.

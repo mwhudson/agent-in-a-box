@@ -32,19 +32,31 @@
 #                          "allow": [ {"domain": str, "expires": float|null} ] } }
 # The filtering proxy (aiab.netproxy) re-reads it on every request, so
 # `aiab net allow`/`deny` take effect immediately in running sessions.
+#
+# Each directory also gets a persistent state *directory* (dirstate/<slug>/),
+# mounted read-write at STATE_MOUNT inside its session containers, for state
+# the agent itself maintains — notably the /setup-container setup script. A
+# .source file inside records the project directory it belongs to.
 
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import TypedDict
 
 from . import StrPath
+from .lxd import dir_slug
 
 _STATE_DIR = Path.home() / ".local" / "share" / "aiab"
 _PATH = _STATE_DIR / "mounts.json"
 _NET_PATH = _STATE_DIR / "network.json"
+_DIRSTATE_DIR = _STATE_DIR / "dirstate"
+
+# Records the owning project directory inside each dirstate dir, so
+# prune_stale() can tell when the directory is gone.
+_SOURCE_FILE = ".source"
 
 
 class Mount(TypedDict):
@@ -220,10 +232,32 @@ def remove_network_allow(directory: StrPath, domain: str) -> bool:
     return True
 
 
-def prune_stale() -> tuple[list[str], list[str]]:
-    """Remove entries for directories that no longer exist from both state files.
+# -- per-directory state dir --
 
-    Returns (pruned_mount_dirs, pruned_network_dirs) as lists of path strings.
+
+def dir_state_dir(directory: StrPath) -> Path:
+    """Return (creating it if needed) the persistent state dir for a directory.
+
+    This is the host side of the STATE_MOUNT mount inside the directory's
+    session containers; /setup-container keeps the container setup script
+    there so it survives container recreation. The .source file written here
+    maps the dir back to its project directory for prune_stale().
+    """
+    key = _key(directory)
+    d = _DIRSTATE_DIR / dir_slug(key)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / _SOURCE_FILE).write_text(key + "\n")
+    return d
+
+
+def prune_stale() -> tuple[list[str], list[str], list[str]]:
+    """Remove records for directories that no longer exist from all state.
+
+    Covers the mount and network JSON files and the per-directory state dirs
+    (a state dir whose recorded .source path is gone is deleted, setup script
+    and all; ones without a readable .source are left alone). Returns
+    (pruned_mount_dirs, pruned_network_dirs, pruned_state_dirs) as lists of
+    project-directory path strings.
     """
     pruned_mounts: list[str] = []
     mounts_data = _load()
@@ -243,4 +277,15 @@ def prune_stale() -> tuple[list[str], list[str]]:
     if pruned_net:
         _save_file(_NET_PATH, net_data)
 
-    return pruned_mounts, pruned_net
+    pruned_state: list[str] = []
+    if _DIRSTATE_DIR.is_dir():
+        for d in _DIRSTATE_DIR.iterdir():
+            try:
+                source = (d / _SOURCE_FILE).read_text().strip()
+            except OSError:
+                continue
+            if not Path(source).is_dir():
+                shutil.rmtree(d)
+                pruned_state.append(source)
+
+    return pruned_mounts, pruned_net, pruned_state

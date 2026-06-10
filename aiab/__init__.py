@@ -38,3 +38,9 @@ PROJECT: str = "aiab"
 CONTAINER_USER: int = 1000
 CONTAINER_HOME: str = "/home/ubuntu"
 WORK_PREFIX: str = "/work"
+
+# Each project directory's persistent state dir (see aiab.state.dir_state_dir)
+# is mounted read-write here in that directory's session containers, so state
+# the agent maintains — notably the /setup-container setup script at
+# STATE_MOUNT/setup.sh — survives container recreation.
+STATE_MOUNT: str = "/aiab"
