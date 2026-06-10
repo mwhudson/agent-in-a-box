@@ -1,4 +1,4 @@
-# TODO
+# IDEAS
 
 ## Lifecycle gaps
 
@@ -35,9 +35,3 @@
 - Resource limits (`limits.cpu`/`limits.memory`) for runaway agent processes.
 - **`aiab doctor`** — check LXD init state and idmap support; first-run
   failures there are probably the worst onboarding experience.
-
-## Non-feature
-
-- The repo has lint/format/type checks but no tests. The `state.py`
-  record-keeping logic and container-name derivation are pure enough to
-  unit-test cheaply, which would derisk the more invasive features above.

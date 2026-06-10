@@ -7,10 +7,14 @@
 PYTHON := python3
 PY := aiab bin/aiab
 
-.PHONY: check lint typecheck format format-check
+.PHONY: check lint typecheck test format format-check
 
-# Run everything CI would: formatting check, lint, and type check.
-check: format-check lint typecheck
+# Run everything CI would: formatting check, lint, type check, and tests.
+check: format-check lint typecheck test
+
+# Run the unit tests.
+test:
+	$(PYTHON) -m pytest tests/
 
 # Lint with flake8 (config in .flake8).
 lint:

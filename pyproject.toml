@@ -12,7 +12,7 @@ target-version = ["py312"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["aiab"]
+files = ["aiab", "tests"]
 # A reasonable baseline: warn on obviously-untyped or dead constructs without
 # demanding full strictness across every internal helper.
 warn_redundant_casts = true
