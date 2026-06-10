@@ -908,6 +908,69 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
 
 
 # --------------------------------------------------------------------------
+# gc
+# --------------------------------------------------------------------------
+
+
+@main.command()
+@click.pass_obj
+def gc(conn: lxd.Lxd) -> None:
+    """Remove session containers whose source directories no longer exist.
+
+    Also prunes dead entries from the recorded mounts and network policy.
+    """
+    states = conn.instances()
+    session_names = [n for n in states if n not in agents.AGENT_NAMES]
+
+    removed = 0
+    for name in sorted(session_names):
+        container = conn.container(name)
+        devices = container.devices()
+        source_dev = None
+        for dev_name, dev in devices.items():
+            if dev.get("type") == "disk" and lxd.is_source_device(dev_name, name):
+                source_dev = dev
+                break
+
+        if source_dev is None:
+            continue
+
+        source_dir = source_dev.get("source", "")
+        if source_dir and Path(source_dir).is_dir():
+            continue
+
+        label = source_dir or "(unknown)"
+        print(
+            f"Removing stale container '{name}' (source: {label}) ...",
+            file=sys.stderr,
+        )
+        if states[name] == "RUNNING":
+            _stop_proxy(name)
+            container.remove_device("netproxy")
+            container.stop(timeout=30)
+        container.delete()
+        _stop_proxy(name)
+        removed += 1
+        print(f"Removed '{name}'.", file=sys.stderr)
+
+    if removed == 0 and not states:
+        print("No aiab containers found.", file=sys.stderr)
+    elif removed == 0:
+        print("No stale containers found.", file=sys.stderr)
+    else:
+        print(
+            f"Removed {removed} stale container{'s' if removed != 1 else ''}.",
+            file=sys.stderr,
+        )
+
+    pruned_mounts, pruned_net = state.prune_stale()
+    for d in pruned_mounts:
+        print(f"Pruned mount record for {d}", file=sys.stderr)
+    for d in pruned_net:
+        print(f"Pruned network record for {d}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
 # lxc passthrough
 # --------------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ aiab unmount DIR ...        # remove those mounts
 aiab net ...                # restrict a dir's containers' network access
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates
 aiab list                   # list the containers
+aiab gc                     # remove containers whose directory is gone
 aiab lxc ...                # run lxc against the 'aiab' project
 ```
 
@@ -331,6 +332,17 @@ it's marked `applies on next run`.
 The bare base/template containers are omitted. With `--for DIR`, shows only the
 containers for that project directory. For the raw LXD view, use `aiab lxc
 list`.
+
+### aiab gc
+
+```
+aiab gc
+```
+
+Removes every session container whose source directory no longer exists
+(stopping it first if necessary), and prunes the recorded mounts and network
+policies of deleted directories along with it. The base/template containers
+are never touched.
 
 ### aiab lxc
 

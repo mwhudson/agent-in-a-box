@@ -1,15 +1,7 @@
 # TODO
 
-Feature ideas, roughly in order of expected value. Network egress control
-(`aiab net`) was the top item from the original list and has since been
-implemented.
-
 ## Lifecycle gaps
 
-- **`aiab gc`** (or `remove --all` / `--stale`) — clean up session containers
-  whose source directories have been deleted, and prune dead entries from
-  `mounts.json`. `aiab list` shows stale containers but removal is currently
-  one agent + one directory at a time.
 - **`aiab refresh`** — after `upgrade-templates`, existing session containers
   stay stale forever (the README just notes this). A command that recreates a
   session container from the updated template would be cheap to build, since

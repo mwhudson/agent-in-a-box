@@ -218,3 +218,29 @@ def remove_network_allow(directory: StrPath, domain: str) -> bool:
     policy["allow"] = kept
     _save_network_policy(_key(directory), policy)
     return True
+
+
+def prune_stale() -> tuple[list[str], list[str]]:
+    """Remove entries for directories that no longer exist from both state files.
+
+    Returns (pruned_mount_dirs, pruned_network_dirs) as lists of path strings.
+    """
+    pruned_mounts: list[str] = []
+    mounts_data = _load()
+    for key in list(mounts_data):
+        if not Path(key).is_dir():
+            del mounts_data[key]
+            pruned_mounts.append(key)
+    if pruned_mounts:
+        _save(mounts_data)
+
+    pruned_net: list[str] = []
+    net_data = _load_file(_NET_PATH)
+    for key in list(net_data):
+        if not Path(key).is_dir():
+            del net_data[key]
+            pruned_net.append(key)
+    if pruned_net:
+        _save_file(_NET_PATH, net_data)
+
+    return pruned_mounts, pruned_net
