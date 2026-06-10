@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-# aiab.state - persistent per-directory mount records.
+# aiab.state - persistent per-directory records (mounts, network policy).
 #
 # The extra directories a user mounts into a project directory's containers
 # (via `aiab mount` or `aiab run --add-mount`) are recorded here, keyed by the
@@ -23,18 +23,28 @@
 #   (b) survive deleting and recreating a directory's container.
 # `aiab run` replays the recorded mounts each time it brings a container up.
 #
-# State is a single JSON file:
+# Mount state is a single JSON file:
 #   { "<dir real path>": [ {"source": "<host path>", "readonly": bool}, ... ] }
+#
+# A directory's network policy (managed by `aiab net`) lives in a second JSON
+# file with the same keying:
+#   { "<dir real path>": { "mode": "open" | "restricted",
+#                          "allow": [ {"domain": str, "expires": float|null} ] } }
+# The filtering proxy (aiab.netproxy) re-reads it on every request, so
+# `aiab net allow`/`deny` take effect immediately in running sessions.
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import TypedDict
 
 from . import StrPath
 
-_PATH = Path.home() / ".local" / "share" / "aiab" / "mounts.json"
+_STATE_DIR = Path.home() / ".local" / "share" / "aiab"
+_PATH = _STATE_DIR / "mounts.json"
+_NET_PATH = _STATE_DIR / "network.json"
 
 
 class Mount(TypedDict):
@@ -48,21 +58,29 @@ class Mount(TypedDict):
 State = dict[str, list[Mount]]
 
 
-def _load() -> State:
+def _load_file(path: Path) -> dict:
     try:
-        with _PATH.open() as f:
+        with path.open() as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
 
-def _save(data: State) -> None:
-    _PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PATH.with_name(_PATH.name + ".tmp")
+def _save_file(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
-    tmp.replace(_PATH)
+    tmp.replace(path)
+
+
+def _load() -> State:
+    return _load_file(_PATH)
+
+
+def _save(data: State) -> None:
+    _save_file(_PATH, data)
 
 
 # Keys and sources are stored (and compared) as resolved path *strings*, so the
@@ -106,4 +124,97 @@ def remove_mount(directory: StrPath, source: StrPath) -> bool:
     else:
         data.pop(key, None)
     _save(data)
+    return True
+
+
+# -- network policy --
+
+MODE_OPEN = "open"
+MODE_RESTRICTED = "restricted"
+
+
+class Allow(TypedDict):
+    """One allowed domain: the name and an optional expiry (unix time)."""
+
+    domain: str
+    expires: float | None
+
+
+class NetworkPolicy(TypedDict):
+    """A directory's network policy: its mode and extra allowed domains."""
+
+    mode: str
+    allow: list[Allow]
+
+
+# The whole network state file: project dir -> its policy.
+NetState = dict[str, NetworkPolicy]
+
+
+def _normalize_domain(domain: str) -> str:
+    return domain.strip().lower().lstrip("*.").rstrip(".")
+
+
+def _unexpired(allows: list[Allow]) -> list[Allow]:
+    now = time.time()
+    return [a for a in allows if a["expires"] is None or a["expires"] > now]
+
+
+def get_network(directory: StrPath) -> NetworkPolicy:
+    """Return the network policy for a directory (default: open, no allows).
+
+    Expired allow entries are filtered from the returned policy; they are only
+    actually pruned from the file by the mutating functions below.
+    """
+    data: NetState = _load_file(_NET_PATH)
+    policy = data.get(_key(directory))
+    if policy is None:
+        return {"mode": MODE_OPEN, "allow": []}
+    policy["allow"] = _unexpired(policy["allow"])
+    return policy
+
+
+def _save_network_policy(key: str, policy: NetworkPolicy) -> None:
+    data: NetState = _load_file(_NET_PATH)
+    policy["allow"] = _unexpired(policy["allow"])
+    if policy["mode"] == MODE_OPEN and not policy["allow"]:
+        data.pop(key, None)  # back to the default; keep the file tidy
+    else:
+        data[key] = policy
+    _save_file(_NET_PATH, data)
+
+
+def set_network_mode(directory: StrPath, mode: str) -> None:
+    """Set a directory's network mode (MODE_OPEN or MODE_RESTRICTED)."""
+    policy = get_network(directory)
+    policy["mode"] = mode
+    _save_network_policy(_key(directory), policy)
+
+
+def add_network_allow(directory: StrPath, domain: str, expires: float | None) -> None:
+    """Allow a domain (and its subdomains) for a directory.
+
+    If the domain is already allowed, its expiry is replaced — so re-allowing
+    with expires=None makes a previously temporary grant permanent.
+    """
+    domain = _normalize_domain(domain)
+    policy = get_network(directory)
+    for a in policy["allow"]:
+        if a["domain"] == domain:
+            a["expires"] = expires
+            break
+    else:
+        policy["allow"].append({"domain": domain, "expires": expires})
+    _save_network_policy(_key(directory), policy)
+
+
+def remove_network_allow(directory: StrPath, domain: str) -> bool:
+    """Drop an allowed domain. Return True if it was present (and unexpired)."""
+    domain = _normalize_domain(domain)
+    policy = get_network(directory)
+    kept = [a for a in policy["allow"] if a["domain"] != domain]
+    if len(kept) == len(policy["allow"]):
+        return False
+    policy["allow"] = kept
+    _save_network_policy(_key(directory), policy)
     return True

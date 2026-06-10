@@ -145,6 +145,10 @@ class Agent:
     overlays: list[tuple[Path, str]] = field(default_factory=list)
     # Optional hook(config_host_dir) run before launch.
     prepare: Callable[[Path], None] | None = None
+    # Domains (including subdomains) the agent needs to function — its API,
+    # auth, and telemetry endpoints. Always allowed when the directory's
+    # network mode is 'restricted' (see aiab.netproxy).
+    api_domains: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.upgrade_cmds:
@@ -162,6 +166,9 @@ AGENTS: dict[str, Agent] = {
             ("claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
             ("claude/commands", f"{CONTAINER_HOME}/.claude/commands"),
         ),
+        # anthropic.com covers api./statsig./console.; claude.ai is used for
+        # OAuth login; sentry.io for crash reporting.
+        api_domains=["anthropic.com", "claude.ai", "sentry.io"],
     ),
     "claude-or": Agent(
         # Claude pointed at OpenRouter instead of the Claude API. Same binary,
@@ -170,6 +177,7 @@ AGENTS: dict[str, Agent] = {
         install_cmds=_claude_install(),
         skip_permissions=True,
         prepare=_ensure_openrouter_config,
+        api_domains=["openrouter.ai", "sentry.io"],
     ),
     "opencode": Agent(
         command=f"{CONTAINER_HOME}/.opencode/bin/opencode",
@@ -209,6 +217,10 @@ AGENTS: dict[str, Agent] = {
         ],
         wayland=True,
         prepare=_ensure_opencode_permissive_config,
+        # opencode.ai for auth/updates, models.dev for its model catalogue,
+        # anthropic.com for the default provider. Using a different provider
+        # in restricted mode needs an `aiab net allow` for its API domain.
+        api_domains=["opencode.ai", "models.dev", "anthropic.com"],
         overlays=_overlays(
             (
                 "opencode/AGENTS.md",
@@ -244,6 +256,10 @@ AGENTS: dict[str, Agent] = {
                 ["npm", "install", "-g", "@github/copilot"],
             ),
         ],
+        # github.com covers api. and the device-code login flow;
+        # githubcopilot.com is the Copilot API; githubusercontent.com serves
+        # auxiliary content.
+        api_domains=["github.com", "githubcopilot.com", "githubusercontent.com"],
     ),
 }
 

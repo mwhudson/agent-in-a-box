@@ -4,7 +4,9 @@ Run coding agents (Claude Code, opencode, GitHub Copilot CLI) inside disposable
 [LXD](https://canonical.com/lxd) containers, with the current directory mounted
 in. Each project directory gets its own container, so an agent running with
 permission prompts disabled can only touch the directories you've mounted —
-not the rest of your machine.
+not the rest of your machine. Network access can be locked down per directory
+too ([`aiab net`](#aiab-net)): in restricted mode the agent can only reach its
+own API plus domains you've explicitly allowed.
 
 Everything is driven by a single command, `aiab`, with a subcommand per task:
 
@@ -13,6 +15,7 @@ aiab run <agent>            # run an agent in a container for the current dir
 aiab remove <agent>         # delete that container
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts
+aiab net ...                # restrict a dir's containers' network access
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates
 aiab list                   # list the containers
 aiab lxc ...                # run lxc against the 'aiab' project
@@ -230,6 +233,62 @@ existing containers, so it isn't replayed on the next run.
   different project directory.
 - `--ro` / `--rw` — read-only (the default) or read-write (`mount` only).
 
+### aiab net
+
+```
+aiab net status   [--for DIR]
+aiab net restrict [--for DIR]
+aiab net open     [--for DIR]
+aiab net allow    [--for DIR] [--duration TIME] DOMAIN...
+aiab net deny     [--for DIR] DOMAIN...
+```
+
+By default a container has unrestricted network access. `aiab net restrict`
+records a **restricted** network policy for the project directory (persisted
+like `aiab mount`'s record, so it applies to every agent and survives
+container recreation). When an agent next starts there:
+
+- the container's NIC (inherited from the default profile) is masked, so it
+  has **no direct network access at all**;
+- a small filtering HTTP(S) proxy is started on the host and exposed inside
+  the container (at `127.0.0.1:3128`, via an LXD proxy device), and the agent
+  is launched with `HTTP_PROXY`/`HTTPS_PROXY` pointing at it. The proxy
+  listens on an *abstract* unix socket — snap-confined LXD can't dial
+  filesystem socket paths under your home directory — with a peer-credential
+  check (root and your uid only) standing in for socket file permissions;
+- the proxy only admits requests to the agent's own API domains (Claude needs
+  `anthropic.com`/`claude.ai`, copilot needs `github.com`/`githubcopilot.com`,
+  and so on — see `aiab net status` for the full per-agent list) plus the
+  directory's recorded allowlist. Everything else gets a 403 naming the host,
+  and is logged to `~/.local/share/aiab/proxy/<container>.log`.
+
+`allow` adds domains to that allowlist (subdomains included: allowing
+`github.com` also allows `api.github.com`); `deny` removes them. The proxy
+re-reads the policy on **every request**, so both take effect immediately in
+running sessions — when the agent hits a wall mid-task, run
+`aiab net allow some.domain` from another terminal and it can carry on.
+`--duration 10m` (also `90s`, `2h`, `1d`; bare numbers are minutes) makes a
+grant that lapses on its own; re-allowing a domain replaces its expiry.
+
+Mode changes (`restrict`/`open`) only take *full* effect the next time an
+agent starts, because the NIC masking and proxy environment are applied at
+launch. `aiab net open` does loosen a running restricted session immediately
+(the proxy starts passing everything), but direct, un-proxied network access
+only returns on the next run.
+
+Caveats:
+
+- Only **proxy-aware** traffic works in restricted mode. HTTPS/HTTP clients
+  that honour the proxy environment (the agents themselves, curl, git's
+  https transport, pip, npm, apt) are fine; ssh (so git-over-ssh) and
+  raw-socket protocols are simply cut off.
+- Hostname filtering is policy, not adversarial containment: anything the
+  agent can reach over an allowed CONNECT, it can tunnel arbitrary data
+  through. The threat model is "keep the agent from wandering", same as the
+  filesystem sandbox.
+- Template provisioning and `aiab upgrade-templates` are unaffected — they
+  need apt and the agent installers, and don't run agent-authored code.
+
 ### aiab upgrade-templates
 
 ```
@@ -252,15 +311,22 @@ aiab list [--for DIR]
 ```
 
 Lists the `aiab` session containers, and for each its working-directory source
-mount and any extra mounts (added via `--add-mount`/`--add-mount-rw` or `aiab mount`):
+mount, any extra mounts (added via `--add-mount`/`--add-mount-rw` or `aiab
+mount`), and its network state (see [`aiab net`](#aiab-net)):
 
 ```
 claude-myproj-ab12cd  [RUNNING]
   source: /home/me/myproj -> /work/myproj
   mount:  /home/me/ref    -> /work/ref (ro)
+  network: restricted (2 allowed domains)
 opencode-myproj-ef34gh  [STOPPED]
   source: /home/me/myproj -> /work/myproj
+  network: open
 ```
+
+The network line shows the directory's *recorded* policy; if the container
+hasn't picked a mode change up yet (that happens when an agent next starts),
+it's marked `applies on next run`.
 
 The bare base/template containers are omitted. With `--for DIR`, shows only the
 containers for that project directory. For the raw LXD view, use `aiab lxc

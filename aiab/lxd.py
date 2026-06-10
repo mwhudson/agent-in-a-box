@@ -148,6 +148,17 @@ class Lxd:
     def container_for_dir(self, path: StrPath, prefix: str) -> Container:
         return Container(self, container_name_for_dir(path, prefix))
 
+    def profile_nic_names(self, profile: str = "default") -> list[str]:
+        """Return the names of the NIC devices a profile provides.
+
+        Containers in the aiab project inherit their network from the shared
+        'default' profile (the project is created with features.profiles=false);
+        these are the device names to mask when cutting off direct egress.
+        """
+        result = self.run(["profile", "show", profile], capture_output=True, text=True)
+        devices = yaml.safe_load(result.stdout).get("devices", {})
+        return [n for n, d in devices.items() if d.get("type") == "nic"]
+
     def instances(self) -> dict[str, str]:
         """Return a {name: status} map for every instance in the project."""
         result = run(
@@ -199,8 +210,24 @@ class Container:
     def start(self) -> None:
         run(self._argv(["start", self.name]))
 
-    def stop(self) -> None:
-        run(self._argv(["stop", self.name]))
+    def stop(self, timeout: int | None = None) -> None:
+        """Stop the container, optionally falling back to a forced stop.
+
+        With a timeout, a clean shutdown that doesn't finish in time is
+        followed by a forced stop. Session containers are disposable — their
+        valuable state lives in bind mounts on the host — so callers that
+        stop them prefer a bounded wait over hanging on a wedged guest.
+        """
+        if timeout is None:
+            run(self._argv(["stop", self.name]))
+            return
+        r = subprocess.run(self._argv(["stop", self.name, f"--timeout={timeout}"]))
+        if r.returncode != 0:
+            print(
+                f"Clean shutdown timed out; force-stopping '{self.name}' ...",
+                file=sys.stderr,
+            )
+            run(self._argv(["stop", self.name, "--force"]))
 
     def delete(self) -> None:
         run(self._argv(["delete", "--force", self.name]))
@@ -371,6 +398,10 @@ class Container:
         mounted for that path. Used by `aiab unmount`.
         """
         name = _device_name(host_path)
+        return self.remove_device(name)
+
+    def remove_device(self, name: str) -> bool:
+        """Remove a named device, if present. Return True if it was removed."""
         if name not in self.devices():
             return False
         run(
@@ -378,6 +409,68 @@ class Container:
             stdout=subprocess.DEVNULL,
         )
         return True
+
+    # -- network restriction --
+
+    def mask_profile_devices(self, names: list[str]) -> None:
+        """Mask profile-inherited devices with container-local 'none' devices.
+
+        Used to detach the NIC(s) the default profile provides, cutting off
+        all direct network egress. A 'none' device with the same name as a
+        profile device hides it from the container.
+        """
+        devices = self.devices()
+        for name in names:
+            if devices.get(name, {}).get("type") == "none":
+                continue
+            run(
+                self._argv(["config", "device", "add", self.name, name, "none"]),
+                stdout=subprocess.DEVNULL,
+            )
+            print(f"Masked network device '{name}'", file=sys.stderr)
+
+    def unmask_profile_devices(self, names: list[str]) -> None:
+        """Undo mask_profile_devices: drop the 'none' overrides, if present."""
+        devices = self.devices()
+        for name in names:
+            if devices.get(name, {}).get("type") == "none":
+                run(
+                    self._argv(["config", "device", "remove", self.name, name]),
+                    stdout=subprocess.DEVNULL,
+                )
+                print(f"Unmasked network device '{name}'", file=sys.stderr)
+
+    def add_proxy_device(self, name: str, listen: str, connect: str) -> None:
+        """Add (or refresh) a proxy device forwarding container -> host.
+
+        With bind=instance, `listen` is an address inside the container and
+        `connect` a socket on the host — used to expose the host-side
+        filtering proxy at a fixed port inside the container.
+        """
+        existing = self.devices().get(name)
+        if (
+            existing
+            and existing.get("listen") == listen
+            and existing.get("connect") == connect
+        ):
+            return
+        self.remove_device(name)
+        run(
+            self._argv(
+                [
+                    "config",
+                    "device",
+                    "add",
+                    self.name,
+                    name,
+                    "proxy",
+                    f"listen={listen}",
+                    f"connect={connect}",
+                    "bind=instance",
+                ]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
 
     def add_config_dir(self, source: StrPath, container_path: str, name: str) -> None:
         """Add a named config disk device (e.g. the agent's persistent home)."""

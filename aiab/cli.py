@@ -15,7 +15,7 @@
 #
 # aiab.cli - the `aiab` command-line front end.
 #
-# A Click group with a command per verb (run, remove, mount, unmount,
+# A Click group with a command per verb (run, remove, mount, unmount, net,
 # upgrade-templates, list, lxc). The LXD engine (Lxd/Container) lives in
 # aiab.lxd, provisioning in aiab.provision, and the per-agent data in
 # aiab.agents; this module just parses arguments and orchestrates. The Lxd
@@ -25,6 +25,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import os
+import re
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -37,6 +41,7 @@ import click
 from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX
 from . import agents
 from . import lxd
+from . import netproxy
 from . import provision
 from . import state
 from .migrate import maybe_migrate
@@ -49,9 +54,116 @@ AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 # for the duration of its session; the last one to exit stops the container.
 _LOCK_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "locks"
 
+# Host-side filtering proxies (one per restricted session container, see
+# aiab.netproxy) keep their pidfile/log here, named after the container. The
+# proxy itself listens on an abstract unix socket (no filesystem presence):
+# snap-confined LXD's forkproxy can't dial socket paths under the user's home,
+# but abstract sockets live in the (shared) network namespace.
+_PROXY_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "proxy"
+
+
+def _proxy_socket_name(container_name: str) -> str:
+    """The abstract socket address for a container's proxy, with leading @.
+
+    Understood in this form by both aiab.netproxy (--socket) and LXD proxy
+    devices (connect=unix:@...). Includes the uid so concurrent aiab users on
+    one host can't collide in the abstract namespace.
+    """
+    return f"@aiab-{os.getuid()}-{container_name}"
+
 
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
+
+
+# -- filtering proxy lifecycle --
+
+
+def _proxy_pid(container_name: str) -> int | None:
+    """Return the pid of a live proxy for a container, or None."""
+    try:
+        pid = int((_PROXY_DIR / f"{container_name}.pid").read_text())
+        os.kill(pid, 0)  # just probes for existence
+    except (OSError, ValueError):
+        return None
+    return pid
+
+
+def _proxy_socket_live(socket_name: str) -> bool:
+    """Return True if something accepts connections on an @abstract socket."""
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.connect("\0" + socket_name[1:])
+    except OSError:
+        return False
+    finally:
+        s.close()
+    return True
+
+
+def _ensure_proxy(
+    session: lxd.Container, work_dir: Path, api_domains: list[str]
+) -> str:
+    """Start the filtering proxy for a session container (or reuse a live one).
+
+    Returns the abstract socket address (with leading @) the proxy listens
+    on. The proxy is shared by concurrent `aiab run`s for the same container
+    and stopped alongside the container by _auto_stop_on_exit.
+    """
+    _PROXY_DIR.mkdir(parents=True, exist_ok=True)
+    sock_name = _proxy_socket_name(session.name)
+    log = _PROXY_DIR / f"{session.name}.log"
+    if _proxy_pid(session.name) is not None and _proxy_socket_live(sock_name):
+        return sock_name
+
+    argv = [
+        sys.executable,
+        "-m",
+        "aiab.netproxy",
+        f"--socket={sock_name}",
+        f"--dir={work_dir}",
+    ] + [f"--api-domain={d}" for d in api_domains]
+    # The child needs the aiab package importable regardless of cwd.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in [str(agents.REPO_ROOT), env.get("PYTHONPATH")] if p
+    )
+    with log.open("ab") as log_fd:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+            env=env,
+        )
+    (_PROXY_DIR / f"{session.name}.pid").write_text(f"{proc.pid}\n")
+
+    # Wait for the socket so the LXD proxy device has something to connect to.
+    for _ in range(50):
+        if _proxy_socket_live(sock_name):
+            break
+        if proc.poll() is not None:
+            raise click.ClickException(f"network proxy failed to start; see {log}")
+        time.sleep(0.1)
+    else:
+        raise click.ClickException(f"network proxy did not come up; see {log}")
+    print(f"Started filtering proxy (denials logged to {log})", file=sys.stderr)
+    return sock_name
+
+
+def _stop_proxy(container_name: str) -> None:
+    """Stop the proxy for a container, if one is running, and clean up.
+
+    The abstract socket disappears with the process; the .sock unlink only
+    cleans up files left by versions that used filesystem sockets.
+    """
+    pid = _proxy_pid(container_name)
+    if pid is not None:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    (_PROXY_DIR / f"{container_name}.pid").unlink(missing_ok=True)
+    (_PROXY_DIR / f"{container_name}.sock").unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -75,14 +187,22 @@ def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                pass  # another aiab process is still using this container
+            else:
+                # Tear down the filtering proxy *before* stopping: kill the
+                # host-side proxy and detach its device first so no proxy
+                # connections (or the device's forkproxy process) can hold up
+                # a clean guest shutdown — and so no leftover device points
+                # at a socket that no longer exists.
+                _stop_proxy(session.name)
+                session.remove_device("netproxy")
                 if session.status() == "RUNNING":
                     print(
                         f"Stopping container '{session.name}' ...",
                         file=sys.stderr,
                     )
-                    session.stop()
-            except OSError:
-                pass  # another aiab process is still using this container
+                    session.stop(timeout=30)
 
 
 # -- git worktree helpers --
@@ -92,9 +212,7 @@ def _auto_stop_on_exit(session: lxd.Container) -> Iterator[None]:
 _WORKTREE_DIR = ".git/aiab-worktrees"
 
 
-def _setup_worktree(
-    session: lxd.Container, repo_cwd: str, user: int
-) -> str:
+def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
     """Create a git worktree inside the container; return its path.
 
     The worktree is a detached HEAD at the current commit, stored under
@@ -106,11 +224,19 @@ def _setup_worktree(
 
     # Verify it's actually a git repo.
     r = subprocess.run(
-        session._argv([
-            "exec", session.name,
-            f"--cwd={repo_cwd}", f"--user={user}", f"--group={user}",
-            "--", "git", "rev-parse", "--git-dir",
-        ]),
+        session._argv(
+            [
+                "exec",
+                session.name,
+                f"--cwd={repo_cwd}",
+                f"--user={user}",
+                f"--group={user}",
+                "--",
+                "git",
+                "rev-parse",
+                "--git-dir",
+            ]
+        ),
         capture_output=True,
     )
     if r.returncode != 0:
@@ -119,10 +245,21 @@ def _setup_worktree(
         )
 
     # Create the worktree (detached HEAD at current commit).
-    session.exec([
-        "runuser", "-u", "ubuntu", "--",
-        "git", "-C", repo_cwd, "worktree", "add", "--detach", worktree_path,
-    ])
+    session.exec(
+        [
+            "runuser",
+            "-u",
+            "ubuntu",
+            "--",
+            "git",
+            "-C",
+            repo_cwd,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_path,
+        ]
+    )
     print(f"Created worktree at container:{worktree_path}", file=sys.stderr)
     return worktree_path
 
@@ -132,11 +269,21 @@ def _remove_worktree(
 ) -> None:
     """Remove a worktree created by _setup_worktree."""
     try:
-        session.exec([
-            "runuser", "-u", "ubuntu", "--",
-            "git", "-C", repo_cwd, "worktree", "remove", "--force",
-            worktree_path,
-        ])
+        session.exec(
+            [
+                "runuser",
+                "-u",
+                "ubuntu",
+                "--",
+                "git",
+                "-C",
+                repo_cwd,
+                "worktree",
+                "remove",
+                "--force",
+                worktree_path,
+            ]
+        )
         print(f"Removed worktree at container:{worktree_path}", file=sys.stderr)
     except subprocess.CalledProcessError:
         print(
@@ -148,11 +295,19 @@ def _remove_worktree(
 def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     """Prune stale worktree bookkeeping for a repo (e.g. after a crash)."""
     subprocess.run(
-        session._argv([
-            "exec", session.name,
-            f"--cwd={repo_cwd}", f"--user={user}", f"--group={user}",
-            "--", "git", "worktree", "prune",
-        ]),
+        session._argv(
+            [
+                "exec",
+                session.name,
+                f"--cwd={repo_cwd}",
+                f"--user={user}",
+                f"--group={user}",
+                "--",
+                "git",
+                "worktree",
+                "prune",
+            ]
+        ),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -294,6 +449,32 @@ def run(
                 host_path, overlay_path, container_user=CONTAINER_USER
             )
 
+    # Apply the directory's network policy (see `aiab net`). Restricted mode
+    # masks the profile NIC — no direct egress — and exposes a host-side
+    # filtering proxy inside the container instead.
+    policy = state.get_network(work_dir)
+    nic_names = conn.profile_nic_names()
+    proxy_env: dict[str, str] = {}
+    if policy["mode"] == state.MODE_RESTRICTED:
+        session.mask_profile_devices(nic_names)
+        sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
+        session.add_proxy_device(
+            "netproxy",
+            listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
+            connect=f"unix:{sock_name}",
+        )
+        proxy_url = f"http://127.0.0.1:{netproxy.PROXY_PORT}"
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            proxy_env[var] = proxy_url
+        proxy_env["NO_PROXY"] = proxy_env["no_proxy"] = "localhost,127.0.0.1"
+        print(
+            "Network is restricted; use 'aiab net' to inspect or adjust.",
+            file=sys.stderr,
+        )
+    else:
+        session.unmask_profile_devices(nic_names)
+        session.remove_device("netproxy")
+
     # If --worktree was requested, create one inside the repo and use it as
     # the agent's working directory instead of the repo root.
     agent_cwd = container_cwd
@@ -301,6 +482,7 @@ def run(
         agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
 
     env = {"HOME": CONTAINER_HOME}
+    env.update(proxy_env)
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
     with _auto_stop_on_exit(session):
@@ -351,9 +533,10 @@ def remove(conn: lxd.Lxd, agent: str, for_dir: str | None) -> None:
     container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
     _prune_worktrees(session, container_cwd, CONTAINER_USER)
     if was_stopped:
-        session.stop()
+        session.stop(timeout=30)
     print(f"Removing container '{session.name}' ...", file=sys.stderr)
     session.delete()
+    _stop_proxy(session.name)  # in case a crashed session left one behind
     print(f"Removed container '{session.name}'.", file=sys.stderr)
 
 
@@ -467,6 +650,154 @@ def unmount(conn: lxd.Lxd, for_dir: str | None, dirs: tuple[str, ...]) -> None:
 
 
 # --------------------------------------------------------------------------
+# net
+# --------------------------------------------------------------------------
+
+
+def _parse_duration(text: str) -> float:
+    """Parse a duration like '90s', '10m', '2h', '1d' into seconds.
+
+    Bare numbers are minutes.
+    """
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhd]?)", text.strip().lower())
+    if not m:
+        raise click.BadParameter(f"invalid duration {text!r} (try e.g. 10m, 2h)")
+    scale = {"": 60, "s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return float(m.group(1)) * scale
+
+
+def _format_expiry(expires: float | None) -> str:
+    if expires is None:
+        return ""
+    remaining = expires - time.time()
+    if remaining <= 0:
+        return " (expired)"
+    if remaining < 60:
+        return f" (expires in {int(remaining)}s)"
+    if remaining < 3600:
+        return f" (expires in {int(remaining // 60)}m)"
+    return f" (expires in {remaining / 3600:.1f}h)"
+
+
+# A plain Group: the net commands only edit recorded state, so they skip the
+# _Command machinery (migration check + LXD connection) the other verbs need.
+@main.group(cls=click.Group)
+def net() -> None:
+    """Manage a directory's network access policy.
+
+    The default mode is open (unrestricted, today's behaviour). In restricted
+    mode the container gets no direct network access; the agent is routed
+    through a filtering proxy that admits only the agent's own API domains
+    plus this directory's allowlist. Mode changes take full effect the next
+    time an agent starts; allow/deny apply immediately to running restricted
+    sessions.
+    """
+
+
+_for_dir_option = click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    default=None,
+    help="target DIR (default: current directory)",
+)
+
+
+@net.command()
+@_for_dir_option
+def status(for_dir: str | None) -> None:
+    """Show the network mode and allowlist for a directory."""
+    target = _realdir(for_dir)
+    policy = state.get_network(target)
+    print(f"{target}: {policy['mode']}")
+    if policy["mode"] != state.MODE_RESTRICTED:
+        return
+    print("always allowed (agent API domains):")
+    for name in agents.AGENT_NAMES:
+        domains = agents.get(name).api_domains
+        print(f"  {name}: {', '.join(domains) if domains else '(none)'}")
+    if policy["allow"]:
+        print("allowed domains:")
+        for a in policy["allow"]:
+            print(f"  {a['domain']}{_format_expiry(a['expires'])}")
+    else:
+        print("allowed domains: (none)")
+
+
+@net.command()
+@_for_dir_option
+def restrict(for_dir: str | None) -> None:
+    """Restrict a directory's containers to allowed domains only."""
+    target = _realdir(for_dir)
+    state.set_network_mode(target, state.MODE_RESTRICTED)
+    print(f"Network mode for {target}: restricted", file=sys.stderr)
+    print(
+        "Takes full effect the next time an agent starts here.",
+        file=sys.stderr,
+    )
+
+
+@net.command("open")
+@_for_dir_option
+def open_(for_dir: str | None) -> None:
+    """Restore unrestricted network access for a directory."""
+    target = _realdir(for_dir)
+    state.set_network_mode(target, state.MODE_OPEN)
+    print(f"Network mode for {target}: open", file=sys.stderr)
+    print(
+        "Running restricted sessions now pass all proxied traffic; direct "
+        "network access returns the next time an agent starts here.",
+        file=sys.stderr,
+    )
+
+
+@net.command()
+@_for_dir_option
+@click.option(
+    "--duration",
+    metavar="TIME",
+    default=None,
+    help="allow temporarily, e.g. 90s, 10m, 2h (bare numbers are minutes)",
+)
+@click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
+def allow(for_dir: str | None, duration: str | None, domains: tuple[str, ...]) -> None:
+    """Allow domains (and their subdomains) for a directory.
+
+    Takes effect immediately in running restricted sessions. Re-allowing a
+    domain replaces its expiry, so a plain `allow` makes a temporary grant
+    permanent.
+    """
+    target = _realdir(for_dir)
+    expires = time.time() + _parse_duration(duration) if duration else None
+    for domain in domains:
+        state.add_network_allow(target, domain, expires)
+        print(f"Allowed {domain}{_format_expiry(expires)}", file=sys.stderr)
+    if state.get_network(target)["mode"] != state.MODE_RESTRICTED:
+        print(
+            "Note: network mode here is open; the allowlist only takes "
+            "effect after 'aiab net restrict'.",
+            file=sys.stderr,
+        )
+
+
+@net.command()
+@_for_dir_option
+@click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
+def deny(for_dir: str | None, domains: tuple[str, ...]) -> None:
+    """Remove domains from a directory's allowlist.
+
+    Takes effect immediately in running restricted sessions. The agent's own
+    API domains cannot be denied.
+    """
+    target = _realdir(for_dir)
+    for domain in domains:
+        if state.remove_network_allow(target, domain):
+            print(f"Removed {domain}", file=sys.stderr)
+        else:
+            print(f"Not in the allowlist: {domain}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
 # upgrade-templates
 # --------------------------------------------------------------------------
 
@@ -506,10 +837,29 @@ def _fmt_mount(dev: dict[str, str]) -> str:
     return line
 
 
+def _fmt_network(policy: state.NetworkPolicy, masked: bool) -> str:
+    """Describe a container's network state for `aiab list`.
+
+    Combines the directory's recorded policy with whether the container's NIC
+    is actually masked right now, flagging the gap when a mode change hasn't
+    been applied yet (that only happens when an agent next starts).
+    """
+    line = policy["mode"]
+    if policy["mode"] == state.MODE_RESTRICTED:
+        n = len(policy["allow"])
+        if n:
+            line += f" ({n} allowed domain{'s' if n != 1 else ''})"
+    if (policy["mode"] == state.MODE_RESTRICTED) != masked:
+        line += ", applies on next run"
+    return line
+
+
 def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
     devices = conn.container(name).devices()
     source = None
     extras = []
+    # A 'none' device is the NIC mask restricted mode adds (see aiab net).
+    masked = any(dev.get("type") == "none" for dev in devices.values())
     for dev_name, dev in sorted(devices.items()):
         if dev.get("type") != "disk" or not dev_name.startswith("dir-"):
             continue
@@ -522,6 +872,9 @@ def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
     print(f"  source: {_fmt_mount(source)}" if source else "  source: (none)")
     for dev in extras:
         print(f"  mount:  {_fmt_mount(dev)}")
+    if source and "source" in source:
+        policy = state.get_network(source["source"])
+        print(f"  network: {_fmt_network(policy, masked)}")
 
 
 @main.command(name="list")

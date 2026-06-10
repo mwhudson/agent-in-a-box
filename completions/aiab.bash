@@ -13,7 +13,7 @@ _aiab() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="run remove mount unmount upgrade-templates list lxc"
+    local subcommands="run remove mount unmount net upgrade-templates list lxc"
     local agents="claude claude-or opencode copilot"
 
     _aiab_dirs() {
@@ -61,6 +61,9 @@ _aiab() {
         unmount)
             COMPREPLY=( $(compgen -W "--for" -- "$cur") )
             _aiab_dirs
+            ;;
+        net)
+            COMPREPLY=( $(compgen -W "status restrict open allow deny --for --duration" -- "$cur") )
             ;;
         list)
             COMPREPLY=( $(compgen -W "--for" -- "$cur") )
