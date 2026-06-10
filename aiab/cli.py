@@ -71,6 +71,11 @@ _LOCK_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "locks"
 # but abstract sockets live in the (shared) network namespace.
 _PROXY_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "proxy"
 
+# Domains every restricted container may always reach, whatever the agent:
+# the Ubuntu archives, so apt works inside the container (apt's traffic is
+# proxy-aware plain HTTP, which the proxy forwards).
+BASELINE_DOMAINS: list[str] = ["archive.ubuntu.com", "security.ubuntu.com"]
+
 
 def _proxy_socket_name(container_name: str) -> str:
     """The abstract socket address for a container's proxy, with leading @.
@@ -132,7 +137,7 @@ def _ensure_proxy(
         "aiab.netproxy",
         f"--socket={sock_name}",
         f"--dir={work_dir}",
-    ] + [f"--api-domain={d}" for d in api_domains]
+    ] + [f"--api-domain={d}" for d in api_domains + BASELINE_DOMAINS]
     # The child needs the aiab package importable regardless of cwd.
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -702,12 +707,12 @@ def _format_expiry(expires: float | None) -> str:
 def net() -> None:
     """Manage a directory's network access policy.
 
-    The default mode is open (unrestricted, today's behaviour). In restricted
-    mode the container gets no direct network access; the agent is routed
-    through a filtering proxy that admits only the agent's own API domains
-    plus this directory's allowlist. Mode changes take full effect the next
-    time an agent starts; allow/deny apply immediately to running restricted
-    sessions.
+    The default mode is restricted: the container gets no direct network
+    access, and the agent is routed through a filtering proxy that admits
+    only the agent's own API domains plus this directory's allowlist. Use
+    'aiab net open' to opt a directory out. Mode changes take full effect
+    the next time an agent starts; allow/deny apply immediately to running
+    restricted sessions.
     """
 
 
@@ -729,7 +734,8 @@ def status(for_dir: str | None) -> None:
     print(f"{target}: {policy['mode']}")
     if policy["mode"] != state.MODE_RESTRICTED:
         return
-    print("always allowed (agent API domains):")
+    print("always allowed:")
+    print(f"  baseline: {', '.join(BASELINE_DOMAINS)}")
     for name in agents.AGENT_NAMES:
         domains = agents.get(name).api_domains
         print(f"  {name}: {', '.join(domains) if domains else '(none)'}")

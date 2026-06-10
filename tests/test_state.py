@@ -93,19 +93,20 @@ def test_mounts_are_keyed_per_directory(tmp_path):
 
 def test_get_network_default(tmp_path):
     policy = state.get_network(tmp_path)
-    assert policy["mode"] == state.MODE_OPEN
+    assert policy["mode"] == state.DEFAULT_MODE
     assert policy["allow"] == []
 
 
-def test_set_network_mode_restricted(tmp_path):
-    state.set_network_mode(tmp_path, state.MODE_RESTRICTED)
-    assert state.get_network(tmp_path)["mode"] == state.MODE_RESTRICTED
-
-
-def test_set_network_mode_back_to_open_removes_key(tmp_path):
-    state.set_network_mode(tmp_path, state.MODE_RESTRICTED)
+def test_set_network_mode_open_recorded(tmp_path):
+    # Open is not the default, so an explicit `net open` must persist.
     state.set_network_mode(tmp_path, state.MODE_OPEN)
-    # Open with no allows → key is pruned from file.
+    assert state.get_network(tmp_path)["mode"] == state.MODE_OPEN
+
+
+def test_set_network_mode_back_to_default_removes_key(tmp_path):
+    state.set_network_mode(tmp_path, state.MODE_OPEN)
+    state.set_network_mode(tmp_path, state.DEFAULT_MODE)
+    # The default mode with no allows → key is pruned from file.
     data = state._load_file(state._NET_PATH)
     assert str(tmp_path) not in data
 
@@ -186,7 +187,8 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
 
 def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     gone = tmp_path / "gone"
-    state.set_network_mode(gone, state.MODE_RESTRICTED)
+    # An explicit open record is the non-default policy that persists.
+    state.set_network_mode(gone, state.MODE_OPEN)
 
     _, pruned_net, _ = state.prune_stale()
 

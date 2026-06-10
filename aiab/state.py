@@ -144,6 +144,11 @@ def remove_mount(directory: StrPath, source: StrPath) -> bool:
 MODE_OPEN = "open"
 MODE_RESTRICTED = "restricted"
 
+# The mode for directories with no recorded policy. Restricted-by-default is
+# an experiment (flip this back to MODE_OPEN to undo); use `aiab net open` to
+# opt a directory out.
+DEFAULT_MODE = MODE_RESTRICTED
+
 
 class Allow(TypedDict):
     """One allowed domain: the name and an optional expiry (unix time)."""
@@ -173,7 +178,7 @@ def _unexpired(allows: list[Allow]) -> list[Allow]:
 
 
 def get_network(directory: StrPath) -> NetworkPolicy:
-    """Return the network policy for a directory (default: open, no allows).
+    """Return the network policy for a directory (default: DEFAULT_MODE, no allows).
 
     Expired allow entries are filtered from the returned policy; they are only
     actually pruned from the file by the mutating functions below.
@@ -181,7 +186,7 @@ def get_network(directory: StrPath) -> NetworkPolicy:
     data: NetState = _load_file(_NET_PATH)
     policy = data.get(_key(directory))
     if policy is None:
-        return {"mode": MODE_OPEN, "allow": []}
+        return {"mode": DEFAULT_MODE, "allow": []}
     policy["allow"] = _unexpired(policy["allow"])
     return policy
 
@@ -189,7 +194,7 @@ def get_network(directory: StrPath) -> NetworkPolicy:
 def _save_network_policy(key: str, policy: NetworkPolicy) -> None:
     data: NetState = _load_file(_NET_PATH)
     policy["allow"] = _unexpired(policy["allow"])
-    if policy["mode"] == MODE_OPEN and not policy["allow"]:
+    if policy["mode"] == DEFAULT_MODE and not policy["allow"]:
         data.pop(key, None)  # back to the default; keep the file tidy
     else:
         data[key] = policy

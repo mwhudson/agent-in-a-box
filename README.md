@@ -4,9 +4,9 @@ Run coding agents (Claude Code, opencode, GitHub Copilot CLI) inside disposable
 [LXD](https://canonical.com/lxd) containers, with the current directory mounted
 in. Each project directory gets its own container, so an agent running with
 permission prompts disabled can only touch the directories you've mounted —
-not the rest of your machine. Network access can be locked down per directory
-too ([`aiab net`](#aiab-net)): in restricted mode the agent can only reach its
-own API plus domains you've explicitly allowed.
+not the rest of your machine. Network access is locked down too: by default
+the agent can only reach its own API plus domains you've explicitly allowed,
+managed per directory with [`aiab net`](#aiab-net).
 
 Everything is driven by a single command, `aiab`, with a subcommand per task:
 
@@ -265,10 +265,12 @@ aiab net allow    [--for DIR] [--duration TIME] DOMAIN...
 aiab net deny     [--for DIR] DOMAIN...
 ```
 
-By default a container has unrestricted network access. `aiab net restrict`
-records a **restricted** network policy for the project directory (persisted
-like `aiab mount`'s record, so it applies to every agent and survives
-container recreation). When an agent next starts there:
+By default a directory's network policy is **restricted**; `aiab net open`
+records an **open** (unrestricted) policy for directories where you want the
+old free-for-all back, and `aiab net restrict` switches one back again. The
+policy is persisted per project directory (like `aiab mount`'s record, so it
+applies to every agent and survives container recreation). When an agent
+starts in a restricted directory:
 
 - the container's NIC (inherited from the default profile) is masked, so it
   has **no direct network access at all**;
