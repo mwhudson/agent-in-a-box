@@ -48,6 +48,16 @@ from .migrate import maybe_migrate
 
 CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
+# PATH for the agent process (and so everything it spawns). Without this, lxc
+# exec falls back to a default that lacks ~/.local/bin — where the agent
+# installers (and tools a setup script installs) put their binaries. Login
+# shells reset PATH in /etc/profile and get ~/.local/bin back from the
+# /etc/profile.d snippet provisioned into the template (see aiab.provision).
+_CONTAINER_PATH: str = (
+    f"{CONTAINER_HOME}/.local/bin:"
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
 # Per-container lock files live here. Each 'aiab run' holds a shared flock
@@ -488,7 +498,7 @@ def run(
     if worktree:
         agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
 
-    env = {"HOME": CONTAINER_HOME}
+    env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
     env.update(proxy_env)
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))

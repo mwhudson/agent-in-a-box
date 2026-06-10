@@ -33,6 +33,29 @@ from .lxd import Container
 # An install/upgrade step: a description and the argv to run in the container.
 Step = tuple[str, list[str]]
 
+# Ubuntu's /etc/profile resets PATH, and the stock ~/.profile that would add
+# ~/.local/bin back is shadowed by the host dir mounted over the container
+# home — so login shells would miss the agent binaries without this snippet
+# (profile.d is sourced after the reset). Agent processes don't read profiles;
+# they get the equivalent PATH from the env `aiab run` passes (see aiab.cli).
+_PROFILE_D_PATH = "/etc/profile.d/aiab.sh"
+_PROFILE_D_SNIPPET = """\
+# Written by aiab: agents (and tools they install) live in ~/.local/bin.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) PATH="$HOME/.local/bin:$PATH" ;;
+esac
+"""
+
+
+def _add_local_bin_to_path(container: Container) -> None:
+    """Write the /etc/profile.d snippet that puts ~/.local/bin on PATH."""
+    container.exec(
+        ["tee", _PROFILE_D_PATH],
+        input=_PROFILE_D_SNIPPET.encode(),
+        stdout=subprocess.DEVNULL,
+    )
+
 
 def provision_base(
     container: Container,
@@ -130,6 +153,8 @@ def _create(
     container.exec(["apt-get", "update", "-q"], stdout=subprocess.DEVNULL)
     container.exec(["apt-get", "dist-upgrade", "-y", "-q"], stdout=subprocess.DEVNULL)
 
+    _add_local_bin_to_path(container)
+
     for description, cmd in install_cmds:
         print(description, file=sys.stderr)
         container.exec(cmd, stdout=subprocess.DEVNULL)
@@ -158,6 +183,9 @@ def update_template(
     print("Updating packages ...", file=sys.stderr)
     container.exec(["apt-get", "update", "-q"], stdout=subprocess.DEVNULL)
     container.exec(["apt-get", "dist-upgrade", "-y", "-q"], stdout=subprocess.DEVNULL)
+
+    # Templates built before the snippet existed pick it up on upgrade.
+    _add_local_bin_to_path(container)
 
     for description, cmd in update_cmds:
         print(description, file=sys.stderr)
