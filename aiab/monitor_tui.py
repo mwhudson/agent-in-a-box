@@ -17,14 +17,19 @@
 #
 # The richer of the two control consoles (the shared network plumbing and the
 # plain keystroke fallback live in aiab.netwatch). It is a general session
-# control panel with two interchangeable views, swapped from a header button
-# (or the `m` hotkey):
+# control panel with three tabs, selected from the buttons in the header (or
+# the 1/2/3 hotkeys):
 #
-#   * the network view (default): proxy logs scroll in the middle, and every
-#     parked host gets a row of Allow / 15m / Deny / Skip buttons above the
-#     footer, so a decision is a mouse click as well as a keystroke;
-#   * the mounts view: the recorded mounts for the directory, each a row with
-#     a read-only/read-write toggle and a remove button, plus an input to add
+#   * Network (default): proxy logs scroll in the middle, and every parked host
+#     gets a row of Allow / 15m / Deny / Skip buttons above the footer, so a
+#     decision is a mouse click as well as a keystroke;
+#   * Domains: every domain already allowed or denied for the directory, each a
+#     row whose Allow / 15m / Deny / × buttons re-decide it on the spot — so a
+#     past Deny can be flipped to Allow with one click — plus an input to allow
+#     a new domain up front. Writes the same aiab.state the parked-host
+#     decisions do;
+#   * Mounts: the recorded mounts for the directory, each a row with a
+#     read-only/read-write toggle and a remove button, plus an input to add
 #     a new one (with filesystem path completion). Edits mutate aiab.state and,
 #     when a session container is around, take effect live on it — the same
 #     thing `aiab mount`/`aiab unmount` do.
@@ -72,6 +77,30 @@ class PendingRow(Horizontal):
         yield Button("15m", name=netwatch.TEMP, classes=netwatch.TEMP)
         yield Button("Deny", name=netwatch.DENY, classes=netwatch.DENY)
         yield Button("Skip", name=netwatch.SKIP, classes=netwatch.SKIP)
+
+
+class DecisionRow(Horizontal):
+    """One already-decided domain and the buttons to re-decide or drop it."""
+
+    def __init__(self, domain: str, kind: str, expires: float | None = None) -> None:
+        super().__init__()
+        self.domain = domain
+        self.kind = kind  # netwatch.ALLOW or netwatch.DENY
+        self.expires = expires
+
+    def compose(self) -> ComposeResult:
+        if self.kind == netwatch.DENY:
+            badge, badge_class = "denied", "badge-deny"
+        elif self.expires is not None:
+            badge, badge_class = "15m", "badge-allow"
+        else:
+            badge, badge_class = "allowed", "badge-allow"
+        yield Static(self.domain, classes="domain")
+        yield Static(badge, classes=f"badge {badge_class}")
+        yield Button("Allow", name=netwatch.ALLOW, classes=netwatch.ALLOW)
+        yield Button("15m", name=netwatch.TEMP, classes=netwatch.TEMP)
+        yield Button("Deny", name=netwatch.DENY, classes=netwatch.DENY)
+        yield Button("×", name="remove", classes="remove")
 
 
 class MountRow(Horizontal):
@@ -145,11 +174,15 @@ class MonitorApp(App[None]):
         height: 1;
         padding: 0 1;
     }
-    #view-toggle {
+    .tab {
         height: 1;
         min-width: 9;
         border: none;
         margin: 0;
+    }
+    .tab.active {
+        background: $accent;
+        text-style: bold;
     }
     #log {
         height: 1fr;
@@ -193,6 +226,64 @@ class MonitorApp(App[None]):
         border: none;
         padding: 0 1;
     }
+    #domains {
+        height: 1fr;
+    }
+    #domain-list {
+        height: 1fr;
+    }
+    DecisionRow {
+        height: 1;
+    }
+    DecisionRow .domain {
+        width: 1fr;
+        padding: 0 1;
+    }
+    DecisionRow .badge {
+        width: 9;
+        padding: 0 1;
+        text-style: bold;
+    }
+    DecisionRow .badge-allow {
+        color: $success;
+    }
+    DecisionRow .badge-deny {
+        color: $error;
+    }
+    DecisionRow Button {
+        height: 1;
+        min-width: 7;
+        border: none;
+        margin: 0 1 0 0;
+    }
+    DecisionRow Button.allow {
+        background: $success-darken-2;
+    }
+    DecisionRow Button.temp {
+        background: $success-darken-3;
+    }
+    DecisionRow Button.deny {
+        background: $error-darken-2;
+    }
+    DecisionRow .remove {
+        min-width: 3;
+        background: $error-darken-2;
+    }
+    #add-domain-row {
+        height: 1;
+    }
+    #add-domain-btn {
+        height: 1;
+        min-width: 7;
+        border: none;
+        margin: 0 1 0 0;
+        background: $success-darken-2;
+    }
+    #add-domain {
+        height: 1;
+        border: none;
+        padding: 0 1;
+    }
     #pending {
         height: auto;
         max-height: 60%;
@@ -227,7 +318,10 @@ class MonitorApp(App[None]):
         Binding("t", f"decide('{netwatch.TEMP}')", "allow 15m"),
         Binding("d", f"decide('{netwatch.DENY}')", "deny"),
         Binding("s", f"decide('{netwatch.SKIP}')", "skip"),
-        Binding("m", "toggle_mounts", "mounts"),
+        Binding("1", "select_view('network')", "network", show=False),
+        Binding("2", "select_view('domains')", "domains", show=False),
+        Binding("3", "select_view('mounts')", "mounts", show=False),
+        Binding("m", "select_view('mounts')", "mounts", show=False),
         Binding("q", "quit", "quit"),
     ]
 
@@ -250,14 +344,22 @@ class MonitorApp(App[None]):
         # the DOM so check_action can use it even when remove() is still
         # pending (Widget.remove is async).
         self._pending_count: int = 0
-        # Which view fills the middle of the pane.
-        self._showing_mounts = False
+        # Which tab fills the middle of the pane: "network", "domains" or
+        # "mounts".
+        self._view = "network"
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
+            yield Button("Network", id="tab-network", classes="tab")
+            yield Button("Domains", id="tab-domains", classes="tab")
+            yield Button("Mounts", id="tab-mounts", classes="tab")
             yield Static(id="policy")
-            yield Button("Mounts", id="view-toggle")
         yield RichLog(id="log")
+        with Vertical(id="domains"):
+            yield VerticalScroll(id="domain-list")
+            with Horizontal(id="add-domain-row"):
+                yield Button("+ Allow", id="add-domain-btn")
+                yield Input(id="add-domain", placeholder="domain to allow")
         with Vertical(id="mounts"):
             yield VerticalScroll(id="mount-list")
             with Horizontal(id="add-row"):
@@ -271,7 +373,7 @@ class MonitorApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#mounts").display = False
+        self._select_view("network")
         self._refresh_policy()
         self.set_interval(netwatch.POLL_INTERVAL, self._poll)
 
@@ -325,9 +427,11 @@ class MonitorApp(App[None]):
         self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Hide decision bindings from the footer when nothing is pending."""
+        """Hide decision bindings unless the network tab has a pending host."""
         if action == "decide":
-            return True if self._pending_count > 0 else None
+            if self._view == "network" and self._pending_count > 0:
+                return True
+            return None
         return True
 
     def action_decide(self, action: str) -> None:
@@ -336,17 +440,63 @@ class MonitorApp(App[None]):
         if rows:
             self._decide(rows.first(), action)
 
-    # -- mounts view --
+    # -- tab switching --
 
-    def action_toggle_mounts(self) -> None:
-        self._showing_mounts = not self._showing_mounts
-        self.query_one("#log").display = not self._showing_mounts
-        self.query_one("#mounts").display = self._showing_mounts
-        self.query_one("#view-toggle", Button).label = (
-            "Network" if self._showing_mounts else "Mounts"
-        )
-        if self._showing_mounts:
+    def action_select_view(self, view: str) -> None:
+        self._select_view(view)
+
+    def _select_view(self, view: str) -> None:
+        self._view = view
+        self.query_one("#log").display = view == "network"
+        self.query_one("#pending").display = view == "network"
+        self.query_one("#domains").display = view == "domains"
+        self.query_one("#mounts").display = view == "mounts"
+        for name in ("network", "domains", "mounts"):
+            self.query_one(f"#tab-{name}", Button).set_class(name == view, "active")
+        if view == "domains":
+            self._refresh_domains()
+        elif view == "mounts":
             self._refresh_mounts()
+        self.refresh_bindings()
+
+    # -- domains view --
+
+    def _refresh_domains(self) -> None:
+        domain_list = self.query_one("#domain-list", VerticalScroll)
+        for row in domain_list.query(DecisionRow):
+            row.remove()
+        # Allowed domains first, then denied; alphabetical within each group so
+        # rows are easy to find and stay put when a flip moves a domain between
+        # the groups (the policy lists themselves are in decision order).
+        policy = state.get_network(self.work_dir)
+        for a in sorted(policy["allow"], key=lambda a: a["domain"]):
+            domain_list.mount(DecisionRow(a["domain"], netwatch.ALLOW, a["expires"]))
+        for d in sorted(policy["deny"]):
+            domain_list.mount(DecisionRow(d, netwatch.DENY))
+
+    def _decide_domain(self, row: DecisionRow, action: str) -> None:
+        self._write_log(netwatch.apply_decision(self.work_dir, row.domain, action))
+        self._refresh_domains()
+        self._refresh_policy()
+
+    def _add_domain(self, raw: str) -> None:
+        domain = raw.strip()
+        if not domain:
+            return
+        self._write_log(netwatch.apply_decision(self.work_dir, domain, netwatch.ALLOW))
+        self._refresh_domains()
+        self._refresh_policy()
+
+    def _remove_domain(self, row: DecisionRow) -> None:
+        # Allow and deny are disjoint, so the domain is in at most one list;
+        # drop it from both so the host is parked and re-prompted next time.
+        state.remove_network_allow(self.work_dir, row.domain)
+        state.remove_network_deny(self.work_dir, row.domain)
+        self._write_log(f"removed {row.domain}")
+        self._refresh_domains()
+        self._refresh_policy()
+
+    # -- mounts view --
 
     def _refresh_mounts(self) -> None:
         mount_list = self.query_one("#mount-list", VerticalScroll)
@@ -438,15 +588,23 @@ class MonitorApp(App[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button
-        if button.id == "view-toggle":
-            self.action_toggle_mounts()
+        if button.id and button.id.startswith("tab-"):
+            self._select_view(button.id.removeprefix("tab-"))
             return
         if button.id == "add-mount":
             self.query_one("#add-path", Input).focus()
             return
+        if button.id == "add-domain-btn":
+            self.query_one("#add-domain", Input).focus()
+            return
         row = button.parent
         if isinstance(row, PendingRow):
             self._decide(row, button.name or netwatch.SKIP)
+        elif isinstance(row, DecisionRow):
+            if button.name == "remove":
+                self._remove_domain(row)
+            else:
+                self._decide_domain(row, button.name or netwatch.ALLOW)
         elif isinstance(row, MountRow):
             if button.name == "remove":
                 self._remove_mount(row)
@@ -458,6 +616,9 @@ class MonitorApp(App[None]):
             value = event.value.strip()
             if value:
                 self._add_mount(value, readonly=True)  # default new mounts to ro
+            event.input.value = ""
+        elif event.input.id == "add-domain":
+            self._add_domain(event.value)
             event.input.value = ""
 
 

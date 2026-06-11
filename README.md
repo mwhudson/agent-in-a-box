@@ -197,7 +197,7 @@ edit it (e.g. to add MCP servers) and your changes persist.
   clickable `aiab monitor` UI (`pip install textual` — the
   `python3-textual` in the Ubuntu archive is a 0.1.x relic that predates the
   modern API). Without it the monitor falls back to a plain keystroke network
-  console (and the mounts view is unavailable).
+  console (and the domains and mounts tabs are unavailable).
 
 ## Install
 
@@ -383,13 +383,13 @@ Caveats:
 aiab monitor [--for DIR] [--plain]
 ```
 
-`aiab monitor` is the session control panel: a single pane with two
-interchangeable views, switched with the **Mounts**/**Network** button in the
-header (or the `m` key).
+`aiab monitor` is the session control panel: a single pane with three tabs,
+selected from the **Network** / **Domains** / **Mounts** buttons in the header
+(or the `1`/`2`/`3` keys).
 
-#### Network view
+#### Network tab
 
-The network view turns the deny-then-rerun loop into a live conversation. It
+The network tab turns the deny-then-rerun loop into a live conversation. It
 tails the proxy logs for the directory's containers, and — while the monitor
 is running — the proxy **holds** requests for domains in neither list instead
 of refusing them: the console rings the terminal bell and prompts for a
@@ -413,9 +413,20 @@ agent's `npm install` usually just works once you answer — no retry needed.
 Without a monitor session attached the proxy keeps the old fail-fast
 behaviour.
 
-#### Mounts view
+#### Domains tab
 
-The mounts view lists the directory's extra mounts (the ones `aiab mount`
+The domains tab is where you revisit decisions already made. It lists every
+domain currently allowed or denied for the directory, each as a row with
+**Allow / 15m / Deny / ×** buttons: click **Allow** on a denied row to flip it
+(or **Deny** on an allowed one), and **×** drops the rule entirely so the host
+gets parked and re-prompted next time. A domain input at the bottom allows a
+new domain up front, before the agent ever reaches for it. These are the same
+records the Network-tab prompts write, so a parked request waiting on a domain
+is released the moment you allow it here.
+
+#### Mounts tab
+
+The mounts tab lists the directory's extra mounts (the ones `aiab mount`
 records). Each row has the path, a read-only/read-write toggle, and a remove
 button; a path input at the bottom (with inline filesystem completion — accept
 the ghost suggestion with Tab or →) adds a new one, read-only by default.
