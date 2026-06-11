@@ -687,6 +687,7 @@ def run(
     # stopper from an earlier session can't stop it out from under us mid-setup.
     with _stop_when_idle(session):
         session.ensure_started(base)
+        provision.apply_session_tweaks(session)
 
         if shell:
             run_cmd = ["bash", "-l"]

@@ -47,12 +47,67 @@ case ":$PATH:" in
 esac
 """
 
+# sudo strips the environment by default; this sudoers.d snippet preserves
+# proxy variables so that `sudo apt install ...` works inside containers whose
+# network is routed through the filtering proxy.
+_SUDOERS_D_PATH = "/etc/sudoers.d/aiab-proxy-env"
+_SUDOERS_D_SNIPPET = """\
+# Written by aiab: preserve proxy env vars through sudo so that apt and
+# other network-using commands work in restricted-network containers.
+Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY"
+"""
+
 
 def _add_local_bin_to_path(container: Container) -> None:
     """Write the /etc/profile.d snippet that puts ~/.local/bin on PATH."""
     container.exec(
         ["tee", _PROFILE_D_PATH],
         input=_PROFILE_D_SNIPPET.encode(),
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def _configure_sudo_proxy_env(container: Container) -> None:
+    """Write a sudoers.d snippet that preserves proxy env vars through sudo."""
+    container.exec(
+        ["tee", _SUDOERS_D_PATH],
+        input=_SUDOERS_D_SNIPPET.encode(),
+        stdout=subprocess.DEVNULL,
+    )
+    # sudoers files must be mode 0440 and owned by root.
+    container.exec(["chmod", "0440", _SUDOERS_D_PATH])
+
+
+# --- session-start tweaks ---------------------------------------------------
+#
+# Small, idempotent fixups applied every time a session container starts.
+# These cover the same ground as _add_local_bin_to_path and
+# _configure_sudo_proxy_env but are batched into a single lxc-exec call so
+# the cost is negligible.  When a new tweak is added here it takes effect on
+# the very next session — no template rebuild or upgrade required.
+
+_SESSION_TWEAKS_SCRIPT = f"""\
+set -e
+cat > {_PROFILE_D_PATH} << 'AIAB_EOF'
+{_PROFILE_D_SNIPPET.rstrip()}
+AIAB_EOF
+cat > {_SUDOERS_D_PATH} << 'AIAB_EOF'
+{_SUDOERS_D_SNIPPET.rstrip()}
+AIAB_EOF
+chmod 0440 {_SUDOERS_D_PATH}
+"""
+
+
+def apply_session_tweaks(container: Container) -> None:
+    """Apply cheap, idempotent filesystem tweaks at session start.
+
+    This ensures that fixes added after a template was built still reach
+    running session containers without requiring a template rebuild.  The
+    entire set of tweaks runs inside a single ``sh -c`` call so the
+    overhead is one lxc-exec round-trip.
+    """
+    container.exec(
+        ["sh", "-c", _SESSION_TWEAKS_SCRIPT],
         stdout=subprocess.DEVNULL,
     )
 
@@ -154,6 +209,7 @@ def _create(
     container.exec(["apt-get", "dist-upgrade", "-y", "-q"], stdout=subprocess.DEVNULL)
 
     _add_local_bin_to_path(container)
+    _configure_sudo_proxy_env(container)
 
     for description, cmd in install_cmds:
         print(description, file=sys.stderr)
@@ -186,6 +242,7 @@ def update_template(
 
     # Templates built before the snippet existed pick it up on upgrade.
     _add_local_bin_to_path(container)
+    _configure_sudo_proxy_env(container)
 
     for description, cmd in update_cmds:
         print(description, file=sys.stderr)
