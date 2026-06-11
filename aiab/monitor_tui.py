@@ -55,7 +55,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import Suggester
-from textual.widgets import Button, Footer, Input, RichLog, Static
+from textual.widgets import Button, Input, RichLog, Static
 
 from . import PROJECT, WORK_PREFIX
 from . import agents
@@ -370,7 +370,6 @@ class MonitorApp(App[None]):
                     suggester=PathSuggester(),
                 )
         yield VerticalScroll(id="pending")
-        yield Footer()
 
     def on_mount(self) -> None:
         self._select_view("network")
@@ -427,7 +426,7 @@ class MonitorApp(App[None]):
         self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Hide decision bindings unless the network tab has a pending host."""
+        """Let the a/t/d/s keys decide only on the network tab, when pending."""
         if action == "decide":
             if self._view == "network" and self._pending_count > 0:
                 return True
