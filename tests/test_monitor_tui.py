@@ -138,6 +138,43 @@ def test_vanished_file_removes_row_and_reappearance_reprompts(work_dir):
     asyncio.run(scenario())
 
 
+def test_pending_flashes_network_tab_only_from_other_tabs(work_dir):
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+            tab = app.query_one("#tab-network", monitor_tui.Button)
+
+            # On the network tab the parked row is already in view: no flash.
+            app._flash_tab()
+            assert tab.has_class("flash") is False
+
+            # Switch away and the tab starts blinking on/off to pull focus back.
+            await pilot.press("2")
+            await pilot.pause()
+            app._flash_on = False
+            app._flash_tab()
+            assert tab.has_class("flash") is True
+            app._flash_tab()
+            assert tab.has_class("flash") is False
+
+            # Decide the host and the flashing stops.
+            await pilot.press("1")
+            await pilot.pause()
+            await pilot.click("PendingRow Button.allow")
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            app._flash_tab()
+            assert tab.has_class("flash") is False
+
+    asyncio.run(scenario())
+
+
 # -- domains view --
 
 

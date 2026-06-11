@@ -184,6 +184,11 @@ class MonitorApp(App[None]):
         background: $accent;
         text-style: bold;
     }
+    .tab.flash {
+        background: $warning;
+        color: $text;
+        text-style: bold;
+    }
     #log {
         height: 1fr;
         padding: 0 1;
@@ -347,6 +352,9 @@ class MonitorApp(App[None]):
         # Which tab fills the middle of the pane: "network", "domains" or
         # "mounts".
         self._view = "network"
+        # Whether the Network tab is currently lit in its flash cycle (toggled
+        # while a decision is pending and another tab has focus).
+        self._flash_on = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -375,6 +383,9 @@ class MonitorApp(App[None]):
         self._select_view("network")
         self._refresh_policy()
         self.set_interval(netwatch.POLL_INTERVAL, self._poll)
+        # A slow blink of the Network tab, so a parked host pulls focus back
+        # while you are over on Domains or Mounts.
+        self.set_interval(0.6, self._flash_tab)
 
     # -- network view --
 
@@ -456,7 +467,16 @@ class MonitorApp(App[None]):
             self._refresh_domains()
         elif view == "mounts":
             self._refresh_mounts()
+        self._flash_tab()  # stop flashing the moment the Network tab is opened
         self.refresh_bindings()
+
+    def _flash_tab(self) -> None:
+        """Blink the Network tab while a host is parked and another tab shows."""
+        if self._pending_count > 0 and self._view != "network":
+            self._flash_on = not self._flash_on
+        else:
+            self._flash_on = False
+        self.query_one("#tab-network", Button).set_class(self._flash_on, "flash")
 
     # -- domains view --
 
