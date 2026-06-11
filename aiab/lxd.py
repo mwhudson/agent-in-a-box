@@ -514,15 +514,21 @@ class Container:
         )
 
     def add_config_overlay(
-        self, host_path: StrPath, container_path: str, container_user: int = 0
+        self,
+        host_path: StrPath,
+        container_path: str,
+        container_user: int = 0,
+        readonly: bool = False,
     ) -> None:
         """Bind-mount a host file or directory at an explicit container path.
 
         Used to overlay versioned config (e.g. CLAUDE.md, commands/) onto the
-        container's home, independent of the working-directory mounts. The
-        device name is derived from container_path so the mount is idempotent
-        across sessions, and uses a 'cfg-' prefix to keep it distinct from the
-        dir-* working mounts.
+        container's home, independent of the working-directory mounts, and to
+        shadow the repo's .git/hooks and .git/config with per-directory
+        sidecars (see aiab.cli's git guard). The device name is derived from
+        container_path so the mount is idempotent across sessions, and uses a
+        'cfg-' prefix to keep it distinct from the dir-* working mounts. With
+        readonly=True the mount is read-only in the container.
         """
         # host_path is handed to lxc / compared against config-show output; the
         # container_path is a path *inside* the container (always POSIX).
@@ -534,6 +540,7 @@ class Container:
             existing
             and existing.get("source") == host_path
             and existing.get("path") == container_path
+            and (str(existing.get("readonly", "false")).lower() == "true") == readonly
         ):
             return
         # Create the mountpoint's parent dirs as container_user first. Otherwise
@@ -562,23 +569,22 @@ class Container:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        run(
-            self._argv(
-                [
-                    "config",
-                    "device",
-                    "add",
-                    self.name,
-                    name,
-                    "disk",
-                    f"source={host_path}",
-                    f"path={container_path}",
-                ]
-            ),
-            stdout=subprocess.DEVNULL,
-        )
+        add_cmd = [
+            "config",
+            "device",
+            "add",
+            self.name,
+            name,
+            "disk",
+            f"source={host_path}",
+            f"path={container_path}",
+        ]
+        if readonly:
+            add_cmd.append("readonly=true")
+        run(self._argv(add_cmd), stdout=subprocess.DEVNULL)
+        mode = " (read-only)" if readonly else ""
         print(
-            f"Overlaid {host_path} -> container:{container_path}",
+            f"Overlaid {host_path} -> container:{container_path}{mode}",
             file=sys.stderr,
         )
 

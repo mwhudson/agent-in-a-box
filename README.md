@@ -78,6 +78,49 @@ state dir's `.source` file records the project directory it belongs to).
 [`aiab gc`](#aiab-gc) removes a directory's state dir (setup script included)
 along with its other records once the directory itself is gone.
 
+## Protecting the host repo (the git guard)
+
+The working directory is mounted **read-write**, so an off-the-rails agent can
+write bad code into your tree — that's inherent to letting it do the job, and
+git is your backstop. But `.git` is special: git hooks (`.git/hooks/*`) and
+several `.git/config` keys (`core.hooksPath`, `core.pager`, `core.fsmonitor`,
+`[alias]`, filter `clean`/`smudge`, …) are *code that runs when host git
+touches the repo* — fired by commands as innocuous as `git status` or `git
+diff`, **outside the container**. Left unguarded, an agent could drop such a
+payload into the mounted `.git` and have it execute on your machine the next
+time you run git there.
+
+So by default `aiab run`, in a git repository, gives the container its **own
+copies** of `.git/hooks` and `.git/config`, seeded from the real ones and
+bind-mounted over them:
+
+- `.git/hooks` is shadowed **read-write**, so hooks the agent (or its tooling)
+  installs still work *inside* the container — they just live in the sidecar
+  and never reach the host's hooks dir.
+- `.git/config` is shadowed **read-only**: the container reads your real config
+  (so your aliases, hooks path, etc. still apply in-session) but can't change
+  what host git sees.
+
+The host's real `.git/hooks` and `.git/config` are shadowed and left untouched.
+The copies live under the directory's state dir and are reseeded on every run,
+so they're disposable. Like the rest of the sandbox this is a guard against an
+agent wandering, not against a deliberate exploit — defeating it would take a
+kernel container escape.
+
+Notes:
+
+- This narrows the `.git`-based vectors only. An agent can still write a
+  `Makefile`, `package.json` `postinstall`, `.envrc`, etc. that runs when *you*
+  invoke the corresponding tool — but those need you to actively run something,
+  unlike git hooks which fire from everyday read-only-feeling commands.
+- Because `.git/config` is read-only in the container, in-session commands that
+  rewrite it (`git config --local …`, `git remote add …`) fail. Local work
+  (add/commit/diff/log/branch/checkout) is unaffected. Use `--no-git-guard` if
+  you need the agent to edit repo config.
+- It only kicks in when the working directory's `.git` is a real directory;
+  a directly-mounted linked worktree or submodule checkout (where `.git` is a
+  gitfile) is skipped.
+
 ## Versioned Claude config (CLAUDE.md + slash commands)
 
 The `claude/` directory in this repo is the source of truth for the global
@@ -194,7 +237,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ### aiab run
 
 ```
-aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--shell] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--no-git-guard] [--shell] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `claude-or`, `opencode`, or `copilot`.
@@ -202,6 +245,8 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--she
   is the container's working directory, mounted at `/work/<basename>`.
 - `--add-mount DIR` — mount `DIR` **read-only** into the container and record it for this directory (repeatable).
 - `--add-mount-rw DIR` — mount `DIR` read-write and record it (repeatable).
+- `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
+  (see [the git guard](#protecting-the-host-repo-the-git-guard)).
 - `--shell` — open an interactive shell in the container instead of the agent.
 - Anything after `--` is passed straight through to the agent.
 

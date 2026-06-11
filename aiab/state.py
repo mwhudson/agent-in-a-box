@@ -255,6 +255,20 @@ def dir_state_dir(directory: StrPath) -> Path:
     return d
 
 
+def git_guard_dir(directory: StrPath) -> Path:
+    """Return (creating it if needed) the host dir holding a directory's
+    sidecar copies of .git/hooks and .git/config (see aiab.cli's git guard).
+
+    It lives inside the directory's dir_state_dir, so prune_stale() reclaims it
+    together with the rest of that directory's state when the project directory
+    is gone. The contents are reseeded from the real repo on every run, so they
+    are disposable; nothing here needs to survive on its own.
+    """
+    d = dir_state_dir(directory) / "git-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def prune_stale() -> tuple[list[str], list[str], list[str]]:
     """Remove records for directories that no longer exist from all state.
 

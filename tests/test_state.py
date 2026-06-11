@@ -266,3 +266,36 @@ def test_prune_stale_skips_state_dir_without_source(tmp_path):
 
     assert pruned_state == []
     assert stray.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# git_guard_dir
+# ---------------------------------------------------------------------------
+
+
+def test_git_guard_dir_lives_under_state_dir(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    guard = state.git_guard_dir(project)
+    assert guard.is_dir()
+    assert guard.parent == state.dir_state_dir(project)
+
+
+def test_git_guard_dir_is_stable(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    assert state.git_guard_dir(project) == state.git_guard_dir(project)
+
+
+def test_git_guard_dir_pruned_with_state_dir(tmp_path):
+    # It lives inside the dir_state_dir, so prune_stale reclaims it with the
+    # rest of a deleted directory's state.
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    guard = state.git_guard_dir(gone)
+    (guard / "config").write_text("[core]\n")
+    gone.rmdir()
+
+    state.prune_stale()
+
+    assert not guard.exists()

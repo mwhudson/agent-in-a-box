@@ -27,6 +27,7 @@ import contextlib
 import fcntl
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -359,6 +360,89 @@ def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     )
 
 
+# -- git guard --
+#
+# Git hooks and several .git/config keys (core.hooksPath, aliases, core.pager,
+# core.fsmonitor, filter clean/smudge, ...) are code that runs when *host* git
+# touches the repo — i.e. outside the container, on commands as innocuous as
+# `git status` or `git diff`. The agent works in the mounted, writable working
+# tree, so without protection it could drop such a payload into .git and have
+# it fire on the host. The git guard gives the container its own copies of
+# .git/hooks (read-write, so in-container hook installs still work — they just
+# stay in the container) and .git/config (read-only), seeded from the host's,
+# bind-mounted over the repo's real paths. The host's files are shadowed and
+# left untouched. Defeating it would need a kernel container escape, the same
+# bar as the rest of the sandbox.
+
+
+def _reseed_file(dst: Path, src: Path) -> None:
+    """Copy src onto dst in place, preserving dst's inode if it already exists.
+
+    In place (a truncating write, not an atomic rename) so that a sidecar
+    already bind-mounted into a reused, running container reflects the new
+    contents — a rename would leave the live mount pointing at the old inode.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+
+
+def _reseed_tree(dst: Path, src: Path) -> None:
+    """Refresh dst to mirror src's entries, clearing dst's in place.
+
+    The directory itself is preserved (only its entries are replaced), so a
+    live bind mount of it keeps working in a reused container.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in dst.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for child in src.iterdir():
+        target = dst / child.name
+        if child.is_dir() and not child.is_symlink():
+            shutil.copytree(child, target, symlinks=True)
+        else:
+            shutil.copy2(child, target, follow_symlinks=False)
+
+
+def _setup_git_guard(
+    session: lxd.Container, work_dir: Path, container_cwd: str
+) -> None:
+    """Shadow the repo's .git/hooks and .git/config with per-directory sidecars.
+
+    No-op when work_dir is not a git repository, or when its .git is a gitfile
+    rather than a directory (e.g. a linked worktree or submodule checkout
+    mounted directly) — there the .git/hooks and .git/config paths don't live
+    where we'd mount them, so we skip rather than guard the wrong thing.
+    """
+    git_dir = work_dir / ".git"
+    if not git_dir.is_dir():
+        return
+    guard = state.git_guard_dir(work_dir)
+
+    host_hooks = git_dir / "hooks"
+    if host_hooks.is_dir():
+        side_hooks = guard / "hooks"
+        _reseed_tree(side_hooks, host_hooks)
+        session.add_config_overlay(
+            side_hooks,
+            f"{container_cwd}/.git/hooks",
+            container_user=CONTAINER_USER,
+        )
+
+    host_config = git_dir / "config"
+    if host_config.is_file():
+        side_config = guard / "config"
+        _reseed_file(side_config, host_config)
+        session.add_config_overlay(
+            side_config,
+            f"{container_cwd}/.git/config",
+            container_user=CONTAINER_USER,
+            readonly=True,
+        )
+
+
 class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
@@ -424,6 +508,12 @@ def main() -> None:
     help="keep the worktree after the agent exits (implies --worktree)",
 )
 @click.option(
+    "--no-git-guard",
+    "no_git_guard",
+    is_flag=True,
+    help="don't shadow the repo's .git/hooks and .git/config (see git guard)",
+)
+@click.option(
     "--shell",
     is_flag=True,
     help="open an interactive shell instead of running the agent",
@@ -438,6 +528,7 @@ def run(
     add_mount_rw: tuple[str, ...],
     worktree: bool,
     worktree_keep: bool,
+    no_git_guard: bool,
     shell: bool,
     agent_args: tuple[str, ...],
 ) -> None:
@@ -537,6 +628,15 @@ def run(
         agent_cwd = container_cwd
         if worktree:
             agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
+
+        # Shadow the repo's .git/hooks and .git/config so the agent can't plant
+        # code there that would run on the *host*. Done after the worktree
+        # setup above so aiab's own git commands aren't subject to the
+        # read-only config; the agent/shell session below is. A worktree shares
+        # the main repo's .git/hooks and .git/config, so guarding container_cwd
+        # (the repo root) covers it too.
+        if not no_git_guard:
+            _setup_git_guard(session, work_dir, container_cwd)
 
         env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
         env.update(proxy_env)
