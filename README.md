@@ -16,6 +16,7 @@ aiab remove <agent>         # delete that container
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts
 aiab net ...                # restrict a dir's containers' network access
+aiab monitor                # interactive network + mounts control panel
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates
 aiab list                   # list the containers
 aiab gc                     # remove containers whose directory is gone
@@ -193,10 +194,10 @@ edit it (e.g. to add MCP servers) and your changes persist.
   (on Debian/Ubuntu: `apt install python3-click python3-yaml`).
 - Network access from containers (to install the agents and reach their APIs).
 - Optionally, [textual](https://textual.textualize.io/) ≥ 0.32 for the
-  clickable `aiab net watch` UI (`pip install textual` — the
+  clickable `aiab monitor` UI (`pip install textual` — the
   `python3-textual` in the Ubuntu archive is a 0.1.x relic that predates the
-  modern API). Without it the watch console falls back to plain keystroke
-  prompts.
+  modern API). Without it the monitor falls back to a plain keystroke network
+  console (and the mounts view is unavailable).
 
 ## Install
 
@@ -319,8 +320,10 @@ aiab net restrict [--for DIR]
 aiab net open     [--for DIR]
 aiab net allow    [--for DIR] [--duration TIME] DOMAIN...
 aiab net deny     [--for DIR] DOMAIN...
-aiab net watch    [--for DIR] [--plain]
 ```
+
+The interactive console for steering the proxy live is a separate command,
+[`aiab monitor`](#aiab-monitor--the-interactive-control-plane).
 
 By default a directory's network policy is **restricted**; `aiab net open`
 records an **open** (unrestricted) policy for directories where you want the
@@ -355,43 +358,6 @@ another terminal and it can carry on. `--duration 10m` (also `90s`, `2h`,
 `1d`; bare numbers are minutes) makes a grant that lapses on its own;
 re-allowing a domain replaces its expiry.
 
-#### aiab net watch — the interactive control plane
-
-`aiab net watch` turns the deny-then-rerun loop into a live conversation. It
-tails the proxy logs for the directory's containers, and — while it is
-running — the proxy **holds** requests for domains in neither list instead of
-refusing them: the watch console rings the terminal bell and prompts for a
-decision.
-
-With [textual](https://textual.textualize.io/) installed the console is a
-small UI: the proxy logs scroll in the middle and each undecided host gets a
-row of **Allow / 15m / Deny / Skip** buttons you can click — the mouse works
-inside tmux too. The keyboard does the same job: `a`/`t`/`d`/`s` answer for
-the oldest prompt, `q` quits. Without textual (or with `--plain`) you get
-the line-based prompt with the same keys:
-
-```
-==> registry.npmjs.org ? [a/t/d/s]
-```
-
-Allow is permanent, 15m lapses after 15 minutes, Deny records a refusal (so
-it won't ask again), Skip leaves the request to time out. The parked request
-waits up to 60 seconds for the verdict and then proceeds or fails, so the
-agent's `npm install` usually just works once you answer — no retry needed.
-Without a watch session attached the proxy keeps the old fail-fast
-behaviour.
-
-You rarely need to start it by hand: when a directory is restricted and
-`tmux` is installed, `aiab run` automatically wraps the session — the agent
-in the main pane, `aiab net watch` in a small pane below (inside an existing
-tmux session it just splits the current window). The tmux sessions aiab
-creates get the tmux `mouse` option switched on, so a click lands on the
-watch pane's buttons even while the agent pane has focus (and clicking a
-pane focuses it); in your own tmux sessions aiab leaves the option alone,
-so there you may need to focus the watch pane first. Pass `--no-tmux` to
-run bare, and run `aiab net watch` standalone in any terminal if you prefer
-your own layout.
-
 Mode changes (`restrict`/`open`) only take *full* effect the next time an
 agent starts, because the NIC masking and proxy environment are applied at
 launch. `aiab net open` does loosen a running restricted session immediately
@@ -410,6 +376,66 @@ Caveats:
   filesystem sandbox.
 - Template provisioning and `aiab upgrade-templates` are unaffected — they
   need apt and the agent installers, and don't run agent-authored code.
+
+### aiab monitor — the interactive control plane
+
+```
+aiab monitor [--for DIR] [--plain]
+```
+
+`aiab monitor` is the session control panel: a single pane with two
+interchangeable views, switched with the **Mounts**/**Network** button in the
+header (or the `m` key).
+
+#### Network view
+
+The network view turns the deny-then-rerun loop into a live conversation. It
+tails the proxy logs for the directory's containers, and — while the monitor
+is running — the proxy **holds** requests for domains in neither list instead
+of refusing them: the console rings the terminal bell and prompts for a
+decision.
+
+With [textual](https://textual.textualize.io/) installed it is a small UI:
+the proxy logs scroll in the middle and each undecided host gets a row of
+**Allow / 15m / Deny / Skip** buttons you can click — the mouse works inside
+tmux too. The keyboard does the same job: `a`/`t`/`d`/`s` answer for the
+oldest prompt, `q` quits. Without textual (or with `--plain`) you get the
+line-based prompt with the same keys:
+
+```
+==> registry.npmjs.org ? [a/t/d/s]
+```
+
+Allow is permanent, 15m lapses after 15 minutes, Deny records a refusal (so
+it won't ask again), Skip leaves the request to time out. The parked request
+waits up to 60 seconds for the verdict and then proceeds or fails, so the
+agent's `npm install` usually just works once you answer — no retry needed.
+Without a monitor session attached the proxy keeps the old fail-fast
+behaviour.
+
+#### Mounts view
+
+The mounts view lists the directory's extra mounts (the ones `aiab mount`
+records). Each row has the path, a read-only/read-write toggle, and a remove
+button; a path input at the bottom (with inline filesystem completion — accept
+the ghost suggestion with Tab or →) adds a new one, read-only by default.
+Edits go through the same persistent record as `aiab mount`/`aiab unmount`, so
+they apply to every agent and survive container recreation, and they take
+effect **live** on the running session container (no restart needed). It is
+the point-and-click face of `aiab mount`/`aiab unmount`.
+
+#### Launching it
+
+You rarely need to start it by hand: when a directory is restricted and
+`tmux` is installed, `aiab run` automatically wraps the session — the agent
+in the main pane, `aiab monitor` in a small pane below (inside an existing
+tmux session it just splits the current window). The tmux sessions aiab
+creates get the tmux `mouse` option switched on, so a click lands on the
+monitor pane's buttons even while the agent pane has focus (and clicking a
+pane focuses it); in your own tmux sessions aiab leaves the option alone,
+so there you may need to focus the monitor pane first. Pass `--no-tmux` to
+run bare, and run `aiab monitor` standalone in any terminal if you prefer
+your own layout.
 
 ### aiab upgrade-templates
 

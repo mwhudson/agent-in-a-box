@@ -69,7 +69,7 @@ from . import state
 PROXY_PORT: int = 3128
 
 # Host-side per-container proxy files (pidfile and log), maintained by
-# `aiab run`; `aiab net watch` tails the logs from here too.
+# `aiab run`; `aiab monitor` tails the logs from here too.
 PROXY_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "proxy"
 
 _MAX_HEADER_BYTES = 65536
@@ -122,7 +122,7 @@ def evaluate(host: str, api_domains: list[str], policy: state.NetworkPolicy) -> 
 
 
 def _watcher_alive(pending_dir: Path) -> bool:
-    """Return True if an `aiab net watch` session is attached to pending_dir."""
+    """Return True if an `aiab monitor` session is attached to pending_dir."""
     try:
         pid = int((pending_dir / "watcher.pid").read_text())
         os.kill(pid, 0)  # just probes for existence
@@ -253,7 +253,7 @@ class _Handler(socketserver.StreamRequestHandler):
     def _await_decision(self, host: str) -> str:
         """Park an undecided request while a watch session asks the user.
 
-        Drops a pending file (named after the host) for `aiab net watch` to
+        Drops a pending file (named after the host) for `aiab monitor` to
         pick up, then polls the policy until an allow/deny lands, the watcher
         goes away, or the wait times out — all of which resolve to DENY
         except an explicit allow. Without a live watcher attached this
@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--pending-dir",
         default=None,
-        help="dir where undecided hosts are parked for 'aiab net watch'",
+        help="dir where undecided hosts are parked for 'aiab monitor'",
     )
     args = parser.parse_args(argv)
 

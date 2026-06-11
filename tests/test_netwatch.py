@@ -1,6 +1,6 @@
-# Tests for aiab.netwatch — the plumbing shared by both `aiab net watch`
+# Tests for aiab.netwatch — the plumbing shared by both `aiab monitor`
 # front ends. The interactive loops themselves are exercised manually (and
-# the textual one in test_netwatch_tui.py); this covers decision recording
+# the textual one in test_monitor_tui.py); this covers decision recording
 # and the pending-queue helpers.
 
 import os

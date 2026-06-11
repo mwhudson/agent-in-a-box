@@ -450,16 +450,17 @@ def _setup_git_guard(
 # -- tmux control plane --
 #
 # A restricted `aiab run` on a terminal gets wrapped in tmux: the agent in
-# the main pane, `aiab net watch` (the host-side control plane, see
-# aiab.netwatch) in a small pane below it. Two layers, both thin:
+# the main pane, `aiab monitor` (the host-side control plane, see
+# aiab.netwatch / aiab.monitor_tui) in a small pane below it. Two layers,
+# both thin:
 #
 #  * outside tmux, run() execs `tmux new-session` re-running the very same
 #    aiab command line — the re-run sees TMUX set, so the recursion ends;
 #  * inside tmux (whether our own session or one the user already had),
-#    _watch_pane() splits off the watch pane for the duration of the agent
-#    session and kills it afterwards.
+#    _monitor_pane() splits off the monitor pane for the duration of the
+#    agent session and kills it afterwards.
 #
-# The watcher's presence is also what switches the proxy from fail-fast 403s
+# The monitor's presence is also what switches the proxy from fail-fast 403s
 # to parking unknown hosts for an interactive decision.
 
 
@@ -499,15 +500,24 @@ def _reexec_under_tmux() -> None:
 
 
 @contextlib.contextmanager
-def _watch_pane(work_dir: Path, enabled: bool) -> Iterator[None]:
-    """Show `aiab net watch` in a tmux pane below us for the duration.
+def _monitor_pane(work_dir: Path, container_name: str, enabled: bool) -> Iterator[None]:
+    """Show `aiab monitor` in a tmux pane below us for the duration.
 
-    Best-effort: if the split fails (ancient tmux, weird layout), the agent
-    session proceeds without a control plane and the proxy stays fail-fast.
+    The pane is told which session container it is steering, so its mounts
+    view edits that container's live mounts. Best-effort: if the split fails
+    (ancient tmux, weird layout), the agent session proceeds without a control
+    plane and the proxy stays fail-fast.
     """
     pane_id = None
     if enabled:
-        watch_cmd = shlex.join([_self_argv0(), "net", "watch", f"--for={work_dir}"])
+        monitor_cmd = shlex.join(
+            [
+                _self_argv0(),
+                "monitor",
+                f"--for={work_dir}",
+                f"--container={container_name}",
+            ]
+        )
         r = subprocess.run(
             # -d keeps focus on the agent pane; -P -F prints the new pane's
             # id so we can kill exactly that pane (and not whatever else the
@@ -521,7 +531,7 @@ def _watch_pane(work_dir: Path, enabled: bool) -> Iterator[None]:
                 "-P",
                 "-F",
                 "#{pane_id}",
-                watch_cmd,
+                monitor_cmd,
             ],
             capture_output=True,
             text=True,
@@ -530,7 +540,7 @@ def _watch_pane(work_dir: Path, enabled: bool) -> Iterator[None]:
             pane_id = r.stdout.strip() or None
         else:
             print(
-                f"Warning: could not open watch pane: {r.stderr.strip()}",
+                f"Warning: could not open monitor pane: {r.stderr.strip()}",
                 file=sys.stderr,
             )
     try:
@@ -623,7 +633,7 @@ def main() -> None:
     "--no-tmux",
     "no_tmux",
     is_flag=True,
-    help="don't wrap a restricted session in tmux with a 'net watch' pane",
+    help="don't wrap a restricted session in tmux with an 'aiab monitor' pane",
 )
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_obj
@@ -644,7 +654,7 @@ def run(
 
     Anything after `--` is passed straight through to the agent. When the
     directory's network is restricted and tmux is available, the session
-    runs under tmux with an `aiab net watch` control pane below the agent;
+    runs under tmux with an `aiab monitor` control pane below the agent;
     --no-tmux opts out.
     """
     # --worktree-keep implies --worktree.
@@ -767,7 +777,7 @@ def run(
         env.update(proxy_env)
         if cfg.wayland:
             env.update(session.mount_wayland(CONTAINER_USER))
-        with _watch_pane(work_dir, enabled=use_tmux):
+        with _monitor_pane(work_dir, session.name, enabled=use_tmux):
             rc = session.run_interactive(
                 run_cmd,
                 cwd=agent_cwd,
@@ -972,7 +982,7 @@ def net() -> None:
     only the agent's own API domains plus this directory's allowlist, and
     refuses its denylist. Use 'aiab net open' to opt a directory out. Mode
     changes take full effect the next time an agent starts; allow/deny apply
-    immediately to running restricted sessions. 'aiab net watch' opens an
+    immediately to running restricted sessions. 'aiab monitor' opens an
     interactive console that is prompted about unknown domains while the
     agent's request waits.
     """
@@ -1086,33 +1096,64 @@ def deny(for_dir: str | None, domains: tuple[str, ...]) -> None:
         print(f"Denied {domain}", file=sys.stderr)
 
 
-@net.command()
+def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
+    """Open the session control panel for a directory (never returns).
+
+    Prefers the textual UI (aiab.monitor_tui: clickable network decisions plus
+    a mounts view); falls back to the plain keystroke network console when
+    textual is missing or --plain is given. container_name names the session
+    container a mounts edit should touch live, when `aiab run` opened the pane.
+    """
+    if not plain:
+        try:
+            from . import monitor_tui
+        except ImportError:
+            pass  # textual missing or too old (e.g. Ubuntu's 0.1.x package)
+        else:
+            sys.exit(monitor_tui.monitor(target, container_name))
+    sys.exit(netwatch.watch(target))
+
+
+# --container is set by the `aiab run` tmux pane (see _monitor_pane); it names
+# the session container whose live mounts the mounts view should edit. Hidden
+# because it is plumbing, not something a user types by hand.
+_container_option = click.option(
+    "--container", "container_name", metavar="NAME", default=None, hidden=True
+)
+
+
+# A plain Command (like the net group): the monitor only reads/writes recorded
+# state and drives LXD lazily from the TUI, so it skips the _Command machinery
+# (migration check + eager project creation) the container verbs need.
+@main.command(cls=click.Command)
 @_for_dir_option
+@_container_option
 @click.option(
     "--plain",
     is_flag=True,
     help="use the plain keystroke console even when textual is available",
 )
-def watch(for_dir: str | None, plain: bool) -> None:
-    """Interactively watch and steer a directory's network access.
+def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> None:
+    """Open the interactive session control panel for a directory.
 
-    Tails the filtering-proxy logs for this directory's containers, and
-    while it runs the proxy holds requests for unknown domains and prompts
-    here to allow or deny each one (instead of refusing them outright).
+    Two views in one pane (switch with the header button or `m`):
+
+    \b
+      * network — tails the filtering-proxy logs for this directory's
+        containers; while it runs the proxy holds requests for unknown
+        domains and prompts here to allow or deny each one (instead of
+        refusing them outright), as a row of clickable buttons;
+      * mounts — the directory's recorded extra mounts, each with a
+        read-only/read-write toggle and a remove button, plus an input
+        (with path completion) to add a new one. Edits are recorded and,
+        on a running session, take effect live.
+
     With textual installed each prompt is a row of clickable buttons; the
-    keystroke console is the fallback, and --plain forces it. `aiab run`
-    opens this in a tmux pane automatically for restricted sessions; it
-    also works standalone in any terminal.
+    plain keystroke network console is the fallback, and --plain forces it.
+    `aiab run` opens this in a tmux pane automatically for restricted
+    sessions; it also works standalone in any terminal.
     """
-    target = _realdir(for_dir)
-    if not plain:
-        try:
-            from . import netwatch_tui
-        except ImportError:
-            pass  # textual missing or too old (e.g. Ubuntu's 0.1.x package)
-        else:
-            sys.exit(netwatch_tui.watch(target))
-    sys.exit(netwatch.watch(target))
+    _launch_monitor(_realdir(for_dir), container_name, plain)
 
 
 # --------------------------------------------------------------------------

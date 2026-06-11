@@ -34,7 +34,7 @@
 # The filtering proxy (aiab.netproxy) re-reads it on every request, so
 # `aiab net allow`/`deny` take effect immediately in running sessions. The
 # deny list records domains the user has explicitly refused, so the proxy can
-# fail them fast instead of re-asking an attached `aiab net watch` session.
+# fail them fast instead of re-asking an attached `aiab monitor` session.
 #
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
@@ -248,7 +248,7 @@ def add_network_deny(directory: StrPath, domain: str) -> None:
     """Deny a domain (and its subdomains) for a directory.
 
     A denied domain is refused by the proxy without asking an attached
-    `aiab net watch` session. Any allow record for the same domain is
+    `aiab monitor` session. Any allow record for the same domain is
     dropped, so allow/deny stay disjoint.
     """
     domain = _normalize_domain(domain)

@@ -12,6 +12,7 @@ _aiab() {
         'mount:mount extra directories into a directory'\''s containers'
         'unmount:remove extra directory mounts'
         'net:manage a directory'\''s network access policy'
+        'monitor:open the interactive session control panel'
         'upgrade-templates:apt upgrade + reinstall agents in templates'
         'list:list aiab containers'
         'lxc:run lxc against the aiab project'
@@ -58,6 +59,11 @@ _aiab() {
                 '--duration[allow temporarily, e.g. 10m, 2h]:duration:' \
                 '1:net command:(status restrict open allow deny)' \
                 '*:domain:'
+            ;;
+        monitor)
+            _arguments \
+                '--for[target DIR]:directory:_files -/' \
+                '--plain[use the plain keystroke console]'
             ;;
         list)
             _arguments '--for[show only the containers for DIR]:directory:_files -/'

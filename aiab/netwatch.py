@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-# aiab.netwatch - the console behind `aiab net watch`.
+# aiab.netwatch - the console behind `aiab monitor`.
 #
 # Tails the filtering-proxy logs for a directory's session containers (one
 # log per agent, under aiab.netproxy.PROXY_DIR) and watches the directory's
@@ -25,9 +25,10 @@
 # so there is no other channel between the two processes.
 #
 # There are two front ends over the shared plumbing in this module: the
-# richer one in aiab.netwatch_tui (textual; buttons you can click), and the
+# richer one in aiab.monitor_tui (textual; buttons you can click, plus a
+# mounts view), and the
 # plain keystroke loop at the bottom of this file, which is what you get
-# when textual isn't installed (or with `aiab net watch --plain`).
+# when textual isn't installed (or with `aiab monitor --plain`).
 #
 # `aiab run` opens this in a tmux pane below the agent automatically (when
 # the directory is restricted and tmux is available); it also works stand-
@@ -189,11 +190,11 @@ _KEYS = {"a": ALLOW, "t": TEMP, "d": DENY, "s": SKIP}
 def watch(work_dir: Path) -> int:
     """Run the plain keystroke watch loop for a directory; return an exit code.
 
-    This is the fallback front end; `aiab net watch` prefers the textual one
-    (aiab.netwatch_tui) when textual is installed.
+    This is the fallback front end; `aiab monitor` prefers the textual one
+    (aiab.monitor_tui) when textual is installed.
     """
     if not sys.stdin.isatty():
-        print("aiab net watch needs an interactive terminal", file=sys.stderr)
+        print("aiab monitor needs an interactive terminal", file=sys.stderr)
         return 1
 
     pdir = pending_dir(work_dir)

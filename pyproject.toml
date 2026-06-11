@@ -25,7 +25,7 @@ check_untyped_defs = true
 module = ["yaml"]
 ignore_missing_imports = true
 
-# Textual is optional (the richer `aiab net watch` UI; aiab.cli falls back to
+# Textual is optional (the richer `aiab monitor` UI; aiab.cli falls back to
 # the plain console without it), so type checking must work where it isn't
 # installed. Where it is, its real types are used and this is a no-op.
 [[tool.mypy.overrides]]
