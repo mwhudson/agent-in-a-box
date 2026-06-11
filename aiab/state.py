@@ -29,9 +29,12 @@
 # A directory's network policy (managed by `aiab net`) lives in a second JSON
 # file with the same keying:
 #   { "<dir real path>": { "mode": "open" | "restricted",
-#                          "allow": [ {"domain": str, "expires": float|null} ] } }
+#                          "allow": [ {"domain": str, "expires": float|null} ],
+#                          "deny": [ str, ... ] } }
 # The filtering proxy (aiab.netproxy) re-reads it on every request, so
-# `aiab net allow`/`deny` take effect immediately in running sessions.
+# `aiab net allow`/`deny` take effect immediately in running sessions. The
+# deny list records domains the user has explicitly refused, so the proxy can
+# fail them fast instead of re-asking an attached `aiab net watch` session.
 #
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
@@ -158,10 +161,11 @@ class Allow(TypedDict):
 
 
 class NetworkPolicy(TypedDict):
-    """A directory's network policy: its mode and extra allowed domains."""
+    """A directory's network policy: mode, allowed domains, denied domains."""
 
     mode: str
     allow: list[Allow]
+    deny: list[str]
 
 
 # The whole network state file: project dir -> its policy.
@@ -178,7 +182,7 @@ def _unexpired(allows: list[Allow]) -> list[Allow]:
 
 
 def get_network(directory: StrPath) -> NetworkPolicy:
-    """Return the network policy for a directory (default: DEFAULT_MODE, no allows).
+    """Return the network policy for a directory (default: DEFAULT_MODE, empty).
 
     Expired allow entries are filtered from the returned policy; they are only
     actually pruned from the file by the mutating functions below.
@@ -186,7 +190,8 @@ def get_network(directory: StrPath) -> NetworkPolicy:
     data: NetState = _load_file(_NET_PATH)
     policy = data.get(_key(directory))
     if policy is None:
-        return {"mode": DEFAULT_MODE, "allow": []}
+        return {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+    policy.setdefault("deny", [])  # records from before the deny list existed
     policy["allow"] = _unexpired(policy["allow"])
     return policy
 
@@ -194,7 +199,7 @@ def get_network(directory: StrPath) -> NetworkPolicy:
 def _save_network_policy(key: str, policy: NetworkPolicy) -> None:
     data: NetState = _load_file(_NET_PATH)
     policy["allow"] = _unexpired(policy["allow"])
-    if policy["mode"] == DEFAULT_MODE and not policy["allow"]:
+    if policy["mode"] == DEFAULT_MODE and not policy["allow"] and not policy["deny"]:
         data.pop(key, None)  # back to the default; keep the file tidy
     else:
         data[key] = policy
@@ -212,10 +217,12 @@ def add_network_allow(directory: StrPath, domain: str, expires: float | None) ->
     """Allow a domain (and its subdomains) for a directory.
 
     If the domain is already allowed, its expiry is replaced — so re-allowing
-    with expires=None makes a previously temporary grant permanent.
+    with expires=None makes a previously temporary grant permanent. Any deny
+    record for the same domain is dropped, so allow/deny stay disjoint.
     """
     domain = _normalize_domain(domain)
     policy = get_network(directory)
+    policy["deny"] = [d for d in policy["deny"] if d != domain]
     for a in policy["allow"]:
         if a["domain"] == domain:
             a["expires"] = expires
@@ -233,6 +240,33 @@ def remove_network_allow(directory: StrPath, domain: str) -> bool:
     if len(kept) == len(policy["allow"]):
         return False
     policy["allow"] = kept
+    _save_network_policy(_key(directory), policy)
+    return True
+
+
+def add_network_deny(directory: StrPath, domain: str) -> None:
+    """Deny a domain (and its subdomains) for a directory.
+
+    A denied domain is refused by the proxy without asking an attached
+    `aiab net watch` session. Any allow record for the same domain is
+    dropped, so allow/deny stay disjoint.
+    """
+    domain = _normalize_domain(domain)
+    policy = get_network(directory)
+    policy["allow"] = [a for a in policy["allow"] if a["domain"] != domain]
+    if domain not in policy["deny"]:
+        policy["deny"].append(domain)
+    _save_network_policy(_key(directory), policy)
+
+
+def remove_network_deny(directory: StrPath, domain: str) -> bool:
+    """Drop a denied domain. Return True if it was present."""
+    domain = _normalize_domain(domain)
+    policy = get_network(directory)
+    kept = [d for d in policy["deny"] if d != domain]
+    if len(kept) == len(policy["deny"]):
+        return False
+    policy["deny"] = kept
     _save_network_policy(_key(directory), policy)
     return True
 

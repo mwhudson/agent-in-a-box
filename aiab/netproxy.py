@@ -24,21 +24,31 @@
 # launched with HTTP_PROXY/HTTPS_PROXY pointing at it — so the only egress is
 # proxy-aware traffic to allowed domains.
 #
-# A request's host is allowed if it matches (exactly, or as a subdomain) one
-# of the agent's API domains (passed on the command line) or one of the
-# directory's recorded allows. The policy is re-read from aiab.state on every
-# request, so `aiab net allow`/`deny`/`open` take effect immediately without
-# restarting anything. Denied requests get a 403 naming the host, and are
-# logged to stderr (which `aiab run` redirects to a per-container log file).
+# A request's host is matched (exactly, or as a subdomain) against the
+# agent's API domains (passed on the command line, always allowed) and the
+# directory's recorded allow/deny lists, most specific rule winning. The
+# policy is re-read from aiab.state on every request, so `aiab net
+# allow`/`deny`/`open` take effect immediately without restarting anything.
+# Denied requests get a 403 naming the host, and are logged to stderr (which
+# `aiab run` redirects to a per-container log file).
+#
+# A host in neither list is normally refused too — but when an `aiab net
+# watch` session is attached (it keeps a watcher.pid file in --pending-dir),
+# the request is instead *parked*: the proxy drops a pending file for the
+# watcher to prompt the user about, and polls the policy until the decision
+# lands or the wait times out. Concurrent requests for the same host all
+# poll the same policy, so one answer releases them all.
 #
 # Run as:
 #   python3 -m aiab.netproxy --socket PATH --dir DIR [--api-domain D]...
+#       [--pending-dir DIR]
 
 from __future__ import annotations
 
 import argparse
 import contextlib
 import os
+import re
 import signal
 import socket
 import socketserver
@@ -58,8 +68,67 @@ from . import state
 # device); the conventional HTTP proxy port.
 PROXY_PORT: int = 3128
 
+# Host-side per-container proxy files (pidfile and log), maintained by
+# `aiab run`; `aiab net watch` tails the logs from here too.
+PROXY_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "proxy"
+
 _MAX_HEADER_BYTES = 65536
 _CONNECT_TIMEOUT = 15.0
+
+# How a parked request waits for a watch session's decision: poll the policy
+# at this interval, give up (403) after this long. The timeout also bounds
+# how long a request can hold a handler thread when nobody answers.
+_ASK_POLL = 0.5
+_ASK_TIMEOUT = 60.0
+
+# Hosts must look like a domain name (or IPv4 literal) to be parked: the host
+# string becomes the pending file's name, so anything with a slash (or other
+# oddity) from a malicious request line must not reach the filesystem.
+_SAFE_HOST_RE = re.compile(r"[a-z0-9.-]+")
+
+# evaluate() verdicts.
+ALLOW = "allow"
+DENY = "deny"
+ASK = "ask"
+
+
+def evaluate(host: str, api_domains: list[str], policy: state.NetworkPolicy) -> str:
+    """Classify a host against a policy: ALLOW, DENY, or ASK.
+
+    API domains always win. Otherwise the most specific (longest) matching
+    rule across the allow and deny lists decides, so e.g. an allow for
+    api.x.com pokes a hole in a deny for x.com. A host matching neither
+    list is ASK: the caller chooses between refusing it outright and parking
+    the request for an interactive decision.
+    """
+    host = host.lower().rstrip(".")
+    if policy["mode"] != state.MODE_RESTRICTED:
+        return ALLOW
+
+    def matches(domain: str) -> bool:
+        return host == domain or host.endswith("." + domain)
+
+    if any(matches(d) for d in api_domains):
+        return ALLOW
+    verdict = ASK
+    best = -1
+    rules = [(a["domain"], ALLOW) for a in policy["allow"]]
+    rules += [(d, DENY) for d in policy["deny"]]
+    for domain, kind in rules:
+        if matches(domain) and len(domain) > best:
+            best = len(domain)
+            verdict = kind
+    return verdict
+
+
+def _watcher_alive(pending_dir: Path) -> bool:
+    """Return True if an `aiab net watch` session is attached to pending_dir."""
+    try:
+        pid = int((pending_dir / "watcher.pid").read_text())
+        os.kill(pid, 0)  # just probes for existence
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _log(message: str) -> None:
@@ -73,19 +142,19 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
     def __init__(
-        self, socket_path: str, work_dir: Path, api_domains: list[str]
+        self,
+        socket_path: str,
+        work_dir: Path,
+        api_domains: list[str],
+        pending_dir: Path | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.api_domains = [d.lower() for d in api_domains]
+        self.pending_dir = pending_dir
         super().__init__(socket_path, _Handler)
 
-    def allowed(self, host: str) -> bool:
-        host = host.lower().rstrip(".")
-        policy = state.get_network(self.work_dir)
-        if policy["mode"] != state.MODE_RESTRICTED:
-            return True
-        domains = self.api_domains + [a["domain"] for a in policy["allow"]]
-        return any(host == d or host.endswith("." + d) for d in domains)
+    def decide(self, host: str) -> str:
+        return evaluate(host, self.api_domains, state.get_network(self.work_dir))
 
     def verify_request(self, request: Any, client_address: Any) -> bool:
         """Accept connections from root (LXD's forkproxy) and our own uid only.
@@ -151,7 +220,10 @@ class _Handler(socketserver.StreamRequestHandler):
             ).encode("latin-1")
 
         host = host.strip("[]")  # tolerate bracketed IPv6 literals
-        if not self.server.allowed(host):
+        verdict = self.server.decide(host)
+        if verdict == ASK:
+            verdict = self._await_decision(host)
+        if verdict != ALLOW:
             _log(f"DENY {method} {host}:{port}")
             self._respond(
                 403,
@@ -177,6 +249,43 @@ class _Handler(socketserver.StreamRequestHandler):
                 self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 self.wfile.flush()
             _relay(self.connection, upstream)
+
+    def _await_decision(self, host: str) -> str:
+        """Park an undecided request while a watch session asks the user.
+
+        Drops a pending file (named after the host) for `aiab net watch` to
+        pick up, then polls the policy until an allow/deny lands, the watcher
+        goes away, or the wait times out — all of which resolve to DENY
+        except an explicit allow. Without a live watcher attached this
+        returns DENY immediately, preserving the old fail-fast behaviour.
+        """
+        pending_dir = self.server.pending_dir
+        host = host.lower().rstrip(".")
+        if (
+            pending_dir is None
+            or not _SAFE_HOST_RE.fullmatch(host)
+            or not _watcher_alive(pending_dir)
+        ):
+            return DENY
+        pending = pending_dir / host
+        try:
+            pending.write_text(f"{time.time()}\n")
+        except OSError:
+            return DENY
+        _log(f"ASK {host}")
+        try:
+            deadline = time.time() + _ASK_TIMEOUT
+            while time.time() < deadline:
+                time.sleep(_ASK_POLL)
+                verdict = self.server.decide(host)
+                if verdict != ASK:
+                    return verdict
+                if not _watcher_alive(pending_dir):
+                    return DENY
+            return DENY
+        finally:
+            with contextlib.suppress(OSError):
+                pending.unlink()
 
     def _read_head(self) -> tuple[str, list[str]] | None:
         """Read the request line and headers; None on EOF/overflow."""
@@ -246,6 +355,11 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         help="domain that is always allowed (repeatable)",
     )
+    parser.add_argument(
+        "--pending-dir",
+        default=None,
+        help="dir where undecided hosts are parked for 'aiab net watch'",
+    )
     args = parser.parse_args(argv)
 
     # An abstract socket (@name) lives in the network namespace rather than
@@ -264,7 +378,12 @@ def main(argv: list[str] | None = None) -> None:
 
     signal.signal(signal.SIGTERM, _terminate)
 
-    server = ProxyServer(address, Path(args.dir), args.api_domain)
+    pending_dir = None
+    if args.pending_dir:
+        pending_dir = Path(args.pending_dir)
+        pending_dir.mkdir(parents=True, exist_ok=True)
+
+    server = ProxyServer(address, Path(args.dir), args.api_domain, pending_dir)
     if not abstract:
         os.chmod(address, 0o600)
     _log(

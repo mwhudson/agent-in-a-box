@@ -27,6 +27,7 @@ import contextlib
 import fcntl
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -43,6 +44,7 @@ from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX, STATE_MOUNT
 from . import agents
 from . import lxd
 from . import netproxy
+from . import netwatch
 from . import provision
 from . import state
 from .migrate import maybe_migrate
@@ -75,11 +77,12 @@ IDLE_STOP_DELAY: float = 5 * 60
 _STOPPER_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "stopper"
 
 # Host-side filtering proxies (one per restricted session container, see
-# aiab.netproxy) keep their pidfile/log here, named after the container. The
-# proxy itself listens on an abstract unix socket (no filesystem presence):
-# snap-confined LXD's forkproxy can't dial socket paths under the user's home,
-# but abstract sockets live in the (shared) network namespace.
-_PROXY_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "proxy"
+# aiab.netproxy) keep their pidfile/log in netproxy.PROXY_DIR, named after the
+# container. The proxy itself listens on an abstract unix socket (no
+# filesystem presence): snap-confined LXD's forkproxy can't dial socket paths
+# under the user's home, but abstract sockets live in the (shared) network
+# namespace.
+_PROXY_DIR: Path = netproxy.PROXY_DIR
 
 # Domains every restricted container may always reach, whatever the agent:
 # the Ubuntu archives, so apt works inside the container (apt's traffic is
@@ -160,6 +163,7 @@ def _ensure_proxy(
         "aiab.netproxy",
         f"--socket={sock_name}",
         f"--dir={work_dir}",
+        f"--pending-dir={netwatch.pending_dir(work_dir)}",
     ] + [f"--api-domain={d}" for d in api_domains + BASELINE_DOMAINS]
     with log.open("ab") as log_fd:
         proc = subprocess.Popen(
@@ -443,6 +447,103 @@ def _setup_git_guard(
         )
 
 
+# -- tmux control plane --
+#
+# A restricted `aiab run` on a terminal gets wrapped in tmux: the agent in
+# the main pane, `aiab net watch` (the host-side control plane, see
+# aiab.netwatch) in a small pane below it. Two layers, both thin:
+#
+#  * outside tmux, run() execs `tmux new-session` re-running the very same
+#    aiab command line — the re-run sees TMUX set, so the recursion ends;
+#  * inside tmux (whether our own session or one the user already had),
+#    _watch_pane() splits off the watch pane for the duration of the agent
+#    session and kills it afterwards.
+#
+# The watcher's presence is also what switches the proxy from fail-fast 403s
+# to parking unknown hosts for an interactive decision.
+
+
+def _self_argv0() -> str:
+    """An absolute path for re-invoking aiab (sys.argv[0] may be a bare name)."""
+    argv0 = sys.argv[0]
+    if os.sep in argv0:
+        return str(Path(argv0).resolve())
+    return shutil.which(argv0) or argv0
+
+
+def _reexec_under_tmux() -> None:
+    """Replace this process with tmux running the same aiab invocation.
+
+    The session ends when the inner aiab exits. The inner run's exit code is
+    not propagated (tmux reports its own), which matters little for an
+    interactive agent session. The trailing set-option turns mouse mode on
+    for this session only (no -g, so a user's own tmux sessions and config
+    are untouched): clicks then switch pane focus, and reach the watch
+    pane's allow/deny buttons even while the agent pane has focus.
+    """
+    inner = shlex.join([_self_argv0(), *sys.argv[1:]])
+    os.execvp(
+        "tmux",
+        [
+            "tmux",
+            "new-session",
+            "-c",
+            os.getcwd(),
+            inner,
+            ";",
+            "set-option",
+            "mouse",
+            "on",
+        ],
+    )
+
+
+@contextlib.contextmanager
+def _watch_pane(work_dir: Path, enabled: bool) -> Iterator[None]:
+    """Show `aiab net watch` in a tmux pane below us for the duration.
+
+    Best-effort: if the split fails (ancient tmux, weird layout), the agent
+    session proceeds without a control plane and the proxy stays fail-fast.
+    """
+    pane_id = None
+    if enabled:
+        watch_cmd = shlex.join([_self_argv0(), "net", "watch", f"--for={work_dir}"])
+        r = subprocess.run(
+            # -d keeps focus on the agent pane; -P -F prints the new pane's
+            # id so we can kill exactly that pane (and not whatever else the
+            # user has since opened) when the agent exits.
+            [
+                "tmux",
+                "split-window",
+                "-d",
+                "-l",
+                "10",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                watch_cmd,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0:
+            pane_id = r.stdout.strip() or None
+        else:
+            print(
+                f"Warning: could not open watch pane: {r.stderr.strip()}",
+                file=sys.stderr,
+            )
+    try:
+        yield
+    finally:
+        if pane_id:
+            subprocess.run(
+                ["tmux", "kill-pane", "-t", pane_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
 class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
@@ -518,6 +619,12 @@ def main() -> None:
     is_flag=True,
     help="open an interactive shell instead of running the agent",
 )
+@click.option(
+    "--no-tmux",
+    "no_tmux",
+    is_flag=True,
+    help="don't wrap a restricted session in tmux with a 'net watch' pane",
+)
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_obj
 def run(
@@ -530,11 +637,15 @@ def run(
     worktree_keep: bool,
     no_git_guard: bool,
     shell: bool,
+    no_tmux: bool,
     agent_args: tuple[str, ...],
 ) -> None:
     """Run an agent in a container for a directory.
 
-    Anything after `--` is passed straight through to the agent.
+    Anything after `--` is passed straight through to the agent. When the
+    directory's network is restricted and tmux is available, the session
+    runs under tmux with an `aiab net watch` control pane below the agent;
+    --no-tmux opts out.
     """
     # --worktree-keep implies --worktree.
     if worktree_keep:
@@ -542,11 +653,24 @@ def run(
     cfg = agents.get(agent)
     config_host_dir = lxd.agent_home_dir(agent)
 
+    work_dir = _realdir(for_dir)
+
+    # Wrap restricted sessions in tmux (see the tmux control plane section).
+    # Inside tmux already — ours or the user's — _watch_pane below splits the
+    # current window instead, so this re-exec only fires on a bare terminal.
+    use_tmux = (
+        not no_tmux
+        and state.get_network(work_dir)["mode"] == state.MODE_RESTRICTED
+        and sys.stdin.isatty()
+        and shutil.which("tmux") is not None
+    )
+    if use_tmux and "TMUX" not in os.environ:
+        _reexec_under_tmux()  # does not return
+
     # One-time prepare hook (OpenRouter key prompt, opencode permissive config).
     if cfg.prepare:
         cfg.prepare(config_host_dir)
 
-    work_dir = _realdir(for_dir)
     base = conn.container(agent)
     session = conn.container_for_dir(work_dir, agent)
 
@@ -642,13 +766,14 @@ def run(
         env.update(proxy_env)
         if cfg.wayland:
             env.update(session.mount_wayland(CONTAINER_USER))
-        rc = session.run_interactive(
-            run_cmd,
-            cwd=agent_cwd,
-            user=CONTAINER_USER,
-            group=CONTAINER_USER,
-            env=env,
-        )
+        with _watch_pane(work_dir, enabled=use_tmux):
+            rc = session.run_interactive(
+                run_cmd,
+                cwd=agent_cwd,
+                user=CONTAINER_USER,
+                group=CONTAINER_USER,
+                env=env,
+            )
         if worktree and not worktree_keep:
             _remove_worktree(session, container_cwd, agent_cwd, CONTAINER_USER)
     sys.exit(rc)
@@ -843,10 +968,12 @@ def net() -> None:
 
     The default mode is restricted: the container gets no direct network
     access, and the agent is routed through a filtering proxy that admits
-    only the agent's own API domains plus this directory's allowlist. Use
-    'aiab net open' to opt a directory out. Mode changes take full effect
-    the next time an agent starts; allow/deny apply immediately to running
-    restricted sessions.
+    only the agent's own API domains plus this directory's allowlist, and
+    refuses its denylist. Use 'aiab net open' to opt a directory out. Mode
+    changes take full effect the next time an agent starts; allow/deny apply
+    immediately to running restricted sessions. 'aiab net watch' opens an
+    interactive console that is prompted about unknown domains while the
+    agent's request waits.
     """
 
 
@@ -862,7 +989,7 @@ _for_dir_option = click.option(
 @net.command()
 @_for_dir_option
 def status(for_dir: str | None) -> None:
-    """Show the network mode and allowlist for a directory."""
+    """Show the network mode and allow/deny lists for a directory."""
     target = _realdir(for_dir)
     policy = state.get_network(target)
     print(f"{target}: {policy['mode']}")
@@ -879,6 +1006,10 @@ def status(for_dir: str | None) -> None:
             print(f"  {a['domain']}{_format_expiry(a['expires'])}")
     else:
         print("allowed domains: (none)")
+    if policy["deny"]:
+        print("denied domains:")
+        for d in policy["deny"]:
+            print(f"  {d}")
 
 
 @net.command()
@@ -941,17 +1072,46 @@ def allow(for_dir: str | None, duration: str | None, domains: tuple[str, ...]) -
 @_for_dir_option
 @click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
 def deny(for_dir: str | None, domains: tuple[str, ...]) -> None:
-    """Remove domains from a directory's allowlist.
+    """Deny domains (and their subdomains) for a directory.
 
-    Takes effect immediately in running restricted sessions. The agent's own
-    API domains cannot be denied.
+    Drops the domains from the allowlist and records them on the denylist,
+    so requests fail fast instead of prompting a watch session. Takes effect
+    immediately in running restricted sessions; 'aiab net allow' reverses
+    it. The agent's own API domains cannot be denied.
     """
     target = _realdir(for_dir)
     for domain in domains:
-        if state.remove_network_allow(target, domain):
-            print(f"Removed {domain}", file=sys.stderr)
+        state.add_network_deny(target, domain)
+        print(f"Denied {domain}", file=sys.stderr)
+
+
+@net.command()
+@_for_dir_option
+@click.option(
+    "--plain",
+    is_flag=True,
+    help="use the plain keystroke console even when textual is available",
+)
+def watch(for_dir: str | None, plain: bool) -> None:
+    """Interactively watch and steer a directory's network access.
+
+    Tails the filtering-proxy logs for this directory's containers, and
+    while it runs the proxy holds requests for unknown domains and prompts
+    here to allow or deny each one (instead of refusing them outright).
+    With textual installed each prompt is a row of clickable buttons; the
+    keystroke console is the fallback, and --plain forces it. `aiab run`
+    opens this in a tmux pane automatically for restricted sessions; it
+    also works standalone in any terminal.
+    """
+    target = _realdir(for_dir)
+    if not plain:
+        try:
+            from . import netwatch_tui
+        except ImportError:
+            pass  # textual missing or too old (e.g. Ubuntu's 0.1.x package)
         else:
-            print(f"Not in the allowlist: {domain}", file=sys.stderr)
+            sys.exit(netwatch_tui.watch(target))
+    sys.exit(netwatch.watch(target))
 
 
 # --------------------------------------------------------------------------

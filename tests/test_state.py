@@ -299,3 +299,68 @@ def test_git_guard_dir_pruned_with_state_dir(tmp_path):
     state.prune_stale()
 
     assert not guard.exists()
+
+
+# ---------------------------------------------------------------------------
+# Network denylist
+# ---------------------------------------------------------------------------
+
+
+def test_get_network_default_deny_empty(tmp_path):
+    assert state.get_network(tmp_path)["deny"] == []
+
+
+def test_get_network_backfills_deny_for_old_records(tmp_path):
+    # Policy records written before the denylist existed have no "deny" key.
+    state._save_file(
+        state._NET_PATH,
+        {str(tmp_path): {"mode": state.MODE_OPEN, "allow": []}},
+    )
+    assert state.get_network(tmp_path)["deny"] == []
+
+
+def test_add_network_deny(tmp_path):
+    state.add_network_deny(tmp_path, "example.com")
+    assert state.get_network(tmp_path)["deny"] == ["example.com"]
+
+
+def test_add_network_deny_normalises_and_dedups(tmp_path):
+    state.add_network_deny(tmp_path, "*.Example.COM.")
+    state.add_network_deny(tmp_path, "example.com")
+    assert state.get_network(tmp_path)["deny"] == ["example.com"]
+
+
+def test_add_network_deny_drops_allow(tmp_path):
+    state.add_network_allow(tmp_path, "example.com", expires=None)
+    state.add_network_deny(tmp_path, "example.com")
+    policy = state.get_network(tmp_path)
+    assert policy["allow"] == []
+    assert policy["deny"] == ["example.com"]
+
+
+def test_add_network_allow_drops_deny(tmp_path):
+    state.add_network_deny(tmp_path, "example.com")
+    state.add_network_allow(tmp_path, "example.com", expires=None)
+    policy = state.get_network(tmp_path)
+    assert policy["deny"] == []
+    assert [a["domain"] for a in policy["allow"]] == ["example.com"]
+
+
+def test_remove_network_deny(tmp_path):
+    state.add_network_deny(tmp_path, "example.com")
+    assert state.remove_network_deny(tmp_path, "example.com") is True
+    assert state.get_network(tmp_path)["deny"] == []
+
+
+def test_remove_network_deny_absent(tmp_path):
+    assert state.remove_network_deny(tmp_path, "example.com") is False
+
+
+def test_deny_alone_keeps_record(tmp_path):
+    # A default-mode policy with only denies must still be persisted.
+    state.add_network_deny(tmp_path, "example.com")
+    data = state._load_file(state._NET_PATH)
+    assert str(tmp_path) in data
+    state.remove_network_deny(tmp_path, "example.com")
+    data = state._load_file(state._NET_PATH)
+    assert str(tmp_path) not in data
