@@ -301,6 +301,39 @@ def test_git_guard_dir_pruned_with_state_dir(tmp_path):
     assert not guard.exists()
 
 
+def test_git_guard_dir_per_mount_is_distinct(tmp_path):
+    # A mount's guard dir nests under the directory's own guard dir, and two
+    # different mount sources get distinct subdirs so they don't collide.
+    project = tmp_path / "project"
+    project.mkdir()
+    own = state.git_guard_dir(project)
+    a = state.git_guard_dir(project, tmp_path / "mount-a")
+    b = state.git_guard_dir(project, tmp_path / "mount-b")
+
+    assert a.parent == own and b.parent == own
+    assert a != b
+    assert a.is_dir() and b.is_dir()
+
+
+def test_git_guard_dir_per_mount_is_stable(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    src = tmp_path / "mount"
+    assert state.git_guard_dir(project, src) == state.git_guard_dir(project, src)
+
+
+def test_git_guard_dir_per_mount_pruned_with_state_dir(tmp_path):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    guard = state.git_guard_dir(gone, tmp_path / "mount")
+    (guard / "config").write_text("[core]\n")
+    gone.rmdir()
+
+    state.prune_stale()
+
+    assert not guard.exists()
+
+
 # ---------------------------------------------------------------------------
 # Network denylist
 # ---------------------------------------------------------------------------

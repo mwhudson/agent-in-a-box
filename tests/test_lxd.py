@@ -34,6 +34,7 @@ def test_name_only_lowercase_alnum_and_hyphens():
     name = container_name_for_dir("/home/user/My Project!", "claude")
     # LXD container names must be lowercase alphanumeric + hyphens.
     import re
+
     assert re.fullmatch(r"[a-z0-9-]+", name)
 
 
@@ -65,6 +66,7 @@ def test_container_name_is_prefixed_slug():
 
 def test_dir_slug_sanitised():
     import re
+
     assert re.fullmatch(r"[a-z0-9-]+", dir_slug("/home/user/My Project!"))
 
 
@@ -78,6 +80,7 @@ def test_source_device_recognised():
     # container name suffix; is_source_device does a prefix match on the
     # dir-<hash> device name.
     import hashlib
+
     path = "/home/user/my-project"
     container_name = container_name_for_dir(path, "claude")
     path_hash = container_name.rsplit("-", 1)[-1]  # 6-char suffix
@@ -94,6 +97,7 @@ def test_non_source_device_not_recognised():
 def test_extra_mount_not_recognised():
     # A second directory mounted into the same container has a different hash.
     import hashlib
+
     container_name = container_name_for_dir("/home/user/project", "claude")
     other_hash = hashlib.md5(b"/home/user/other").hexdigest()[:8]
     assert not is_source_device(f"dir-{other_hash}", container_name)

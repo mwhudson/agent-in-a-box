@@ -289,9 +289,14 @@ def dir_state_dir(directory: StrPath) -> Path:
     return d
 
 
-def git_guard_dir(directory: StrPath) -> Path:
-    """Return (creating it if needed) the host dir holding a directory's
-    sidecar copies of .git/hooks and .git/config (see aiab.cli's git guard).
+def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
+    """Return (creating it if needed) a host dir holding sidecar copies of a
+    git repo's .git/hooks and .git/config (see aiab.cli's git guard).
+
+    With source=None the dir guards the directory's own repo. Pass source to
+    get a distinct per-mount subdir for a read-write mounted repo, keyed by the
+    mount's path (via dir_slug) so two mounted repos don't collide with each
+    other or with the directory's own guard.
 
     It lives inside the directory's dir_state_dir, so prune_stale() reclaims it
     together with the rest of that directory's state when the project directory
@@ -299,6 +304,8 @@ def git_guard_dir(directory: StrPath) -> Path:
     are disposable; nothing here needs to survive on its own.
     """
     d = dir_state_dir(directory) / "git-guard"
+    if source is not None:
+        d = d / dir_slug(source)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

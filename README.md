@@ -121,6 +121,10 @@ Notes:
 - It only kicks in when the working directory's `.git` is a real directory;
   a directly-mounted linked worktree or submodule checkout (where `.git` is a
   gitfile) is skipped.
+- The same guard is applied to any **read-write** directory you mount in
+  (`aiab mount --rw`, `--add-mount-rw`) that is itself a git repo, so the agent
+  can't plant host-firing hooks there either. Read-only mounts can't be written,
+  so they're left alone.
 
 ## Versioned Claude config (CLAUDE.md + slash commands)
 

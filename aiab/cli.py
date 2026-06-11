@@ -410,20 +410,21 @@ def _reseed_tree(dst: Path, src: Path) -> None:
             shutil.copy2(child, target, follow_symlinks=False)
 
 
-def _setup_git_guard(
-    session: lxd.Container, work_dir: Path, container_cwd: str
+def _guard_git_repo(
+    session: lxd.Container, repo_dir: Path, container_path: str, guard: Path
 ) -> None:
-    """Shadow the repo's .git/hooks and .git/config with per-directory sidecars.
+    """Shadow repo_dir's .git/hooks and .git/config with sidecars under guard.
 
-    No-op when work_dir is not a git repository, or when its .git is a gitfile
-    rather than a directory (e.g. a linked worktree or submodule checkout
-    mounted directly) — there the .git/hooks and .git/config paths don't live
-    where we'd mount them, so we skip rather than guard the wrong thing.
+    repo_dir is a host repo whose .git lives at {container_path}/.git inside the
+    container; guard is the host dir holding the per-repo sidecar copies. No-op
+    when repo_dir is not a git repository, or when its .git is a gitfile rather
+    than a directory (e.g. a linked worktree or submodule checkout mounted
+    directly) — there the .git/hooks and .git/config paths don't live where we'd
+    mount them, so we skip rather than guard the wrong thing.
     """
-    git_dir = work_dir / ".git"
+    git_dir = repo_dir / ".git"
     if not git_dir.is_dir():
         return
-    guard = state.git_guard_dir(work_dir)
 
     host_hooks = git_dir / "hooks"
     if host_hooks.is_dir():
@@ -431,7 +432,7 @@ def _setup_git_guard(
         _reseed_tree(side_hooks, host_hooks)
         session.add_config_overlay(
             side_hooks,
-            f"{container_cwd}/.git/hooks",
+            f"{container_path}/.git/hooks",
             container_user=CONTAINER_USER,
         )
 
@@ -441,10 +442,29 @@ def _setup_git_guard(
         _reseed_file(side_config, host_config)
         session.add_config_overlay(
             side_config,
-            f"{container_cwd}/.git/config",
+            f"{container_path}/.git/config",
             container_user=CONTAINER_USER,
             readonly=True,
         )
+
+
+def _setup_git_guard(
+    session: lxd.Container, work_dir: Path, container_cwd: str
+) -> None:
+    """Shadow the work dir repo's .git/hooks and .git/config (see git guard)."""
+    _guard_git_repo(session, work_dir, container_cwd, state.git_guard_dir(work_dir))
+
+
+def _guard_mount(
+    container: lxd.Container, for_dir: Path, source: Path, container_path: str
+) -> None:
+    """Git-guard a read-write mounted repo so the agent can't plant hooks or
+    config that fire on the host. Sidecars live in a per-mount subdir of
+    for_dir's guard dir, keyed by the mount source so mounts don't collide.
+    """
+    _guard_git_repo(
+        container, source, container_path, state.git_guard_dir(for_dir, source)
+    )
 
 
 # -- tmux control plane --
@@ -717,7 +737,7 @@ def run(
             state.set_mount(work_dir, d, readonly=True)
         for d in add_mount_rw:
             state.set_mount(work_dir, d, readonly=False)
-        _apply_recorded_mounts(session, work_dir)
+        applied_mounts = _apply_recorded_mounts(session, work_dir)
 
         # Mount the directory's persistent state dir (shared by all agents for
         # this directory). /setup-container maintains the container setup
@@ -770,8 +790,13 @@ def run(
         # read-only config; the agent/shell session below is. A worktree shares
         # the main repo's .git/hooks and .git/config, so guarding container_cwd
         # (the repo root) covers it too.
+        # Read-write mounts can themselves be git repos, so guard their .git
+        # too; read-only mounts can't be written, so they need no guard.
         if not no_git_guard:
             _setup_git_guard(session, work_dir, container_cwd)
+            for source, mount_cwd, readonly in applied_mounts:
+                if not readonly:
+                    _guard_mount(session, work_dir, source, mount_cwd)
 
         env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
         env.update(proxy_env)
@@ -847,22 +872,30 @@ def _agent_containers(
             yield agent, container
 
 
-def _apply_recorded_mounts(container: lxd.Container, for_dir: Path) -> None:
+def _apply_recorded_mounts(
+    container: lxd.Container, for_dir: Path
+) -> list[tuple[Path, str, bool]]:
     """Add every mount recorded for for_dir to a container.
 
     Skips (with a warning) any whose source no longer exists, so a recreated
-    container still comes up.
+    container still comes up. Returns the applied mounts as
+    (source, container_path, readonly) tuples, so the caller can git-guard the
+    read-write ones (see _guard_mount).
     """
+    applied: list[tuple[Path, str, bool]] = []
     for m in state.get_mounts(for_dir):
-        if not Path(m["source"]).is_dir():
+        source = Path(m["source"])
+        if not source.is_dir():
             print(
                 f"Warning: recorded mount {m['source']} not found; skipping",
                 file=sys.stderr,
             )
             continue
-        container.add_device(
-            m["source"], work_prefix=WORK_PREFIX, readonly=m["readonly"]
+        container_path = container.add_device(
+            source, work_prefix=WORK_PREFIX, readonly=m["readonly"]
         )
+        applied.append((source, container_path, m["readonly"]))
+    return applied
 
 
 @main.command()
@@ -903,7 +936,13 @@ def mount(
                 file=sys.stderr,
             )
         for path in paths:
-            container.add_device(path, work_prefix=WORK_PREFIX, readonly=readonly)
+            container_path = container.add_device(
+                path, work_prefix=WORK_PREFIX, readonly=readonly
+            )
+            # Guard read-write mounts that are git repos, mirroring `aiab run`,
+            # so the agent can't plant host-firing hooks/config in them.
+            if not readonly:
+                _guard_mount(container, target, path, container_path)
     if not found:
         print(
             "No containers exist for this directory yet; the mounts are "
