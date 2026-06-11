@@ -22,6 +22,37 @@
   like `aiab worktrees list`/`adopt` would close the loop, especially when
   running parallel sessions.
 
+## Monitor pane (rename `aiab net watch` → `aiab monitor`)
+
+The watch pane becomes a general session control panel, not just a network
+decision console. The network log + pending-host buttons stay; a toggleable
+mounts view is added alongside.
+
+### Mounts view
+
+- Toggled via a clickable `[Mounts]` button in the header (+ `m` hotkey);
+  replaces the log area while active.
+- Each mount row: path label + `[ro]`/`[rw]` toggle + `[×]` remove button,
+  all mouse-clickable.
+- `[+ Add]` button at the bottom focuses a path `Input` widget.
+- Path input uses textual's `Suggester` (inline ghost completion, accept with
+  Tab/→) backed by a `PathSuggester` that walks the filesystem.
+- Default mode for new mounts: `ro`. Click the toggle to switch to `rw`.
+- Toggling `ro`↔`rw` on an existing mount takes effect live (remove + re-add
+  the LXD device, same as `aiab mount --ro`/`--rw`).
+- Removing a mount takes effect live (`state.remove_mount` +
+  `container.remove_dir_device`).
+
+### Architecture changes
+
+- The TUI constructor takes `container_name` (in addition to `work_dir`) and
+  lazily constructs an `Lxd()` + `Container` handle when a mount operation is
+  requested.
+- Module rename: `netwatch_tui` → `monitor_tui` (or similar). CLI entry point
+  becomes `aiab monitor`; `aiab net watch` can stay as an alias or be dropped.
+- The shared plumbing in `aiab.netwatch` (pending scan, log tails, decision
+  recording) stays; the mount logic lives in `aiab.state` already.
+
 ## Smaller items
 
 - More agents in the registry (gemini-cli, codex, aider) — the dataclass
