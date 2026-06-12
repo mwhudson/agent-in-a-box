@@ -1,8 +1,8 @@
-# Tests for aiab.state — the per-directory mount, network-policy and state-dir
-# records.
+# Tests for aiab.state — the per-directory mount, network-policy, base-release
+# and state-dir records.
 #
-# All tests redirect _PATH, _NET_PATH and _DIRSTATE_DIR to a tmp dir so no
-# real state is read or written.
+# All tests redirect _PATH, _NET_PATH, _BASE_PATH and _DIRSTATE_DIR to a tmp
+# dir so no real state is read or written.
 
 import time
 from pathlib import Path
@@ -17,6 +17,7 @@ def isolated_state(tmp_path, monkeypatch):
     """Redirect all state I/O to a temporary directory."""
     monkeypatch.setattr(state, "_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
+    monkeypatch.setattr(state, "_BASE_PATH", tmp_path / "base.json")
     monkeypatch.setattr(state, "_DIRSTATE_DIR", tmp_path / "dirstate")
 
 
@@ -166,6 +167,47 @@ def test_unexpired_allow_visible(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Base-release records
+# ---------------------------------------------------------------------------
+
+
+def test_get_base_default_when_unset(tmp_path):
+    from aiab import release
+
+    assert state.get_base(tmp_path) == release.DEFAULT_BASE
+
+
+def test_set_and_get_base(tmp_path):
+    state.set_base(tmp_path, "22.04")
+    assert state.get_base(tmp_path) == "22.04"
+
+
+def test_set_base_to_default_drops_record(tmp_path):
+    from aiab import release
+
+    state.set_base(tmp_path, "22.04")
+    state.set_base(tmp_path, release.DEFAULT_BASE)
+    # Back to default, so the file should hold no entry for this dir.
+    assert state.get_base(tmp_path) == release.DEFAULT_BASE
+    assert (
+        not (tmp_path / "base.json").exists()
+        or "22.04" not in (tmp_path / "base.json").read_text()
+    )
+
+
+def test_prune_stale_removes_deleted_base_dirs(tmp_path):
+    from aiab import release
+
+    gone = tmp_path / "gone"
+    state.set_base(gone, "22.04")
+
+    _, _, pruned_base, _ = state.prune_stale()
+
+    assert str(gone) in pruned_base
+    assert state.get_base(gone) == release.DEFAULT_BASE
+
+
+# ---------------------------------------------------------------------------
 # prune_stale
 # ---------------------------------------------------------------------------
 
@@ -177,7 +219,7 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
     state.set_mount(gone, tmp_path / "src", readonly=True)
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, _, _ = state.prune_stale()
+    pruned_mounts, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_mounts
     assert str(here) not in pruned_mounts
@@ -190,7 +232,7 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     # An explicit open record is the non-default policy that persists.
     state.set_network_mode(gone, state.MODE_OPEN)
 
-    _, pruned_net, _ = state.prune_stale()
+    _, pruned_net, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_net
 
@@ -200,12 +242,12 @@ def test_prune_stale_no_op_when_clean(tmp_path):
     here.mkdir()
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    assert state.prune_stale() == ([], [], [])
+    assert state.prune_stale() == ([], [], [], [])
 
 
 def test_prune_stale_empty_files(tmp_path):
-    # Should not raise when there's nothing in either file.
-    assert state.prune_stale() == ([], [], [])
+    # Should not raise when there's nothing in any file.
+    assert state.prune_stale() == ([], [], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +293,7 @@ def test_prune_stale_removes_state_dir_for_deleted_dir(tmp_path):
     here_state = state.dir_state_dir(here)
     gone.rmdir()
 
-    _, _, pruned_state = state.prune_stale()
+    _, _, _, pruned_state = state.prune_stale()
 
     assert pruned_state == [str(gone)]
     assert not gone_state.exists()
@@ -262,7 +304,7 @@ def test_prune_stale_skips_state_dir_without_source(tmp_path):
     stray = state._DIRSTATE_DIR / "stray"
     stray.mkdir(parents=True)
 
-    _, _, pruned_state = state.prune_stale()
+    _, _, _, pruned_state = state.prune_stale()
 
     assert pruned_state == []
     assert stray.is_dir()

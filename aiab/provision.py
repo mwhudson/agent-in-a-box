@@ -115,6 +115,7 @@ def apply_session_tweaks(container: Container) -> None:
 def provision_base(
     container: Container,
     *,
+    image: str,
     config_host_dir: StrPath,
     config_container_path: str,
     config_device_name: str,
@@ -140,6 +141,7 @@ def provision_base(
     try:
         _create(
             tmp,
+            image,
             config_host_dir,
             config_container_path,
             config_device_name,
@@ -166,6 +168,7 @@ def provision_base(
 
 def _create(
     container: Container,
+    image: str,
     config_host_dir: StrPath,
     config_container_path: str,
     config_device_name: str,
@@ -181,10 +184,10 @@ def _create(
     gid = os.getgid()
 
     print(
-        f"Creating container '{container.name}' from ubuntu:24.04 ...",
+        f"Creating container '{container.name}' from {image} ...",
         file=sys.stderr,
     )
-    container.create("ubuntu:24.04")
+    container.create(image)
 
     # Map the host user's UID/GID to the container user so that files created
     # inside mounted directories appear owned by the host user.

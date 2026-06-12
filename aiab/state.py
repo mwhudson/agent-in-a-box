@@ -36,6 +36,11 @@
 # deny list records domains the user has explicitly refused, so the proxy can
 # fail them fast instead of re-asking an attached `aiab monitor` session.
 #
+# A directory's base Ubuntu release (managed by `aiab base`) lives in a third
+# JSON file with the same keying:
+#   { "<dir real path>": "22.04" }
+# Directories with no record use the default release (see aiab.release).
+#
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
 # the agent itself maintains — notably the /setup-container setup script. A
@@ -49,12 +54,13 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
-from . import StrPath
+from . import StrPath, release
 from .lxd import dir_slug
 
 _STATE_DIR = Path.home() / ".local" / "share" / "aiab"
 _PATH = _STATE_DIR / "mounts.json"
 _NET_PATH = _STATE_DIR / "network.json"
+_BASE_PATH = _STATE_DIR / "base.json"
 _DIRSTATE_DIR = _STATE_DIR / "dirstate"
 
 # Records the owning project directory inside each dirstate dir, so
@@ -271,6 +277,36 @@ def remove_network_deny(directory: StrPath, domain: str) -> bool:
     return True
 
 
+# -- base release --
+#
+# The Ubuntu release a directory's template/session containers are built on,
+# stored as a canonical version string keyed by resolved path:
+#   { "<dir real path>": "22.04" }
+# Directories with no record use release.DEFAULT_BASE; a directory set back to
+# the default drops its entry to keep the file tidy.
+
+
+def get_base(directory: StrPath) -> str:
+    """Return the canonical base release for a directory (default if unset)."""
+    data: dict[str, str] = _load_file(_BASE_PATH)
+    return data.get(_key(directory), release.DEFAULT_BASE)
+
+
+def set_base(directory: StrPath, base: str) -> None:
+    """Record a directory's base release (canonical version string).
+
+    Setting it back to the default removes the record. The caller is expected
+    to have normalised ``base`` via release.normalize().
+    """
+    key = _key(directory)
+    data: dict[str, str] = _load_file(_BASE_PATH)
+    if base == release.DEFAULT_BASE:
+        data.pop(key, None)
+    else:
+        data[key] = base
+    _save_file(_BASE_PATH, data)
+
+
 # -- per-directory state dir --
 
 
@@ -310,14 +346,14 @@ def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
     return d
 
 
-def prune_stale() -> tuple[list[str], list[str], list[str]]:
+def prune_stale() -> tuple[list[str], list[str], list[str], list[str]]:
     """Remove records for directories that no longer exist from all state.
 
-    Covers the mount and network JSON files and the per-directory state dirs
-    (a state dir whose recorded .source path is gone is deleted, setup script
-    and all; ones without a readable .source are left alone). Returns
-    (pruned_mount_dirs, pruned_network_dirs, pruned_state_dirs) as lists of
-    project-directory path strings.
+    Covers the mount, network, and base JSON files and the per-directory state
+    dirs (a state dir whose recorded .source path is gone is deleted, setup
+    script and all; ones without a readable .source are left alone). Returns
+    (pruned_mount_dirs, pruned_network_dirs, pruned_base_dirs,
+    pruned_state_dirs) as lists of project-directory path strings.
     """
     pruned_mounts: list[str] = []
     mounts_data = _load()
@@ -337,6 +373,15 @@ def prune_stale() -> tuple[list[str], list[str], list[str]]:
     if pruned_net:
         _save_file(_NET_PATH, net_data)
 
+    pruned_base: list[str] = []
+    base_data = _load_file(_BASE_PATH)
+    for key in list(base_data):
+        if not Path(key).is_dir():
+            del base_data[key]
+            pruned_base.append(key)
+    if pruned_base:
+        _save_file(_BASE_PATH, base_data)
+
     pruned_state: list[str] = []
     if _DIRSTATE_DIR.is_dir():
         for d in _DIRSTATE_DIR.iterdir():
@@ -348,4 +393,4 @@ def prune_stale() -> tuple[list[str], list[str], list[str]]:
                 shutil.rmtree(d)
                 pruned_state.append(source)
 
-    return pruned_mounts, pruned_net, pruned_state
+    return pruned_mounts, pruned_net, pruned_base, pruned_state

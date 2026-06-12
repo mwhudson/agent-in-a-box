@@ -251,6 +251,14 @@ class Container:
     def set_config(self, key: str, value: str) -> None:
         run(self._argv(["config", "set", self.name, key, value]))
 
+    def get_config(self, key: str) -> str:
+        """Return a config key's value, or "" if it is unset."""
+        return run(
+            self._argv(["config", "get", self.name, key]),
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
     def ensure_started(self, base: Container) -> None:
         """Clone from a base container if missing, then ensure it's running."""
         if not self.exists():

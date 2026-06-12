@@ -16,6 +16,7 @@ aiab remove <agent>         # delete that container
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts
 aiab net ...                # restrict a dir's containers' network access
+aiab base ...               # pick the Ubuntu release a dir's containers use
 aiab monitor                # interactive network + mounts control panel
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates
 aiab list                   # list the containers
@@ -29,9 +30,10 @@ or `copilot`.
 ## How it works
 
 The first time you run `aiab run claude` it creates a **base container** from
-`ubuntu:24.04`, installs the agent into it, then stops it as a template.
-Subsequent runs clone a lightweight **per-directory session container** from that
-base — its name is derived from the directory path
+`ubuntu:24.04` (or whatever release the directory is set to — see
+[`aiab base`](#aiab-base)), installs the agent into it, then stops it as a
+template. Subsequent runs clone a lightweight **per-directory session container**
+from that base — its name is derived from the directory path
 (`claude-<basename>-<hash>`), so re-running in the same directory reuses the
 same container.
 
@@ -381,6 +383,32 @@ Caveats:
 - Template provisioning and `aiab upgrade-templates` are unaffected — they
   need apt and the agent installers, and don't run agent-authored code.
 
+### aiab base
+
+```
+aiab base [--for DIR]                 # show the directory's base release
+aiab base [--for DIR] RELEASE         # set it (e.g. 22.04 or jammy)
+aiab base [--for DIR] default         # clear back to the default (24.04)
+```
+
+By default a directory's containers are built on Ubuntu 24.04. `aiab base
+RELEASE` overrides that for one project directory; `RELEASE` is a version
+(`22.04`) or a codename (`jammy`), and `default` clears the override. Like
+`aiab net` and `aiab mount`, the choice is persisted per directory (keyed by
+the resolved path) and only edits recorded state — no LXD connection needed.
+
+Each agent gets its own template **per release**. The default release keeps the
+plain template name (`claude`); other releases get a separate template
+(`claude-base-2204`), built lazily the first time you run an agent for a
+directory set to that release. `aiab upgrade-templates` refreshes every
+template that exists, whatever its release.
+
+Changing a directory's base takes effect on the next `aiab run` there: if the
+directory already has a session container built from a different release, it is
+discarded and re-cloned from the right template. Your work isn't in the
+container — the working directory is a host bind mount — so the rebuild is just
+the clone cost.
+
 ### aiab monitor — the interactive control plane
 
 ```
@@ -459,8 +487,9 @@ aiab upgrade-templates [AGENT ...]
 ```
 
 Updates template containers in place. With no arguments, updates all template
-containers that currently exist. Pass one or more agent names to update only
-those.
+containers that currently exist — including the per-release templates an agent
+picks up via [`aiab base`](#aiab-base). Pass one or more agent names to update
+only those (still across every release each has a template for).
 
 Each update starts the template container, runs `apt-get update` and
 `dist-upgrade`, re-runs the agent installer (which fetches the latest version),

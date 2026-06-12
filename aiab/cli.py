@@ -46,6 +46,7 @@ from . import lxd
 from . import netproxy
 from . import netwatch
 from . import provision
+from . import release
 from . import state
 from .migrate import maybe_migrate
 
@@ -629,6 +630,14 @@ def main() -> None:
     help="mount DIR read-write and record it for this directory (repeatable)",
 )
 @click.option(
+    "--base",
+    "base_release",
+    metavar="RELEASE",
+    default=None,
+    help="build/use Ubuntu RELEASE (e.g. 22.04 or jammy) and record it for "
+    "this directory",
+)
+@click.option(
     "--worktree",
     is_flag=True,
     help="run the agent in a fresh git worktree (branched from HEAD)",
@@ -663,6 +672,7 @@ def run(
     for_dir: str | None,
     add_mount: tuple[str, ...],
     add_mount_rw: tuple[str, ...],
+    base_release: str | None,
     worktree: bool,
     worktree_keep: bool,
     no_git_guard: bool,
@@ -685,6 +695,16 @@ def run(
 
     work_dir = _realdir(for_dir)
 
+    # --base records the directory's Ubuntu release (like --add-mount records a
+    # mount), then uses it below; without it we use the directory's recorded
+    # base, or the default.
+    if base_release:
+        try:
+            state.set_base(work_dir, release.normalize(base_release))
+        except ValueError as e:
+            sys.exit(f"Error: {e}")
+    dir_base = state.get_base(work_dir)
+
     # Wrap restricted sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
@@ -701,12 +721,26 @@ def run(
     if cfg.prepare:
         cfg.prepare(config_host_dir)
 
-    base = conn.container(agent)
+    base = conn.container(release.base_container_name(agent, dir_base))
     session = conn.container_for_dir(work_dir, agent)
+
+    # A session cloned from a different base (the directory's base changed since
+    # it was created) is discarded so it re-clones from the right template.
+    # Sessions made before bases existed carry no marker; treat them as default.
+    if (
+        session.exists()
+        and (session.get_config("user.aiab_base") or release.DEFAULT_BASE) != dir_base
+    ):
+        print(
+            f"Directory base is now {dir_base}; rebuilding '{session.name}' ...",
+            file=sys.stderr,
+        )
+        _destroy_session(session)
 
     if not base.exists():
         provision.provision_base(
             base,
+            image=release.image_for(dir_base),
             config_host_dir=config_host_dir,
             config_container_path=CONFIG_CONTAINER_PATH,
             config_device_name=f"{agent}config",
@@ -717,6 +751,9 @@ def run(
     # stopper from an earlier session can't stop it out from under us mid-setup.
     with _stop_when_idle(session):
         session.ensure_started(base)
+        # Record the base this session was cloned from, so a later base change
+        # for the directory is detected and triggers a rebuild (above).
+        session.set_config("user.aiab_base", dir_base)
         provision.apply_session_tweaks(session)
 
         if shell:
@@ -818,6 +855,20 @@ def run(
 # --------------------------------------------------------------------------
 # remove
 # --------------------------------------------------------------------------
+
+
+def _destroy_session(session: lxd.Container) -> None:
+    """Tear down a session container and its proxy (e.g. to rebuild it).
+
+    Unlike `aiab remove`, this skips worktree pruning — the caller is about to
+    re-create the container, and the work dir lives on the host either way.
+    """
+    if session.status() == "RUNNING":
+        _stop_proxy(session.name)
+        session.remove_device("netproxy")
+        session.stop(timeout=30)
+    session.delete()
+    _stop_proxy(session.name)
 
 
 @main.command()
@@ -1135,6 +1186,57 @@ def deny(for_dir: str | None, domains: tuple[str, ...]) -> None:
         print(f"Denied {domain}", file=sys.stderr)
 
 
+# --------------------------------------------------------------------------
+# base
+# --------------------------------------------------------------------------
+
+
+# A plain Command (no LXD): like the net verbs it only edits recorded state.
+# A change is applied lazily — `aiab run` rebuilds the directory's container
+# from the new base when it notices the recorded base differs from the one the
+# existing container was cloned from.
+@main.command(cls=click.Command)
+@_for_dir_option
+@click.argument("release_arg", required=False, metavar="[RELEASE]")
+def base(for_dir: str | None, release_arg: str | None) -> None:
+    """Show or set the Ubuntu release a directory's containers are built on.
+
+    With no argument, prints the directory's base release and the default.
+    Given a RELEASE (a version like 22.04 or a codename like jammy), records it
+    for the directory; 'default' clears it back to the built-in default. A
+    change takes effect the next time an agent starts here — its container is
+    rebuilt from the new base then.
+    """
+    target = _realdir(for_dir)
+
+    if release_arg is None:
+        current = state.get_base(target)
+        print(f"{target}: {current}")
+        if current != release.DEFAULT_BASE:
+            print(f"default: {release.DEFAULT_BASE}")
+        known = ", ".join(
+            f"{v} ({c})"
+            for c, v in sorted(release.CODENAMES.items(), key=lambda kv: kv[1])
+        )
+        print(f"known releases: {known}")
+        return
+
+    if release_arg.strip().lower() == "default":
+        canonical = release.DEFAULT_BASE
+    else:
+        try:
+            canonical = release.normalize(release_arg)
+        except ValueError as e:
+            sys.exit(f"Error: {e}")
+    state.set_base(target, canonical)
+    print(f"Base release for {target}: {canonical}", file=sys.stderr)
+    print(
+        "Takes effect the next time an agent starts here "
+        "(its container is rebuilt from the new base).",
+        file=sys.stderr,
+    )
+
+
 def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
     """Open the session control panel for a directory (never returns).
 
@@ -1206,20 +1308,27 @@ def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> Non
 def upgrade_templates(conn: lxd.Lxd, which: tuple[str, ...]) -> None:
     """apt upgrade + reinstall the agent in template containers.
 
-    With no arguments, updates all template containers that currently exist.
+    With no arguments, updates all template containers that currently exist —
+    including alternate-release templates (see `aiab base`).
     """
     targets = which or agents.AGENT_NAMES
+    instance_names = conn.instances()
     updated = skipped = 0
     for agent in targets:
         cfg = agents.get(agent)
-        print(f"=== {agent} ===", file=sys.stderr)
-        ok = provision.update_template(
-            conn.container(agent),
-            update_cmds=cfg.upgrade_cmds,
-            container_user=CONTAINER_USER,
-        )
-        updated += ok
-        skipped += not ok
+        names = release.base_names_for_agent(agent, instance_names)
+        if not names:
+            # Report the bare agent so an explicit `which` still prints a skip.
+            names = [agent]
+        for name in names:
+            print(f"=== {name} ===", file=sys.stderr)
+            ok = provision.update_template(
+                conn.container(name),
+                update_cmds=cfg.upgrade_cmds,
+                container_user=CONTAINER_USER,
+            )
+            updated += ok
+            skipped += not ok
     print(f"Done: {updated} updated, {skipped} skipped.", file=sys.stderr)
 
 
@@ -1292,9 +1401,13 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
         wanted = {conn.container_for_dir(target, a).name for a in agents.AGENT_NAMES}
         names = [n for n in states if n in wanted]
     else:
-        # Skip the bare base/template containers (named exactly after an agent);
+        # Skip the template containers (default and alternate-release bases);
         # they hold no project mounts.
-        names = [n for n in states if n not in agents.AGENT_NAMES]
+        names = [
+            n
+            for n in states
+            if not release.is_base_container_name(n, agents.AGENT_NAMES)
+        ]
 
     if not names:
         where = f" for {_realdir(for_dir)}" if for_dir else ""
@@ -1319,7 +1432,9 @@ def gc(conn: lxd.Lxd) -> None:
     the per-directory state dirs (with their saved setup scripts).
     """
     states = conn.instances()
-    session_names = [n for n in states if n not in agents.AGENT_NAMES]
+    session_names = [
+        n for n in states if not release.is_base_container_name(n, agents.AGENT_NAMES)
+    ]
 
     removed = 0
     for name in sorted(session_names):
@@ -1362,11 +1477,13 @@ def gc(conn: lxd.Lxd) -> None:
             file=sys.stderr,
         )
 
-    pruned_mounts, pruned_net, pruned_state = state.prune_stale()
+    pruned_mounts, pruned_net, pruned_base, pruned_state = state.prune_stale()
     for d in pruned_mounts:
         print(f"Pruned mount record for {d}", file=sys.stderr)
     for d in pruned_net:
         print(f"Pruned network record for {d}", file=sys.stderr)
+    for d in pruned_base:
+        print(f"Pruned base record for {d}", file=sys.stderr)
     for d in pruned_state:
         print(f"Pruned state dir for {d}", file=sys.stderr)
 
