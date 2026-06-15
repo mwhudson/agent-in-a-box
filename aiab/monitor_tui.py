@@ -477,11 +477,6 @@ class MonitorApp(App[None]):
         margin: 0 1 0 0;
         background: $success-darken-2;
     }
-    #limits-note {
-        height: 1;
-        padding: 0 1;
-        color: $text-muted;
-    }
     """
 
     BINDINGS = [
@@ -562,9 +557,6 @@ class MonitorApp(App[None]):
             yield VerticalScroll(id="port-pending")
         with Vertical(id="limits"):
             yield Vertical(id="limit-list")
-            yield Static(
-                "Changes take effect on next aiab run.", id="limits-note"
-            )
         yield VerticalScroll(id="pending")
 
     def on_mount(self) -> None:
@@ -918,7 +910,11 @@ class MonitorApp(App[None]):
         else:
             return
         state.set_limits(self.work_dir, limits)
-        self._write_log(f"set {field}={value} — takes effect on next aiab run")
+        self._apply_to_containers(
+            f"set {field}={value}",
+            lambda c, lim=limits: c.apply_limits(lim["cpu"], lim["memory"]),
+        )
+        self._write_log(f"set {field}={value}")
         self._refresh_limits()
 
     def on_unmount(self) -> None:
