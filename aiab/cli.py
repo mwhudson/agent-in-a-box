@@ -471,10 +471,9 @@ def _guard_mount(
 
 # -- tmux control plane --
 #
-# A restricted `aiab run` on a terminal gets wrapped in tmux: the agent in
-# the main pane, `aiab monitor` (the host-side control plane, see
-# aiab.netwatch / aiab.monitor_tui) in a small pane below it. Two layers,
-# both thin:
+# `aiab run` on a terminal gets wrapped in tmux: the agent in the main pane,
+# `aiab monitor` (the host-side control plane, see aiab.netwatch /
+# aiab.monitor_tui) in a small pane below it. Two layers, both thin:
 #
 #  * outside tmux, run() execs `tmux new-session` re-running the very same
 #    aiab command line — the re-run sees TMUX set, so the recursion ends;
@@ -712,7 +711,7 @@ def main() -> None:
     "--no-tmux",
     "no_tmux",
     is_flag=True,
-    help="don't wrap a restricted session in tmux with an 'aiab monitor' pane",
+    help="don't wrap the session in tmux with an 'aiab monitor' pane",
 )
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_obj
@@ -732,10 +731,9 @@ def run(
 ) -> None:
     """Run an agent in a container for a directory.
 
-    Anything after `--` is passed straight through to the agent. When the
-    directory's network is restricted and tmux is available, the session
-    runs under tmux with an `aiab monitor` control pane below the agent;
-    --no-tmux opts out.
+    Anything after `--` is passed straight through to the agent. When tmux
+    is available, the session runs under tmux with an `aiab monitor` control
+    pane below the agent; --no-tmux opts out.
     """
     # --worktree-keep implies --worktree.
     if worktree_keep:
@@ -755,12 +753,11 @@ def run(
             sys.exit(f"Error: {e}")
     dir_base = state.get_base(work_dir)
 
-    # Wrap restricted sessions in tmux (see the tmux control plane section).
+    # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
     use_tmux = (
         not no_tmux
-        and state.get_network(work_dir)["mode"] == state.MODE_RESTRICTED
         and sys.stdin.isatty()
         and shutil.which("tmux") is not None
     )
@@ -1425,8 +1422,8 @@ def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> Non
 
     With textual installed each prompt is a row of clickable buttons; the
     plain keystroke network console is the fallback, and --plain forces it.
-    `aiab run` opens this in a tmux pane automatically for restricted
-    sessions; it also works standalone in any terminal.
+    `aiab run` opens this in a tmux pane automatically; it also works
+    standalone in any terminal.
     """
     _launch_monitor(_realdir(for_dir), container_name, plain)
 
