@@ -28,6 +28,7 @@ import fcntl
 import os
 import re
 import shlex
+import tempfile
 import shutil
 import signal
 import socket
@@ -494,30 +495,79 @@ def _self_argv0() -> str:
 
 
 def _reexec_under_tmux() -> None:
-    """Replace this process with tmux running the same aiab invocation.
+    """Run this aiab invocation inside a new tmux session, then return.
 
-    The session ends when the inner aiab exits. The inner run's exit code is
-    not propagated (tmux reports its own), which matters little for an
-    interactive agent session. The trailing set-option turns mouse mode on
-    for this session only (no -g, so a user's own tmux sessions and config
-    are untouched): clicks then switch pane focus, and reach the watch
-    pane's allow/deny buttons even while the agent pane has focus.
+    Stderr from the inner process is teed to a temp file while still showing
+    live in the pane.  After tmux closes, if the inner exit code was non-zero
+    and the log has content, the log is printed to the outer terminal so that
+    errors do not disappear with the pane.
+
+    The trailing set-option turns mouse mode on for this session only (no -g,
+    so a user's own tmux sessions and config are untouched): clicks then
+    switch pane focus, and reach the watch pane's allow/deny buttons even
+    while the agent pane has focus.
     """
     inner = shlex.join([_self_argv0(), *sys.argv[1:]])
-    os.execvp(
-        "tmux",
+
+    # Pre-create the log and rc files so we know the paths before launching.
+    log_fd, log_path = tempfile.mkstemp(prefix="aiab-stderr-", suffix=".log")
+    os.close(log_fd)
+    rc_fd, rc_path = tempfile.mkstemp(prefix="aiab-rc-", suffix=".txt")
+    os.close(rc_fd)
+
+    # Write a bash wrapper that tees stderr and records the exit code, both to
+    # files the outer process can read after tmux exits.
+    script_fd, script_path = tempfile.mkstemp(prefix="aiab-run-", suffix=".sh")
+    try:
+        os.write(
+            script_fd,
+            (
+                "#!/bin/bash\n"
+                f"{inner} 2> >(tee {shlex.quote(log_path)} >&2)\n"
+                f"echo $? > {shlex.quote(rc_path)}\n"
+            ).encode(),
+        )
+    finally:
+        os.close(script_fd)
+    os.chmod(script_path, 0o700)
+
+    subprocess.run(
         [
             "tmux",
             "new-session",
             "-c",
             os.getcwd(),
-            inner,
+            script_path,
             ";",
             "set-option",
             "mouse",
             "on",
-        ],
+        ]
     )
+    os.unlink(script_path)
+
+    # Read the inner process's exit code (tmux does not propagate it).
+    inner_rc = 1
+    try:
+        inner_rc = int(Path(rc_path).read_text().strip())
+    except (OSError, ValueError):
+        pass
+    finally:
+        Path(rc_path).unlink(missing_ok=True)
+
+    # Display any captured stderr in the outer terminal on unclean exit.
+    try:
+        stderr_log = Path(log_path).read_text()
+        if inner_rc != 0 and stderr_log.strip():
+            sys.stderr.write("\n--- stderr from failed aiab session ---\n")
+            sys.stderr.write(stderr_log)
+            if not stderr_log.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.write("---\n")
+    finally:
+        Path(log_path).unlink(missing_ok=True)
+
+    sys.exit(inner_rc)
 
 
 @contextlib.contextmanager
