@@ -41,6 +41,13 @@
 #   { "<dir real path>": "22.04" }
 # Directories with no record use the default release (see aiab.release).
 #
+# A directory's resource limits (managed by `aiab limits`) live in a fourth
+# JSON file with the same keying:
+#   { "<dir real path>": {"cpu": int, "memory": str, "disk": str} }
+# Directories with no record use DEFAULT_LIMITS. `aiab run` applies the limits
+# to the session container on every start (LXD applies CPU/memory changes
+# immediately; disk quotas require ZFS or another quota-capable pool).
+#
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
 # the agent itself maintains — notably the /setup-container setup script. A
@@ -61,6 +68,7 @@ _STATE_DIR = Path.home() / ".local" / "share" / "aiab"
 _PATH = _STATE_DIR / "mounts.json"
 _NET_PATH = _STATE_DIR / "network.json"
 _BASE_PATH = _STATE_DIR / "base.json"
+_LIMITS_PATH = _STATE_DIR / "limits.json"
 _DIRSTATE_DIR = _STATE_DIR / "dirstate"
 
 # Records the owning project directory inside each dirstate dir, so
@@ -307,6 +315,44 @@ def set_base(directory: StrPath, base: str) -> None:
     _save_file(_BASE_PATH, data)
 
 
+# -- resource limits --
+
+
+class ResourceLimits(TypedDict):
+    """Per-directory resource limits applied to session containers."""
+
+    cpu: int
+    memory: str
+    disk: str
+
+
+DEFAULT_LIMITS: ResourceLimits = {"cpu": 4, "memory": "8GiB", "disk": "100GiB"}
+
+
+def get_limits(directory: StrPath) -> ResourceLimits:
+    """Return the resource limits for a directory (DEFAULT_LIMITS if unset)."""
+    data: dict[str, ResourceLimits] = _load_file(_LIMITS_PATH)
+    recorded = data.get(_key(directory))
+    if recorded is None:
+        return dict(DEFAULT_LIMITS)  # type: ignore[return-value]
+    return {**DEFAULT_LIMITS, **recorded}  # type: ignore[return-value]
+
+
+def set_limits(directory: StrPath, limits: ResourceLimits) -> None:
+    """Record resource limits for a directory.
+
+    If limits match DEFAULT_LIMITS exactly the record is dropped to keep the
+    file tidy.
+    """
+    key = _key(directory)
+    data: dict[str, ResourceLimits] = _load_file(_LIMITS_PATH)
+    if limits == DEFAULT_LIMITS:
+        data.pop(key, None)
+    else:
+        data[key] = limits
+    _save_file(_LIMITS_PATH, data)
+
+
 # -- per-directory state dir --
 
 
@@ -346,14 +392,15 @@ def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
     return d
 
 
-def prune_stale() -> tuple[list[str], list[str], list[str], list[str]]:
+def prune_stale() -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Remove records for directories that no longer exist from all state.
 
-    Covers the mount, network, and base JSON files and the per-directory state
-    dirs (a state dir whose recorded .source path is gone is deleted, setup
-    script and all; ones without a readable .source are left alone). Returns
-    (pruned_mount_dirs, pruned_network_dirs, pruned_base_dirs,
-    pruned_state_dirs) as lists of project-directory path strings.
+    Covers the mount, network, base, and limits JSON files and the
+    per-directory state dirs (a state dir whose recorded .source path is gone
+    is deleted, setup script and all; ones without a readable .source are left
+    alone). Returns (pruned_mount_dirs, pruned_network_dirs, pruned_base_dirs,
+    pruned_state_dirs, pruned_limit_dirs) as lists of project-directory path
+    strings.
     """
     pruned_mounts: list[str] = []
     mounts_data = _load()
@@ -382,6 +429,15 @@ def prune_stale() -> tuple[list[str], list[str], list[str], list[str]]:
     if pruned_base:
         _save_file(_BASE_PATH, base_data)
 
+    pruned_limits: list[str] = []
+    limits_data = _load_file(_LIMITS_PATH)
+    for key in list(limits_data):
+        if not Path(key).is_dir():
+            del limits_data[key]
+            pruned_limits.append(key)
+    if pruned_limits:
+        _save_file(_LIMITS_PATH, limits_data)
+
     pruned_state: list[str] = []
     if _DIRSTATE_DIR.is_dir():
         for d in _DIRSTATE_DIR.iterdir():
@@ -393,4 +449,4 @@ def prune_stale() -> tuple[list[str], list[str], list[str], list[str]]:
                 shutil.rmtree(d)
                 pruned_state.append(source)
 
-    return pruned_mounts, pruned_net, pruned_base, pruned_state
+    return pruned_mounts, pruned_net, pruned_base, pruned_state, pruned_limits

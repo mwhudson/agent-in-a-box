@@ -754,6 +754,7 @@ def run(
         # Record the base this session was cloned from, so a later base change
         # for the directory is detected and triggers a rebuild (above).
         session.set_config("user.aiab_base", dir_base)
+        session.apply_limits(**state.get_limits(work_dir))
         provision.apply_session_tweaks(session)
 
         if shell:
@@ -1237,6 +1238,99 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# limits
+# --------------------------------------------------------------------------
+
+_SIZE_RE = re.compile(
+    r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE
+)
+
+
+def _validate_size(value: str, label: str) -> str:
+    if not _SIZE_RE.match(value.strip()):
+        raise click.BadParameter(
+            f"invalid {label} {value!r} — expected e.g. 8GiB or 512MiB"
+        )
+    return value.strip()
+
+
+@main.command(cls=click.Command)
+@_for_dir_option
+@click.option("--cpu", "cpu", metavar="N", default=None, type=int,
+              help="number of vCPUs")
+@click.option("--memory", "memory", metavar="SIZE", default=None,
+              help="memory limit, e.g. 8GiB")
+@click.option("--disk", "disk", metavar="SIZE", default=None,
+              help="root disk quota (ZFS pools only), e.g. 100GiB")
+@click.option("--reset", "reset", is_flag=True,
+              help="reset all limits to defaults")
+def limits(
+    for_dir: str | None,
+    cpu: int | None,
+    memory: str | None,
+    disk: str | None,
+    reset: bool,
+) -> None:
+    """Show or set the resource limits for a directory's session containers.
+
+    With no options, prints the current limits (or defaults). Specify one or
+    more of --cpu, --memory, --disk to update individual limits; --reset
+    restores all three to their built-in defaults. Changes take effect the
+    next time an agent starts here (limits are applied on every 'aiab run').
+
+    \b
+    Defaults: cpu=4, memory=8GiB, disk=100GiB (disk requires a ZFS pool).
+    """
+    target = _realdir(for_dir)
+
+    if reset:
+        state.set_limits(target, state.DEFAULT_LIMITS)
+        print(f"Resource limits for {target}: reset to defaults", file=sys.stderr)
+        return
+
+    if cpu is None and memory is None and disk is None:
+        current = state.get_limits(target)
+        print(f"{target}:")
+        print(f"  cpu:    {current['cpu']}")
+        print(f"  memory: {current['memory']}")
+        print(f"  disk:   {current['disk']}")
+        defs = state.DEFAULT_LIMITS
+        if current != defs:
+            print(f"defaults: cpu={defs['cpu']} memory={defs['memory']} disk={defs['disk']}")
+        return
+
+    if cpu is not None and cpu < 1:
+        raise click.BadParameter("cpu must be at least 1")
+
+    if memory is not None:
+        memory = _validate_size(memory, "memory")
+    if disk is not None:
+        disk = _validate_size(disk, "disk")
+
+    current = state.get_limits(target)
+    if cpu is not None:
+        current["cpu"] = cpu
+    if memory is not None:
+        current["memory"] = memory
+    if disk is not None:
+        current["disk"] = disk
+    state.set_limits(target, current)
+
+    parts = []
+    if cpu is not None:
+        parts.append(f"cpu={cpu}")
+    if memory is not None:
+        parts.append(f"memory={memory}")
+    if disk is not None:
+        parts.append(f"disk={disk}")
+    print(f"Resource limits for {target}: {', '.join(parts)}", file=sys.stderr)
+    print(
+        "Takes effect the next time an agent starts here.",
+        file=sys.stderr,
+    )
+
+
 def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
     """Open the session control panel for a directory (never returns).
 
@@ -1477,7 +1571,9 @@ def gc(conn: lxd.Lxd) -> None:
             file=sys.stderr,
         )
 
-    pruned_mounts, pruned_net, pruned_base, pruned_state = state.prune_stale()
+    pruned_mounts, pruned_net, pruned_base, pruned_state, pruned_limits = (
+        state.prune_stale()
+    )
     for d in pruned_mounts:
         print(f"Pruned mount record for {d}", file=sys.stderr)
     for d in pruned_net:
@@ -1486,6 +1582,8 @@ def gc(conn: lxd.Lxd) -> None:
         print(f"Pruned base record for {d}", file=sys.stderr)
     for d in pruned_state:
         print(f"Pruned state dir for {d}", file=sys.stderr)
+    for d in pruned_limits:
+        print(f"Pruned limits record for {d}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

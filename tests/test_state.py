@@ -1,8 +1,8 @@
-# Tests for aiab.state — the per-directory mount, network-policy, base-release
-# and state-dir records.
+# Tests for aiab.state — the per-directory mount, network-policy, base-release,
+# resource-limits, and state-dir records.
 #
-# All tests redirect _PATH, _NET_PATH, _BASE_PATH and _DIRSTATE_DIR to a tmp
-# dir so no real state is read or written.
+# All tests redirect _PATH, _NET_PATH, _BASE_PATH, _LIMITS_PATH and
+# _DIRSTATE_DIR to a tmp dir so no real state is read or written.
 
 import time
 from pathlib import Path
@@ -18,6 +18,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
     monkeypatch.setattr(state, "_BASE_PATH", tmp_path / "base.json")
+    monkeypatch.setattr(state, "_LIMITS_PATH", tmp_path / "limits.json")
     monkeypatch.setattr(state, "_DIRSTATE_DIR", tmp_path / "dirstate")
 
 
@@ -201,7 +202,7 @@ def test_prune_stale_removes_deleted_base_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_base(gone, "22.04")
 
-    _, _, pruned_base, _ = state.prune_stale()
+    _, _, pruned_base, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_base
     assert state.get_base(gone) == release.DEFAULT_BASE
@@ -219,7 +220,7 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
     state.set_mount(gone, tmp_path / "src", readonly=True)
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, _, _, _ = state.prune_stale()
+    pruned_mounts, _, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_mounts
     assert str(here) not in pruned_mounts
@@ -232,7 +233,7 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     # An explicit open record is the non-default policy that persists.
     state.set_network_mode(gone, state.MODE_OPEN)
 
-    _, pruned_net, _, _ = state.prune_stale()
+    _, pruned_net, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_net
 
@@ -242,12 +243,12 @@ def test_prune_stale_no_op_when_clean(tmp_path):
     here.mkdir()
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    assert state.prune_stale() == ([], [], [], [])
+    assert state.prune_stale() == ([], [], [], [], [])
 
 
 def test_prune_stale_empty_files(tmp_path):
     # Should not raise when there's nothing in any file.
-    assert state.prune_stale() == ([], [], [], [])
+    assert state.prune_stale() == ([], [], [], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +294,7 @@ def test_prune_stale_removes_state_dir_for_deleted_dir(tmp_path):
     here_state = state.dir_state_dir(here)
     gone.rmdir()
 
-    _, _, _, pruned_state = state.prune_stale()
+    _, _, _, pruned_state, _ = state.prune_stale()
 
     assert pruned_state == [str(gone)]
     assert not gone_state.exists()
@@ -304,7 +305,7 @@ def test_prune_stale_skips_state_dir_without_source(tmp_path):
     stray = state._DIRSTATE_DIR / "stray"
     stray.mkdir(parents=True)
 
-    _, _, _, pruned_state = state.prune_stale()
+    _, _, _, pruned_state, _ = state.prune_stale()
 
     assert pruned_state == []
     assert stray.is_dir()
@@ -439,3 +440,52 @@ def test_deny_alone_keeps_record(tmp_path):
     state.remove_network_deny(tmp_path, "example.com")
     data = state._load_file(state._NET_PATH)
     assert str(tmp_path) not in data
+
+
+# ---------------------------------------------------------------------------
+# Resource limits
+# ---------------------------------------------------------------------------
+
+
+def test_get_limits_returns_defaults_when_unset(tmp_path):
+    assert state.get_limits(tmp_path) == state.DEFAULT_LIMITS
+
+
+def test_set_and_get_limits(tmp_path):
+    new = {"cpu": 8, "memory": "16GiB", "disk": "200GiB"}
+    state.set_limits(tmp_path, new)
+    assert state.get_limits(tmp_path) == new
+
+
+def test_set_limits_partial_update(tmp_path):
+    current = dict(state.DEFAULT_LIMITS)
+    current["cpu"] = 8
+    state.set_limits(tmp_path, current)
+    got = state.get_limits(tmp_path)
+    assert got["cpu"] == 8
+    assert got["memory"] == state.DEFAULT_LIMITS["memory"]
+    assert got["disk"] == state.DEFAULT_LIMITS["disk"]
+
+
+def test_set_limits_to_default_drops_record(tmp_path):
+    state.set_limits(tmp_path, {"cpu": 8, "memory": "16GiB", "disk": "200GiB"})
+    state.set_limits(tmp_path, state.DEFAULT_LIMITS)
+    data = state._load_file(state._LIMITS_PATH)
+    assert str(tmp_path) not in data
+
+
+def test_limits_keyed_per_directory(tmp_path):
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    state.set_limits(dir_a, {"cpu": 2, "memory": "4GiB", "disk": "50GiB"})
+    assert state.get_limits(dir_b) == state.DEFAULT_LIMITS
+
+
+def test_prune_stale_removes_deleted_limits_dirs(tmp_path):
+    gone = tmp_path / "gone"
+    state.set_limits(gone, {"cpu": 8, "memory": "16GiB", "disk": "200GiB"})
+
+    _, _, _, _, pruned_limits = state.prune_stale()
+
+    assert str(gone) in pruned_limits
+    assert state.get_limits(gone) == state.DEFAULT_LIMITS

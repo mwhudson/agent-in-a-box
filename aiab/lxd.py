@@ -251,6 +251,22 @@ class Container:
     def set_config(self, key: str, value: str) -> None:
         run(self._argv(["config", "set", self.name, key, value]))
 
+    def apply_limits(self, cpu: int, memory: str, disk: str) -> None:
+        """Apply resource limits to a running or stopped container.
+
+        CPU and memory limits take effect immediately on a running container.
+        The disk quota (ZFS size property on the root device) also applies
+        immediately on ZFS-backed pools.
+        """
+        self.set_config("limits.cpu", str(cpu))
+        self.set_config("limits.memory", memory)
+        run(
+            self._argv(
+                ["config", "device", "set", self.name, "root", "size", disk]
+            ),
+            stdout=subprocess.DEVNULL,
+        )
+
     def get_config(self, key: str) -> str:
         """Return a config key's value, or "" if it is unset."""
         return run(
