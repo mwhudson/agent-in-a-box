@@ -43,10 +43,10 @@
 #
 # A directory's resource limits (managed by `aiab limits`) live in a fourth
 # JSON file with the same keying:
-#   { "<dir real path>": {"cpu": int, "memory": str, "disk": str} }
+#   { "<dir real path>": {"cpu": int, "memory": str} }
 # Directories with no record use DEFAULT_LIMITS. `aiab run` applies the limits
 # to the session container on every start (LXD applies CPU/memory changes
-# immediately; disk quotas require ZFS or another quota-capable pool).
+# immediately on a running container).
 #
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
@@ -323,10 +323,9 @@ class ResourceLimits(TypedDict):
 
     cpu: int
     memory: str
-    disk: str
 
 
-DEFAULT_LIMITS: ResourceLimits = {"cpu": 4, "memory": "8GiB", "disk": "100GiB"}
+DEFAULT_LIMITS: ResourceLimits = {"cpu": 4, "memory": "8GiB"}
 
 
 def get_limits(directory: StrPath) -> ResourceLimits:

@@ -17,8 +17,8 @@
 #
 # The richer of the two control consoles (the shared network plumbing and the
 # plain keystroke fallback live in aiab.netwatch). It is a general session
-# control panel with three tabs, selected from the buttons in the header (or
-# the 1/2/3 hotkeys):
+# control panel with five tabs, selected from the buttons in the header (or
+# the 1/2/3/4/5 hotkeys):
 #
 #   * Network (default): proxy logs scroll in the middle, and every parked host
 #     gets a row of Allow / 15m / Deny / Skip buttons above the footer, so a
@@ -32,7 +32,12 @@
 #     read-only/read-write toggle and a remove button, plus an input to add
 #     a new one (with filesystem path completion). Edits mutate aiab.state and,
 #     when a session container is around, take effect live on it — the same
-#     thing `aiab mount`/`aiab unmount` do.
+#     thing `aiab mount`/`aiab unmount` do;
+#   * Ports: lists TCP ports the container is listening on above the threshold
+#     and prompts to forward them to the host;
+#   * Limits: the directory's CPU and memory limits, each editable inline with
+#     a Set button. Changes are saved to aiab.state and take effect on the next
+#     `aiab run` for the directory.
 #
 # Textual asks the terminal for mouse tracking itself, and tmux forwards mouse
 # input to the pane, so the buttons work inside the tmux layout `aiab run` sets
@@ -48,6 +53,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -177,6 +183,25 @@ class PortForwardRow(Horizontal):
     def compose(self) -> ComposeResult:
         yield Static(f"localhost:{self.port}", classes="port-label")
         yield Button("×", name="remove", classes="remove")
+
+
+_LIMIT_SIZE_RE = re.compile(
+    r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE
+)
+
+
+class LimitRow(Horizontal):
+    """One resource limit field: its name, an editable value, and a Set button."""
+
+    def __init__(self, field: str, value: str) -> None:
+        super().__init__()
+        self.field = field
+        self._value = value
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.field, classes="limit-label")
+        yield Input(self._value, id=f"limit-{self.field}", classes="limit-input")
+        yield Button("Set", name="set", classes="limit-set")
 
 
 class PathSuggester(Suggester):
@@ -425,6 +450,38 @@ class MonitorApp(App[None]):
     PortPendingRow .ignore {
         background: $error-darken-3;
     }
+    #limits {
+        height: 1fr;
+    }
+    #limit-list {
+        height: auto;
+    }
+    LimitRow {
+        height: 1;
+    }
+    LimitRow .limit-label {
+        width: 10;
+        padding: 0 1;
+        text-style: bold;
+    }
+    LimitRow .limit-input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0;
+    }
+    LimitRow .limit-set {
+        height: 1;
+        min-width: 5;
+        border: none;
+        margin: 0 1 0 0;
+        background: $success-darken-2;
+    }
+    #limits-note {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
     """
 
     BINDINGS = [
@@ -438,6 +495,8 @@ class MonitorApp(App[None]):
         Binding("m", "select_view('mounts')", "mounts", show=False),
         Binding("4", "select_view('ports')", "ports", show=False),
         Binding("p", "select_view('ports')", "ports", show=False),
+        Binding("5", "select_view('limits')", "limits", show=False),
+        Binding("l", "select_view('limits')", "limits", show=False),
         Binding("q", "quit", "quit"),
     ]
 
@@ -481,6 +540,7 @@ class MonitorApp(App[None]):
             yield Button("Domains", id="tab-domains", classes="tab")
             yield Button("Mounts", id="tab-mounts", classes="tab")
             yield Button("Ports", id="tab-ports", classes="tab")
+            yield Button("Limits", id="tab-limits", classes="tab")
             yield Static(id="policy")
         yield RichLog(id="log")
         with Vertical(id="domains"):
@@ -500,6 +560,11 @@ class MonitorApp(App[None]):
         with Vertical(id="ports"):
             yield VerticalScroll(id="port-list")
             yield VerticalScroll(id="port-pending")
+        with Vertical(id="limits"):
+            yield Vertical(id="limit-list")
+            yield Static(
+                "Changes take effect on next aiab run.", id="limits-note"
+            )
         yield VerticalScroll(id="pending")
 
     def on_mount(self) -> None:
@@ -586,7 +651,8 @@ class MonitorApp(App[None]):
         self.query_one("#domains").display = view == "domains"
         self.query_one("#mounts").display = view == "mounts"
         self.query_one("#ports").display = view == "ports"
-        for name in ("network", "domains", "mounts", "ports"):
+        self.query_one("#limits").display = view == "limits"
+        for name in ("network", "domains", "mounts", "ports", "limits"):
             self.query_one(f"#tab-{name}", Button).set_class(name == view, "active")
         if view == "domains":
             self._refresh_domains()
@@ -594,6 +660,8 @@ class MonitorApp(App[None]):
             self._refresh_mounts()
         elif view == "ports":
             self._refresh_ports()
+        elif view == "limits":
+            self._refresh_limits()
         self._flash_tab()  # stop flashing the moment the Network tab is opened
         self.refresh_bindings()
 
@@ -820,6 +888,42 @@ class MonitorApp(App[None]):
         self._ignored_ports.add(row.port)
         row.remove()
 
+    # -- limits view --
+
+    def _refresh_limits(self) -> None:
+        limit_list = self.query_one("#limit-list", Vertical)
+        for row in limit_list.query(LimitRow):
+            row.remove()
+        limits = state.get_limits(self.work_dir)
+        limit_list.mount(LimitRow("cpu", str(limits["cpu"])))
+        limit_list.mount(LimitRow("memory", limits["memory"]))
+
+    def _apply_limit(self, field: str, value: str) -> None:
+        limits = state.get_limits(self.work_dir)
+        if field == "cpu":
+            try:
+                cpu = int(value)
+                if cpu < 1:
+                    raise ValueError
+            except ValueError:
+                self._write_log(
+                    f"invalid cpu: {value!r} — must be a positive integer"
+                )
+                return
+            limits["cpu"] = cpu
+        elif field == "memory":
+            if not _LIMIT_SIZE_RE.match(value):
+                self._write_log(
+                    f"invalid memory: {value!r} — expected e.g. 8GiB or 512MiB"
+                )
+                return
+            limits["memory"] = value
+        else:
+            return
+        state.set_limits(self.work_dir, limits)
+        self._write_log(f"set {field}={value} — takes effect on next aiab run")
+        self._refresh_limits()
+
     def on_unmount(self) -> None:
         """Remove host-side port-forwarding proxy devices when the monitor exits."""
         for port in list(self._forwarded_ports):
@@ -861,6 +965,8 @@ class MonitorApp(App[None]):
                 self._ignore_port(row)
         elif isinstance(row, PortForwardRow):
             self._remove_forward(row)
+        elif isinstance(row, LimitRow):
+            self._apply_limit(row.field, row.query_one(Input).value.strip())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "add-path":
@@ -871,6 +977,10 @@ class MonitorApp(App[None]):
         elif event.input.id == "add-domain":
             self._add_domain(event.value)
             event.input.value = ""
+        elif event.input.id and event.input.id.startswith("limit-"):
+            row = event.input.parent
+            if isinstance(row, LimitRow):
+                self._apply_limit(row.field, event.value.strip())
 
 
 def monitor(work_dir: Path, container_name: str | None = None) -> int:

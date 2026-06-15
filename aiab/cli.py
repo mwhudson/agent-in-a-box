@@ -1261,26 +1261,23 @@ def _validate_size(value: str, label: str) -> str:
               help="number of vCPUs")
 @click.option("--memory", "memory", metavar="SIZE", default=None,
               help="memory limit, e.g. 8GiB")
-@click.option("--disk", "disk", metavar="SIZE", default=None,
-              help="root disk quota (ZFS pools only), e.g. 100GiB")
 @click.option("--reset", "reset", is_flag=True,
               help="reset all limits to defaults")
 def limits(
     for_dir: str | None,
     cpu: int | None,
     memory: str | None,
-    disk: str | None,
     reset: bool,
 ) -> None:
     """Show or set the resource limits for a directory's session containers.
 
     With no options, prints the current limits (or defaults). Specify one or
-    more of --cpu, --memory, --disk to update individual limits; --reset
-    restores all three to their built-in defaults. Changes take effect the
-    next time an agent starts here (limits are applied on every 'aiab run').
+    more of --cpu, --memory to update individual limits; --reset restores both
+    to their built-in defaults. Changes take effect the next time an agent
+    starts here (limits are applied on every 'aiab run').
 
     \b
-    Defaults: cpu=4, memory=8GiB, disk=100GiB (disk requires a ZFS pool).
+    Defaults: cpu=4, memory=8GiB.
     """
     target = _realdir(for_dir)
 
@@ -1289,15 +1286,14 @@ def limits(
         print(f"Resource limits for {target}: reset to defaults", file=sys.stderr)
         return
 
-    if cpu is None and memory is None and disk is None:
+    if cpu is None and memory is None:
         current = state.get_limits(target)
         print(f"{target}:")
         print(f"  cpu:    {current['cpu']}")
         print(f"  memory: {current['memory']}")
-        print(f"  disk:   {current['disk']}")
         defs = state.DEFAULT_LIMITS
         if current != defs:
-            print(f"defaults: cpu={defs['cpu']} memory={defs['memory']} disk={defs['disk']}")
+            print(f"defaults: cpu={defs['cpu']} memory={defs['memory']}")
         return
 
     if cpu is not None and cpu < 1:
@@ -1305,16 +1301,12 @@ def limits(
 
     if memory is not None:
         memory = _validate_size(memory, "memory")
-    if disk is not None:
-        disk = _validate_size(disk, "disk")
 
     current = state.get_limits(target)
     if cpu is not None:
         current["cpu"] = cpu
     if memory is not None:
         current["memory"] = memory
-    if disk is not None:
-        current["disk"] = disk
     state.set_limits(target, current)
 
     parts = []
@@ -1322,8 +1314,6 @@ def limits(
         parts.append(f"cpu={cpu}")
     if memory is not None:
         parts.append(f"memory={memory}")
-    if disk is not None:
-        parts.append(f"disk={disk}")
     print(f"Resource limits for {target}: {', '.join(parts)}", file=sys.stderr)
     print(
         "Takes effect the next time an agent starts here.",

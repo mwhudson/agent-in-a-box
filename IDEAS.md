@@ -28,6 +28,5 @@
   design makes each one a single entry.
 - A `--name`/session-suffix option so two agents of the same kind can run
   concurrently in one directory with separate containers.
-- Resource limits (`limits.cpu`/`limits.memory`) for runaway agent processes.
 - **`aiab doctor`** — check LXD init state and idmap support; first-run
   failures there are probably the worst onboarding experience.

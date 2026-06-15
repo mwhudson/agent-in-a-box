@@ -452,7 +452,7 @@ def test_get_limits_returns_defaults_when_unset(tmp_path):
 
 
 def test_set_and_get_limits(tmp_path):
-    new = {"cpu": 8, "memory": "16GiB", "disk": "200GiB"}
+    new = {"cpu": 8, "memory": "16GiB"}
     state.set_limits(tmp_path, new)
     assert state.get_limits(tmp_path) == new
 
@@ -464,11 +464,10 @@ def test_set_limits_partial_update(tmp_path):
     got = state.get_limits(tmp_path)
     assert got["cpu"] == 8
     assert got["memory"] == state.DEFAULT_LIMITS["memory"]
-    assert got["disk"] == state.DEFAULT_LIMITS["disk"]
 
 
 def test_set_limits_to_default_drops_record(tmp_path):
-    state.set_limits(tmp_path, {"cpu": 8, "memory": "16GiB", "disk": "200GiB"})
+    state.set_limits(tmp_path, {"cpu": 8, "memory": "16GiB"})
     state.set_limits(tmp_path, state.DEFAULT_LIMITS)
     data = state._load_file(state._LIMITS_PATH)
     assert str(tmp_path) not in data
@@ -477,13 +476,13 @@ def test_set_limits_to_default_drops_record(tmp_path):
 def test_limits_keyed_per_directory(tmp_path):
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
-    state.set_limits(dir_a, {"cpu": 2, "memory": "4GiB", "disk": "50GiB"})
+    state.set_limits(dir_a, {"cpu": 2, "memory": "4GiB"})
     assert state.get_limits(dir_b) == state.DEFAULT_LIMITS
 
 
 def test_prune_stale_removes_deleted_limits_dirs(tmp_path):
     gone = tmp_path / "gone"
-    state.set_limits(gone, {"cpu": 8, "memory": "16GiB", "disk": "200GiB"})
+    state.set_limits(gone, {"cpu": 8, "memory": "16GiB"})
 
     _, _, _, _, pruned_limits = state.prune_stale()
 
