@@ -455,18 +455,39 @@ class Container:
                 )
                 print(f"Unmasked network device '{name}'", file=sys.stderr)
 
-    def add_proxy_device(self, name: str, listen: str, connect: str) -> None:
-        """Add (or refresh) a proxy device forwarding container -> host.
+    def init_pid(self) -> int | None:
+        """Return the container's init PID, or None if stopped or not found."""
+        try:
+            result = run(
+                self._argv(["info", self.name]),
+                capture_output=True,
+                text=True,
+            )
+            data = yaml.safe_load(result.stdout)
+            pid = data.get("PID")
+            return int(pid) if pid else None
+        except (subprocess.CalledProcessError, ValueError, TypeError, OSError):
+            return None
 
-        With bind=instance, `listen` is an address inside the container and
-        `connect` a socket on the host — used to expose the host-side
-        filtering proxy at a fixed port inside the container.
+    def add_proxy_device(
+        self, name: str, listen: str, connect: str, bind: str = "instance"
+    ) -> None:
+        """Add (or refresh) a proxy device.
+
+        bind="instance" (default): `listen` is inside the container, `connect`
+        is on the host — used to expose the host-side filtering proxy at a
+        fixed port inside the container.
+
+        bind="host": `listen` is on the host, `connect` is inside the
+        container — used to forward a host port into a container port so the
+        host browser can reach a server the agent started.
         """
         existing = self.devices().get(name)
         if (
             existing
             and existing.get("listen") == listen
             and existing.get("connect") == connect
+            and existing.get("bind", "instance") == bind
         ):
             return
         self.remove_device(name)
@@ -481,7 +502,7 @@ class Container:
                     "proxy",
                     f"listen={listen}",
                     f"connect={connect}",
-                    "bind=instance",
+                    f"bind={bind}",
                 ]
             ),
             stdout=subprocess.DEVNULL,

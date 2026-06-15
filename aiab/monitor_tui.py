@@ -59,9 +59,46 @@ from textual.widgets import Button, Input, RichLog, Static
 
 from . import PROJECT, WORK_PREFIX
 from . import agents
+from . import netproxy
 from . import netwatch
 from . import state
 from .lxd import Lxd
+
+# Ports below this threshold are skipped when scanning the container's socket
+# table — they're nearly always system services (sshd, DNS, etc.) rather than
+# something the agent started.
+_MIN_FORWARD_PORT = 1024
+
+# Ports to exclude even if they're above the threshold — our own proxy port
+# is always listening inside restricted containers.
+_EXCLUDED_PORTS: frozenset[int] = frozenset({netproxy.PROXY_PORT})
+
+
+def _read_listening_ports(init_pid: int) -> set[int]:
+    """Return ports with TCP LISTEN sockets in a container's network namespace.
+
+    Reads /proc/<init_pid>/net/tcp and tcp6, which are scoped to the
+    container's network namespace because init_pid is the container's PID 1.
+    State 0A in the hex table is TCP_LISTEN; the port is the last four hex
+    digits of the local_address field.
+    """
+    ports: set[int] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            text = Path(f"/proc/{init_pid}/net/{name}").read_text()
+        except OSError:
+            continue
+        for line in text.splitlines()[1:]:  # skip the header row
+            parts = line.split()
+            if len(parts) < 4 or parts[3] != "0A":
+                continue
+            try:
+                port = int(parts[1].split(":")[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if port >= _MIN_FORWARD_PORT and port not in _EXCLUDED_PORTS:
+                ports.add(port)
+    return ports
 
 
 class PendingRow(Horizontal):
@@ -114,6 +151,31 @@ class MountRow(Horizontal):
     def compose(self) -> ComposeResult:
         yield Static(self.source, classes="mount-path")
         yield Button("ro" if self.readonly else "rw", name="mode", classes="mode")
+        yield Button("×", name="remove", classes="remove")
+
+
+class PortPendingRow(Horizontal):
+    """A newly detected listening port waiting for a forwarding decision."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.port = port
+
+    def compose(self) -> ComposeResult:
+        yield Static(f":{self.port}", classes="port")
+        yield Button("Forward", name="forward", classes="forward")
+        yield Button("Ignore", name="ignore", classes="ignore")
+
+
+class PortForwardRow(Horizontal):
+    """A port actively forwarded from the host into the container."""
+
+    def __init__(self, port: int) -> None:
+        super().__init__()
+        self.port = port
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"localhost:{self.port}", classes="port-label")
         yield Button("×", name="remove", classes="remove")
 
 
@@ -316,6 +378,53 @@ class MonitorApp(App[None]):
     PendingRow Button.deny {
         background: $error-darken-2;
     }
+    #ports {
+        height: 1fr;
+    }
+    #port-list {
+        height: 1fr;
+    }
+    #port-pending {
+        height: auto;
+        max-height: 60%;
+    }
+    PortForwardRow {
+        height: 1;
+    }
+    PortForwardRow .port-label {
+        width: 1fr;
+        padding: 0 1;
+    }
+    PortForwardRow Button {
+        height: 1;
+        min-width: 3;
+        border: none;
+        margin: 0 1 0 0;
+    }
+    PortForwardRow .remove {
+        min-width: 3;
+        background: $error-darken-2;
+    }
+    PortPendingRow {
+        height: 1;
+    }
+    PortPendingRow .port {
+        width: 1fr;
+        padding: 0 1;
+        text-style: bold;
+    }
+    PortPendingRow Button {
+        height: 1;
+        min-width: 9;
+        border: none;
+        margin: 0 1 0 0;
+    }
+    PortPendingRow .forward {
+        background: $success-darken-2;
+    }
+    PortPendingRow .ignore {
+        background: $error-darken-3;
+    }
     """
 
     BINDINGS = [
@@ -327,6 +436,8 @@ class MonitorApp(App[None]):
         Binding("2", "select_view('domains')", "domains", show=False),
         Binding("3", "select_view('mounts')", "mounts", show=False),
         Binding("m", "select_view('mounts')", "mounts", show=False),
+        Binding("4", "select_view('ports')", "ports", show=False),
+        Binding("p", "select_view('ports')", "ports", show=False),
         Binding("q", "quit", "quit"),
     ]
 
@@ -349,18 +460,27 @@ class MonitorApp(App[None]):
         # the DOM so check_action can use it even when remove() is still
         # pending (Widget.remove is async).
         self._pending_count: int = 0
-        # Which tab fills the middle of the pane: "network", "domains" or
-        # "mounts".
+        # Which tab fills the middle of the pane: "network", "domains",
+        # "mounts", or "ports".
         self._view = "network"
         # Whether the Network tab is currently lit in its flash cycle (toggled
         # while a decision is pending and another tab has focus).
         self._flash_on = False
+        # Port-forwarding state: the cached init PID of the session container
+        # (fetched lazily from lxc info, reset when the proc entry vanishes),
+        # ports seen on the last poll, ports the user chose to ignore this
+        # session, and ports currently forwarded to the host.
+        self._init_pid: int | None = None
+        self._known_ports: set[int] = set()
+        self._ignored_ports: set[int] = set()
+        self._forwarded_ports: set[int] = set()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
             yield Button("Network", id="tab-network", classes="tab")
             yield Button("Domains", id="tab-domains", classes="tab")
             yield Button("Mounts", id="tab-mounts", classes="tab")
+            yield Button("Ports", id="tab-ports", classes="tab")
             yield Static(id="policy")
         yield RichLog(id="log")
         with Vertical(id="domains"):
@@ -377,6 +497,9 @@ class MonitorApp(App[None]):
                     placeholder="path to mount (read-only)",
                     suggester=PathSuggester(),
                 )
+        with Vertical(id="ports"):
+            yield VerticalScroll(id="port-list")
+            yield VerticalScroll(id="port-pending")
         yield VerticalScroll(id="pending")
 
     def on_mount(self) -> None:
@@ -426,6 +549,7 @@ class MonitorApp(App[None]):
         if new or removed:
             self.refresh_bindings()
         self._refresh_policy()
+        self._check_ports()
 
     def _decide(self, row: PendingRow, action: str) -> None:
         self._handled.add(row.host)
@@ -461,12 +585,15 @@ class MonitorApp(App[None]):
         self.query_one("#pending").display = view == "network"
         self.query_one("#domains").display = view == "domains"
         self.query_one("#mounts").display = view == "mounts"
-        for name in ("network", "domains", "mounts"):
+        self.query_one("#ports").display = view == "ports"
+        for name in ("network", "domains", "mounts", "ports"):
             self.query_one(f"#tab-{name}", Button).set_class(name == view, "active")
         if view == "domains":
             self._refresh_domains()
         elif view == "mounts":
             self._refresh_mounts()
+        elif view == "ports":
+            self._refresh_ports()
         self._flash_tab()  # stop flashing the moment the Network tab is opened
         self.refresh_bindings()
 
@@ -603,6 +730,104 @@ class MonitorApp(App[None]):
         )
         self._refresh_mounts()
 
+    # -- ports view --
+
+    def _get_init_pid(self) -> int | None:
+        """Return the session container's init PID, fetched lazily and cached.
+
+        Resets the cache when the proc entry for the stored PID disappears
+        (container restarted), so a new lookup picks up the new PID.
+        """
+        if self._init_pid is not None:
+            if Path(f"/proc/{self._init_pid}/net/tcp").exists():
+                return self._init_pid
+            # Container restarted; clear stale state so the new process is
+            # detected fresh and pending rows for old ports are cleaned up.
+            self._init_pid = None
+            self._known_ports.clear()
+        containers = self._containers()
+        if not containers:
+            return None
+        try:
+            pid = containers[0].init_pid()
+            if pid:
+                self._init_pid = pid
+            return pid
+        except Exception:
+            return None
+
+    def _check_ports(self) -> None:
+        """Detect newly opened listening ports and prompt to forward them."""
+        init_pid = self._get_init_pid()
+        if init_pid is None:
+            return
+        current = _read_listening_ports(init_pid)
+        new_ports = current - self._known_ports - self._ignored_ports - self._forwarded_ports
+        gone_ports = self._known_ports - current
+        self._known_ports = current
+
+        pending = self.query_one("#port-pending", VerticalScroll)
+        rows = {row.port: row for row in pending.query(PortPendingRow)}
+
+        for port in gone_ports:
+            if port in rows:
+                rows[port].remove()
+                self._write_log(f"port :{port} closed before a decision was made")
+            elif port in self._forwarded_ports:
+                self._write_log(f"port :{port} closed (forward still active)")
+
+        for port in sorted(new_ports):
+            pending.mount(PortPendingRow(port))
+            self._write_log(f"port :{port} opened — forward to host? (Ports tab)")
+
+        if new_ports:
+            self.bell()
+
+    def _refresh_ports(self) -> None:
+        port_list = self.query_one("#port-list", VerticalScroll)
+        for row in port_list.query(PortForwardRow):
+            row.remove()
+        for port in sorted(self._forwarded_ports):
+            port_list.mount(PortForwardRow(port))
+
+    def _forward_port(self, row: PortPendingRow) -> None:
+        port = row.port
+        self._forwarded_ports.add(port)
+        self._apply_to_containers(
+            f"forward port {port}",
+            lambda c, p=port: c.add_proxy_device(
+                f"fwd-{p}",
+                listen=f"tcp:127.0.0.1:{p}",
+                connect=f"tcp:127.0.0.1:{p}",
+                bind="host",
+            ),
+        )
+        row.remove()
+        self.query_one("#port-list", VerticalScroll).mount(PortForwardRow(port))
+        self._write_log(f"forwarding localhost:{port} → container:{port}")
+
+    def _remove_forward(self, row: PortForwardRow) -> None:
+        port = row.port
+        self._forwarded_ports.discard(port)
+        self._apply_to_containers(
+            f"remove forward for port {port}",
+            lambda c, p=port: c.remove_device(f"fwd-{p}"),
+        )
+        row.remove()
+        self._write_log(f"removed forwarding for port {port}")
+
+    def _ignore_port(self, row: PortPendingRow) -> None:
+        self._ignored_ports.add(row.port)
+        row.remove()
+
+    def on_unmount(self) -> None:
+        """Remove host-side port-forwarding proxy devices when the monitor exits."""
+        for port in list(self._forwarded_ports):
+            self._apply_to_containers(
+                f"remove forward for port {port}",
+                lambda c, p=port: c.remove_device(f"fwd-{p}"),
+            )
+
     # -- shared event handling --
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -629,6 +854,13 @@ class MonitorApp(App[None]):
                 self._remove_mount(row)
             else:
                 self._toggle_mode(row)
+        elif isinstance(row, PortPendingRow):
+            if button.name == "forward":
+                self._forward_port(row)
+            else:
+                self._ignore_port(row)
+        elif isinstance(row, PortForwardRow):
+            self._remove_forward(row)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "add-path":
