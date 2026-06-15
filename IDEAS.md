@@ -13,9 +13,10 @@
 
 ## Project usability
 
-- **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device, so
-  a dev server the agent starts is reachable from the host browser. Right now
-  there's no documented way to see a web app the agent is running.
+- **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device and
+  persisted to state. Port detection and interactive forwarding already work in
+  the monitor's Ports tab, but there's no CLI flag and forwarding isn't
+  persisted across sessions.
 - **Worktree follow-through** — `--worktree-keep` leaves a detached worktree
   buried in `.git/aiab-worktrees/<timestamp>`, but there's no command to list
   those worktrees, diff them, or pull the result out into a branch. Something
