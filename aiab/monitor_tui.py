@@ -579,12 +579,9 @@ class MonitorApp(App[None]):
 
     def _refresh_policy(self) -> None:
         policy = state.get_network(self.work_dir)
-        parts = [f"{self.work_dir}", f"mode: {policy['mode']}"]
-        if policy["allow"]:
-            parts.append("allow: " + ", ".join(a["domain"] for a in policy["allow"]))
-        if policy["deny"]:
-            parts.append("deny: " + ", ".join(policy["deny"]))
-        self.query_one("#policy", Static).update(" · ".join(parts))
+        self.query_one("#policy", Static).update(
+            f"{self.work_dir} · mode: {policy['mode']}"
+        )
 
     def _poll(self) -> None:
         log = self.query_one("#log", RichLog)
