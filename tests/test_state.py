@@ -4,12 +4,45 @@
 # All tests redirect _PATH, _NET_PATH, _BASE_PATH, _LIMITS_PATH and
 # _DIRSTATE_DIR to a tmp dir so no real state is read or written.
 
+from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
 
 import pytest
 
 import aiab.state as state
+
+
+def _set_mount_slow_load(root, project, source):
+    import aiab.state as child_state
+
+    child_state._PATH = root / "mounts.json"
+    original_load_file = child_state._load_file
+
+    def slow_load_file(path):
+        data = original_load_file(path)
+        if path == child_state._PATH:
+            time.sleep(0.05)
+        return data
+
+    child_state._load_file = slow_load_file
+    child_state.set_mount(project, source, readonly=True)
+
+
+def _add_network_allow_slow_load(root, project, domain):
+    import aiab.state as child_state
+
+    child_state._NET_PATH = root / "network.json"
+    original_load_file = child_state._load_file
+
+    def slow_load_file(path):
+        data = original_load_file(path)
+        if path == child_state._NET_PATH:
+            time.sleep(0.05)
+        return data
+
+    child_state._load_file = slow_load_file
+    child_state.add_network_allow(project, domain, expires=None)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +119,26 @@ def test_mounts_are_keyed_per_directory(tmp_path):
     src = tmp_path / "src"
     state.set_mount(dir_a, src, readonly=True)
     assert state.get_mounts(dir_b) == []
+
+
+def test_concurrent_set_mounts_keep_all_sources(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    sources = [tmp_path / f"src-{i}" for i in range(4)]
+
+    with ProcessPoolExecutor(max_workers=len(sources)) as pool:
+        list(
+            pool.map(
+                _set_mount_slow_load,
+                [tmp_path] * len(sources),
+                [project] * len(sources),
+                sources,
+            )
+        )
+
+    assert {m["source"] for m in state.get_mounts(project)} == {
+        str(s) for s in sources
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +218,26 @@ def test_unexpired_allow_visible(tmp_path):
     state.add_network_allow(tmp_path, "future.com", expires=future)
     policy = state.get_network(tmp_path)
     assert any(a["domain"] == "future.com" for a in policy["allow"])
+
+
+def test_concurrent_network_allows_keep_all_domains(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    domains = [f"example-{i}.com" for i in range(4)]
+
+    with ProcessPoolExecutor(max_workers=len(domains)) as pool:
+        list(
+            pool.map(
+                _add_network_allow_slow_load,
+                [tmp_path] * len(domains),
+                [project] * len(domains),
+                domains,
+            )
+        )
+
+    assert {a["domain"] for a in state.get_network(project)["allow"]} == set(
+        domains
+    )
 
 
 # ---------------------------------------------------------------------------

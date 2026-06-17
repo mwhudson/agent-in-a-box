@@ -58,7 +58,10 @@ from __future__ import annotations
 import json
 import shutil
 import time
+from contextlib import contextmanager
+from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
+from typing import Iterator
 from typing import TypedDict
 
 from . import StrPath, release
@@ -95,13 +98,30 @@ def _load_file(path: Path) -> dict:
         return {}
 
 
-def _save_file(path: Path, data: dict) -> None:
+@contextmanager
+def _locked_path(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a") as lock:
+        flock(lock, LOCK_EX)
+        try:
+            yield
+        finally:
+            flock(lock, LOCK_UN)
+
+
+def _save_file_unlocked(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
     tmp.replace(path)
+
+
+def _save_file(path: Path, data: dict) -> None:
+    with _locked_path(path):
+        _save_file_unlocked(path, data)
 
 
 def _load() -> State:
@@ -127,32 +147,34 @@ def set_mount(directory: StrPath, source: StrPath, readonly: bool) -> None:
     """Record a mount for a directory, or update its mode if already present."""
     key = _key(directory)
     source = _key(source)
-    data = _load()
-    mounts = data.get(key, [])
-    for m in mounts:
-        if m["source"] == source:
-            m["readonly"] = readonly
-            break
-    else:
-        mounts.append({"source": source, "readonly": readonly})
-    data[key] = mounts
-    _save(data)
+    with _locked_path(_PATH):
+        data = _load()
+        mounts = data.get(key, [])
+        for m in mounts:
+            if m["source"] == source:
+                m["readonly"] = readonly
+                break
+        else:
+            mounts.append({"source": source, "readonly": readonly})
+        data[key] = mounts
+        _save_file_unlocked(_PATH, data)
 
 
 def remove_mount(directory: StrPath, source: StrPath) -> bool:
     """Drop a recorded mount for a directory. Return True if it was present."""
     key = _key(directory)
     source = _key(source)
-    data = _load()
-    mounts = data.get(key, [])
-    kept = [m for m in mounts if m["source"] != source]
-    if len(kept) == len(mounts):
-        return False
-    if kept:
-        data[key] = kept
-    else:
-        data.pop(key, None)
-    _save(data)
+    with _locked_path(_PATH):
+        data = _load()
+        mounts = data.get(key, [])
+        kept = [m for m in mounts if m["source"] != source]
+        if len(kept) == len(mounts):
+            return False
+        if kept:
+            data[key] = kept
+        else:
+            data.pop(key, None)
+        _save_file_unlocked(_PATH, data)
     return True
 
 
@@ -211,20 +233,40 @@ def get_network(directory: StrPath) -> NetworkPolicy:
 
 
 def _save_network_policy(key: str, policy: NetworkPolicy) -> None:
-    data: NetState = _load_file(_NET_PATH)
-    policy["allow"] = _unexpired(policy["allow"])
-    if policy["mode"] == DEFAULT_MODE and not policy["allow"] and not policy["deny"]:
-        data.pop(key, None)  # back to the default; keep the file tidy
-    else:
-        data[key] = policy
-    _save_file(_NET_PATH, data)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy["allow"] = _unexpired(policy["allow"])
+        if (
+            policy["mode"] == DEFAULT_MODE
+            and not policy["allow"]
+            and not policy["deny"]
+        ):
+            data.pop(key, None)  # back to the default; keep the file tidy
+        else:
+            data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
 
 
 def set_network_mode(directory: StrPath, mode: str) -> None:
     """Set a directory's network mode (MODE_OPEN or MODE_RESTRICTED)."""
-    policy = get_network(directory)
-    policy["mode"] = mode
-    _save_network_policy(_key(directory), policy)
+    key = _key(directory)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = data.get(key)
+        if policy is None:
+            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+        policy.setdefault("deny", [])
+        policy["allow"] = _unexpired(policy["allow"])
+        policy["mode"] = mode
+        if (
+            policy["mode"] == DEFAULT_MODE
+            and not policy["allow"]
+            and not policy["deny"]
+        ):
+            data.pop(key, None)  # back to the default; keep the file tidy
+        else:
+            data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
 
 
 def add_network_allow(directory: StrPath, domain: str, expires: float | None) -> None:
@@ -235,26 +277,49 @@ def add_network_allow(directory: StrPath, domain: str, expires: float | None) ->
     record for the same domain is dropped, so allow/deny stay disjoint.
     """
     domain = _normalize_domain(domain)
-    policy = get_network(directory)
-    policy["deny"] = [d for d in policy["deny"] if d != domain]
-    for a in policy["allow"]:
-        if a["domain"] == domain:
-            a["expires"] = expires
-            break
-    else:
-        policy["allow"].append({"domain": domain, "expires": expires})
-    _save_network_policy(_key(directory), policy)
+    key = _key(directory)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = data.get(key)
+        if policy is None:
+            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+        policy.setdefault("deny", [])
+        policy["allow"] = _unexpired(policy["allow"])
+        policy["deny"] = [d for d in policy["deny"] if d != domain]
+        for a in policy["allow"]:
+            if a["domain"] == domain:
+                a["expires"] = expires
+                break
+        else:
+            policy["allow"].append({"domain": domain, "expires": expires})
+        data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
 
 
 def remove_network_allow(directory: StrPath, domain: str) -> bool:
     """Drop an allowed domain. Return True if it was present (and unexpired)."""
     domain = _normalize_domain(domain)
-    policy = get_network(directory)
-    kept = [a for a in policy["allow"] if a["domain"] != domain]
-    if len(kept) == len(policy["allow"]):
-        return False
-    policy["allow"] = kept
-    _save_network_policy(_key(directory), policy)
+    key = _key(directory)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = data.get(key)
+        if policy is None:
+            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+        policy.setdefault("deny", [])
+        policy["allow"] = _unexpired(policy["allow"])
+        kept = [a for a in policy["allow"] if a["domain"] != domain]
+        if len(kept) == len(policy["allow"]):
+            return False
+        policy["allow"] = kept
+        if (
+            policy["mode"] == DEFAULT_MODE
+            and not policy["allow"]
+            and not policy["deny"]
+        ):
+            data.pop(key, None)  # back to the default; keep the file tidy
+        else:
+            data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
     return True
 
 
@@ -266,22 +331,46 @@ def add_network_deny(directory: StrPath, domain: str) -> None:
     dropped, so allow/deny stay disjoint.
     """
     domain = _normalize_domain(domain)
-    policy = get_network(directory)
-    policy["allow"] = [a for a in policy["allow"] if a["domain"] != domain]
-    if domain not in policy["deny"]:
-        policy["deny"].append(domain)
-    _save_network_policy(_key(directory), policy)
+    key = _key(directory)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = data.get(key)
+        if policy is None:
+            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+        policy.setdefault("deny", [])
+        policy["allow"] = [
+            a for a in _unexpired(policy["allow"]) if a["domain"] != domain
+        ]
+        if domain not in policy["deny"]:
+            policy["deny"].append(domain)
+        data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
 
 
 def remove_network_deny(directory: StrPath, domain: str) -> bool:
     """Drop a denied domain. Return True if it was present."""
     domain = _normalize_domain(domain)
-    policy = get_network(directory)
-    kept = [d for d in policy["deny"] if d != domain]
-    if len(kept) == len(policy["deny"]):
-        return False
-    policy["deny"] = kept
-    _save_network_policy(_key(directory), policy)
+    key = _key(directory)
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = data.get(key)
+        if policy is None:
+            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+        policy.setdefault("deny", [])
+        policy["allow"] = _unexpired(policy["allow"])
+        kept = [d for d in policy["deny"] if d != domain]
+        if len(kept) == len(policy["deny"]):
+            return False
+        policy["deny"] = kept
+        if (
+            policy["mode"] == DEFAULT_MODE
+            and not policy["allow"]
+            and not policy["deny"]
+        ):
+            data.pop(key, None)  # back to the default; keep the file tidy
+        else:
+            data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
     return True
 
 
@@ -307,12 +396,13 @@ def set_base(directory: StrPath, base: str) -> None:
     to have normalised ``base`` via release.normalize().
     """
     key = _key(directory)
-    data: dict[str, str] = _load_file(_BASE_PATH)
-    if base == release.DEFAULT_BASE:
-        data.pop(key, None)
-    else:
-        data[key] = base
-    _save_file(_BASE_PATH, data)
+    with _locked_path(_BASE_PATH):
+        data: dict[str, str] = _load_file(_BASE_PATH)
+        if base == release.DEFAULT_BASE:
+            data.pop(key, None)
+        else:
+            data[key] = base
+        _save_file_unlocked(_BASE_PATH, data)
 
 
 # -- resource limits --
@@ -344,12 +434,13 @@ def set_limits(directory: StrPath, limits: ResourceLimits) -> None:
     file tidy.
     """
     key = _key(directory)
-    data: dict[str, ResourceLimits] = _load_file(_LIMITS_PATH)
-    if limits == DEFAULT_LIMITS:
-        data.pop(key, None)
-    else:
-        data[key] = limits
-    _save_file(_LIMITS_PATH, data)
+    with _locked_path(_LIMITS_PATH):
+        data: dict[str, ResourceLimits] = _load_file(_LIMITS_PATH)
+        if limits == DEFAULT_LIMITS:
+            data.pop(key, None)
+        else:
+            data[key] = limits
+        _save_file_unlocked(_LIMITS_PATH, data)
 
 
 # -- per-directory state dir --
@@ -365,8 +456,9 @@ def dir_state_dir(directory: StrPath) -> Path:
     """
     key = _key(directory)
     d = _DIRSTATE_DIR / dir_slug(key)
-    d.mkdir(parents=True, exist_ok=True)
-    (d / _SOURCE_FILE).write_text(key + "\n")
+    with _locked_path(_DIRSTATE_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / _SOURCE_FILE).write_text(key + "\n")
     return d
 
 
@@ -402,50 +494,55 @@ def prune_stale() -> tuple[list[str], list[str], list[str], list[str], list[str]
     strings.
     """
     pruned_mounts: list[str] = []
-    mounts_data = _load()
-    for key in list(mounts_data):
-        if not Path(key).is_dir():
-            del mounts_data[key]
-            pruned_mounts.append(key)
-    if pruned_mounts:
-        _save(mounts_data)
+    with _locked_path(_PATH):
+        mounts_data = _load()
+        for key in list(mounts_data):
+            if not Path(key).is_dir():
+                del mounts_data[key]
+                pruned_mounts.append(key)
+        if pruned_mounts:
+            _save_file_unlocked(_PATH, mounts_data)
 
     pruned_net: list[str] = []
-    net_data = _load_file(_NET_PATH)
-    for key in list(net_data):
-        if not Path(key).is_dir():
-            del net_data[key]
-            pruned_net.append(key)
-    if pruned_net:
-        _save_file(_NET_PATH, net_data)
+    with _locked_path(_NET_PATH):
+        net_data = _load_file(_NET_PATH)
+        for key in list(net_data):
+            if not Path(key).is_dir():
+                del net_data[key]
+                pruned_net.append(key)
+        if pruned_net:
+            _save_file_unlocked(_NET_PATH, net_data)
 
     pruned_base: list[str] = []
-    base_data = _load_file(_BASE_PATH)
-    for key in list(base_data):
-        if not Path(key).is_dir():
-            del base_data[key]
-            pruned_base.append(key)
-    if pruned_base:
-        _save_file(_BASE_PATH, base_data)
+    with _locked_path(_BASE_PATH):
+        base_data = _load_file(_BASE_PATH)
+        for key in list(base_data):
+            if not Path(key).is_dir():
+                del base_data[key]
+                pruned_base.append(key)
+        if pruned_base:
+            _save_file_unlocked(_BASE_PATH, base_data)
 
     pruned_limits: list[str] = []
-    limits_data = _load_file(_LIMITS_PATH)
-    for key in list(limits_data):
-        if not Path(key).is_dir():
-            del limits_data[key]
-            pruned_limits.append(key)
-    if pruned_limits:
-        _save_file(_LIMITS_PATH, limits_data)
+    with _locked_path(_LIMITS_PATH):
+        limits_data = _load_file(_LIMITS_PATH)
+        for key in list(limits_data):
+            if not Path(key).is_dir():
+                del limits_data[key]
+                pruned_limits.append(key)
+        if pruned_limits:
+            _save_file_unlocked(_LIMITS_PATH, limits_data)
 
     pruned_state: list[str] = []
-    if _DIRSTATE_DIR.is_dir():
-        for d in _DIRSTATE_DIR.iterdir():
-            try:
-                source = (d / _SOURCE_FILE).read_text().strip()
-            except OSError:
-                continue
-            if not Path(source).is_dir():
-                shutil.rmtree(d)
-                pruned_state.append(source)
+    with _locked_path(_DIRSTATE_DIR):
+        if _DIRSTATE_DIR.is_dir():
+            for d in _DIRSTATE_DIR.iterdir():
+                try:
+                    source = (d / _SOURCE_FILE).read_text().strip()
+                except OSError:
+                    continue
+                if not Path(source).is_dir():
+                    shutil.rmtree(d)
+                    pruned_state.append(source)
 
     return pruned_mounts, pruned_net, pruned_base, pruned_state, pruned_limits
