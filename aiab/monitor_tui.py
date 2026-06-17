@@ -79,6 +79,8 @@ _MIN_FORWARD_PORT = 1024
 # is always listening inside restricted containers.
 _EXCLUDED_PORTS: frozenset[int] = frozenset({netproxy.PROXY_PORT})
 
+_VIEWS = ("network", "domains", "mounts", "ports", "limits")
+
 
 def _read_listening_ports(init_pid: int) -> set[int]:
     """Return ports with TCP LISTEN sockets in a container's network namespace.
@@ -514,8 +516,7 @@ class MonitorApp(App[None]):
         # the DOM so check_action can use it even when remove() is still
         # pending (Widget.remove is async).
         self._pending_count: int = 0
-        # Which tab fills the middle of the pane: "network", "domains",
-        # "mounts", or "ports".
+        # Which tab fills the middle of the pane.
         self._view = "network"
         # Whether the Network tab is currently lit in its flash cycle (toggled
         # while a decision is pending and another tab has focus).
@@ -641,7 +642,7 @@ class MonitorApp(App[None]):
         self.query_one("#mounts").display = view == "mounts"
         self.query_one("#ports").display = view == "ports"
         self.query_one("#limits").display = view == "limits"
-        for name in ("network", "domains", "mounts", "ports", "limits"):
+        for name in _VIEWS:
             self.query_one(f"#tab-{name}", Button).set_class(name == view, "active")
         if view == "domains":
             self._refresh_domains()
@@ -666,16 +667,15 @@ class MonitorApp(App[None]):
 
     def _refresh_domains(self) -> None:
         domain_list = self.query_one("#domain-list", VerticalScroll)
-        for row in domain_list.query(DecisionRow):
-            row.remove()
         # Allowed domains first, then denied; alphabetical within each group so
         # rows are easy to find and stay put when a flip moves a domain between
         # the groups (the policy lists themselves are in decision order).
         policy = state.get_network(self.work_dir)
-        for a in sorted(policy["allow"], key=lambda a: a["domain"]):
-            domain_list.mount(DecisionRow(a["domain"], netwatch.ALLOW, a["expires"]))
-        for d in sorted(policy["deny"]):
-            domain_list.mount(DecisionRow(d, netwatch.DENY))
+        rows = [
+            DecisionRow(a["domain"], netwatch.ALLOW, a["expires"])
+            for a in sorted(policy["allow"], key=lambda a: a["domain"])
+        ] + [DecisionRow(d, netwatch.DENY) for d in sorted(policy["deny"])]
+        self._replace_rows(domain_list, DecisionRow, rows)
 
     def _decide_domain(self, row: DecisionRow, action: str) -> None:
         self._write_log(netwatch.apply_decision(self.work_dir, row.domain, action))
@@ -703,10 +703,11 @@ class MonitorApp(App[None]):
 
     def _refresh_mounts(self) -> None:
         mount_list = self.query_one("#mount-list", VerticalScroll)
-        for row in mount_list.query(MountRow):
-            row.remove()
-        for m in state.get_mounts(self.work_dir):
-            mount_list.mount(MountRow(m["source"], m["readonly"]))
+        rows = [
+            MountRow(m["source"], m["readonly"])
+            for m in state.get_mounts(self.work_dir)
+        ]
+        self._replace_rows(mount_list, MountRow, rows)
 
     def _containers(self) -> list:
         """The session containers a mounts edit should apply to, live.
@@ -733,6 +734,13 @@ class MonitorApp(App[None]):
 
     def _write_log(self, message: str) -> None:
         self.query_one("#log", RichLog).write(message)
+
+    def _replace_rows(self, container, row_type, rows) -> None:
+        """Replace the row widgets in a list-like container."""
+        for row in container.query(row_type):
+            row.remove()
+        for row in rows:
+            container.mount(row)
 
     def _apply_to_containers(self, describe: str, op) -> None:
         """Run a device op on each target container, logging its output.
@@ -819,7 +827,9 @@ class MonitorApp(App[None]):
         if init_pid is None:
             return
         current = _read_listening_ports(init_pid)
-        new_ports = current - self._known_ports - self._ignored_ports - self._forwarded_ports
+        new_ports = (
+            current - self._known_ports - self._ignored_ports - self._forwarded_ports
+        )
         gone_ports = self._known_ports - current
         self._known_ports = current
 
@@ -842,10 +852,8 @@ class MonitorApp(App[None]):
 
     def _refresh_ports(self) -> None:
         port_list = self.query_one("#port-list", VerticalScroll)
-        for row in port_list.query(PortForwardRow):
-            row.remove()
-        for port in sorted(self._forwarded_ports):
-            port_list.mount(PortForwardRow(port))
+        rows = [PortForwardRow(port) for port in sorted(self._forwarded_ports)]
+        self._replace_rows(port_list, PortForwardRow, rows)
 
     def _forward_port(self, row: PortPendingRow) -> None:
         port = row.port
@@ -881,11 +889,12 @@ class MonitorApp(App[None]):
 
     def _refresh_limits(self) -> None:
         limit_list = self.query_one("#limit-list", Vertical)
-        for row in limit_list.query(LimitRow):
-            row.remove()
         limits = state.get_limits(self.work_dir)
-        limit_list.mount(LimitRow("cpu", str(limits["cpu"])))
-        limit_list.mount(LimitRow("memory", limits["memory"]))
+        rows = [
+            LimitRow("cpu", str(limits["cpu"])),
+            LimitRow("memory", limits["memory"]),
+        ]
+        self._replace_rows(limit_list, LimitRow, rows)
 
     def _apply_limit(self, field: str, value: str) -> None:
         limits = state.get_limits(self.work_dir)
@@ -927,17 +936,16 @@ class MonitorApp(App[None]):
 
     # -- shared event handling --
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button = event.button
-        if button.id and button.id.startswith("tab-"):
-            self._select_view(button.id.removeprefix("tab-"))
-            return
-        if button.id == "add-mount":
+    def _focus_add_input(self, button_id: str) -> bool:
+        if button_id == "add-mount":
             self.query_one("#add-path", Input).focus()
-            return
-        if button.id == "add-domain-btn":
+            return True
+        if button_id == "add-domain-btn":
             self.query_one("#add-domain", Input).focus()
-            return
+            return True
+        return False
+
+    def _handle_row_button(self, button: Button) -> None:
         row = button.parent
         if isinstance(row, PendingRow):
             self._decide(row, button.name or netwatch.SKIP)
@@ -961,19 +969,32 @@ class MonitorApp(App[None]):
         elif isinstance(row, LimitRow):
             self._apply_limit(row.field, row.query_one(Input).value.strip())
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "add-path":
+    def _handle_input(self, event: Input.Submitted) -> None:
+        input_id = event.input.id
+        if input_id == "add-path":
             value = event.value.strip()
             if value:
                 self._add_mount(value, readonly=True)  # default new mounts to ro
             event.input.value = ""
-        elif event.input.id == "add-domain":
+        elif input_id == "add-domain":
             self._add_domain(event.value)
             event.input.value = ""
-        elif event.input.id and event.input.id.startswith("limit-"):
+        elif input_id and input_id.startswith("limit-"):
             row = event.input.parent
             if isinstance(row, LimitRow):
                 self._apply_limit(row.field, event.value.strip())
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button = event.button
+        if button.id and button.id.startswith("tab-"):
+            self._select_view(button.id.removeprefix("tab-"))
+            return
+        if button.id and self._focus_add_input(button.id):
+            return
+        self._handle_row_button(button)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._handle_input(event)
 
 
 def monitor(work_dir: Path, container_name: str | None = None) -> int:
