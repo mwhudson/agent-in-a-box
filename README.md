@@ -68,10 +68,11 @@ Each project directory also gets a persistent state directory on the host
 every agent. It holds per-directory state the *agent* maintains that should
 survive container recreation; today that's the container setup script.
 
-The `/setup-container` slash command (shipped from this repo for both Claude
-and opencode, see below) maintains `/aiab/setup.sh`: when the script doesn't
-exist it works out the toolchain and dependency installs from the project's
-own docs and writes them there; when it does — notably in a freshly recreated
+The `/setup-container` slash command (shipped from this repo for Claude and
+opencode; shipped as a custom agent for Copilot, see below) maintains
+`/aiab/setup.sh`: when the script doesn't exist it works out the toolchain and
+dependency installs from the project's own docs and writes them there; when
+it does — notably in a freshly recreated
 container — it shows the saved script and offers to run it. Either way it only
 runs the script after you confirm in the session, so recreating a container's
 dev environment is `/setup-container` plus a "yes". Since the file lives on
@@ -192,6 +193,34 @@ is inside the bind-mounted home so it needs no separate overlay. The
 equivalent), safe for the same reason — the container can only see the
 directories you've mounted into it. It's only written when absent, so you can
 edit it (e.g. to add MCP servers) and your changes persist.
+
+## Versioned Copilot config (copilot-instructions.md + a custom agent)
+
+The `copilot/` directory plays the same role for `aiab run copilot`,
+bind-mounted into the container's `~/.copilot`:
+
+```
+copilot/
+  copilot-instructions.md  -> mounted at ~/.copilot/copilot-instructions.md  (global instructions)
+  agents/                   -> mounted at ~/.copilot/agents/                  (custom agents)
+```
+
+`copilot-instructions.md` is Copilot CLI's equivalent of `CLAUDE.md`/`AGENTS.md`
+(auto-loaded as global instructions). Credentials are not versioned (they stay
+in `~/.local/share/aiab/copilot/home/...`), and missing entries are skipped.
+
+Copilot CLI has no Claude/opencode-style mechanism where dropping a file in a
+commands directory creates a same-named `/slash-command` — there's no
+filename-to-command mapping, and custom agent files don't take arguments the
+way `$ARGUMENTS` does in the Claude/opencode commands. The closest equivalent
+it does have is a **custom agent**: a `*.agent.md` file in `~/.copilot/agents/`,
+selected interactively with `/agent` or via `copilot --agent <name>`. So
+`copilot/agents/setup-container.agent.md` carries the same instructions as
+the Claude/opencode `/setup-container` command, but you reach it by picking
+"setup-container" from `/agent` rather than typing `/setup-container`.
+`repo-role` isn't ported at all — it exists to set per-repo latitude in
+Claude Code's own persistent memory system, which Copilot CLI has no
+equivalent of.
 
 ## Requirements
 

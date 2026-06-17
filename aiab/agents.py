@@ -261,6 +261,21 @@ AGENTS: dict[str, Agent] = {
         # githubcopilot.com is the Copilot API; githubusercontent.com serves
         # auxiliary content.
         api_domains=["github.com", "githubcopilot.com", "githubusercontent.com"],
+        # Versioned Copilot config (global instructions + a custom agent).
+        # Copilot CLI has no Claude/opencode-style filename-triggered slash
+        # commands, so setup-container ships as a custom agent instead
+        # (invoked via `/agent` or `--agent setup-container`, not a slash
+        # command of the same name).
+        overlays=_overlays(
+            (
+                "copilot/copilot-instructions.md",
+                f"{CONTAINER_HOME}/.copilot/copilot-instructions.md",
+            ),
+            (
+                "copilot/agents",
+                f"{CONTAINER_HOME}/.copilot/agents",
+            ),
+        ),
     ),
 }
 
