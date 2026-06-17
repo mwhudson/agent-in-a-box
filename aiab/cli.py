@@ -102,6 +102,18 @@ def _proxy_socket_name(container_name: str) -> str:
     return f"@aiab-{os.getuid()}-{container_name}"
 
 
+def _agent_command(
+    cfg: agents.Agent, agent_args: tuple[str, ...], shell: bool
+) -> list[str]:
+    """Build the command run interactively inside the session container."""
+    if shell:
+        return ["bash", "-l"]
+    cmd_args = list(agent_args)
+    if cfg.skip_permissions:
+        cmd_args = ["--dangerously-skip-permissions"] + cmd_args
+    return [cfg.command] + cmd_args
+
+
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
 
@@ -655,6 +667,99 @@ def main() -> None:
 # --------------------------------------------------------------------------
 
 
+def _record_runtime_mounts(
+    work_dir: Path, add_mount: tuple[str, ...], add_mount_rw: tuple[str, ...]
+) -> None:
+    """Persist mounts supplied on one `aiab run` for future sessions too."""
+    for d in add_mount:
+        state.set_mount(work_dir, d, readonly=True)
+    for d in add_mount_rw:
+        state.set_mount(work_dir, d, readonly=False)
+
+
+def _apply_session_mounts(
+    session: lxd.Container,
+    cfg: agents.Agent,
+    work_dir: Path,
+    add_mount: tuple[str, ...],
+    add_mount_rw: tuple[str, ...],
+) -> tuple[str, list[tuple[Path, str, bool]]]:
+    """Mount the source dir, recorded extras, dirstate, and config overlays."""
+    container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
+
+    _record_runtime_mounts(work_dir, add_mount, add_mount_rw)
+    applied_mounts = _apply_recorded_mounts(session, work_dir)
+
+    # Mount the directory's persistent state dir (shared by all agents for this
+    # directory). /setup-container maintains the setup script there, so it
+    # survives container recreation.
+    session.add_config_overlay(
+        state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
+    )
+
+    for host_path, overlay_path in cfg.overlays:
+        if host_path.exists():
+            session.add_config_overlay(
+                host_path, overlay_path, container_user=CONTAINER_USER
+            )
+    return container_cwd, applied_mounts
+
+
+def _apply_network_policy(
+    conn: lxd.Lxd, session: lxd.Container, work_dir: Path, cfg: agents.Agent
+) -> dict[str, str]:
+    """Apply the recorded network policy and return proxy env vars."""
+    policy = state.get_network(work_dir)
+    nic_names = conn.profile_nic_names()
+    if policy["mode"] != state.MODE_RESTRICTED:
+        session.unmask_profile_devices(nic_names)
+        session.remove_device("netproxy")
+        return {}
+
+    session.mask_profile_devices(nic_names)
+    sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
+    session.add_proxy_device(
+        "netproxy",
+        listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
+        connect=f"unix:{sock_name}",
+    )
+    proxy_url = f"http://127.0.0.1:{netproxy.PROXY_PORT}"
+    env = {
+        var: proxy_url
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+    }
+    env["NO_PROXY"] = env["no_proxy"] = "localhost,127.0.0.1"
+    print(
+        "Network is restricted; use 'aiab net' to inspect or adjust.",
+        file=sys.stderr,
+    )
+    return env
+
+
+def _apply_git_guard(
+    session: lxd.Container,
+    work_dir: Path,
+    container_cwd: str,
+    applied_mounts: list[tuple[Path, str, bool]],
+) -> None:
+    """Shadow host-facing git config/hooks for writable mounted repos."""
+    _setup_git_guard(session, work_dir, container_cwd)
+    for source, mount_cwd, readonly in applied_mounts:
+        if not readonly:
+            _guard_mount(session, work_dir, source, mount_cwd)
+
+
+def _session_env(
+    session: lxd.Container, cfg: agents.Agent, proxy_env: dict[str, str]
+) -> dict[str, str]:
+    """Environment for the agent or shell process inside the container."""
+    env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
+    env.update(proxy_env)
+    if cfg.wayland:
+        env.update(session.mount_wayland(CONTAINER_USER))
+    return env
+
+
 @main.command()
 @click.argument("agent", type=AGENT_CHOICE)
 @click.option(
@@ -804,64 +909,11 @@ def run(
         session.apply_limits(**state.get_limits(work_dir))
         provision.apply_session_tweaks(session)
 
-        if shell:
-            run_cmd = ["bash", "-l"]
-        else:
-            cmd_args = list(agent_args)
-            if cfg.skip_permissions:
-                cmd_args = ["--dangerously-skip-permissions"] + cmd_args
-            run_cmd = [cfg.command] + cmd_args
-
-        container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
-
-        # Record any run-time --add-mount mounts for this directory, then
-        # (re)apply every mount recorded for it — so a freshly created or
-        # cloned container, and other agents started here later, all pick up
-        # the same set.
-        for d in add_mount:
-            state.set_mount(work_dir, d, readonly=True)
-        for d in add_mount_rw:
-            state.set_mount(work_dir, d, readonly=False)
-        applied_mounts = _apply_recorded_mounts(session, work_dir)
-
-        # Mount the directory's persistent state dir (shared by all agents for
-        # this directory). /setup-container maintains the container setup
-        # script at STATE_MOUNT/setup.sh, so it survives container recreation.
-        session.add_config_overlay(
-            state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
+        run_cmd = _agent_command(cfg, agent_args, shell)
+        container_cwd, applied_mounts = _apply_session_mounts(
+            session, cfg, work_dir, add_mount, add_mount_rw
         )
-
-        for host_path, overlay_path in cfg.overlays:
-            if host_path.exists():
-                session.add_config_overlay(
-                    host_path, overlay_path, container_user=CONTAINER_USER
-                )
-
-        # Apply the directory's network policy (see `aiab net`). Restricted
-        # mode masks the profile NIC — no direct egress — and exposes a
-        # host-side filtering proxy inside the container instead.
-        policy = state.get_network(work_dir)
-        nic_names = conn.profile_nic_names()
-        proxy_env: dict[str, str] = {}
-        if policy["mode"] == state.MODE_RESTRICTED:
-            session.mask_profile_devices(nic_names)
-            sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
-            session.add_proxy_device(
-                "netproxy",
-                listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
-                connect=f"unix:{sock_name}",
-            )
-            proxy_url = f"http://127.0.0.1:{netproxy.PROXY_PORT}"
-            for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-                proxy_env[var] = proxy_url
-            proxy_env["NO_PROXY"] = proxy_env["no_proxy"] = "localhost,127.0.0.1"
-            print(
-                "Network is restricted; use 'aiab net' to inspect or adjust.",
-                file=sys.stderr,
-            )
-        else:
-            session.unmask_profile_devices(nic_names)
-            session.remove_device("netproxy")
+        proxy_env = _apply_network_policy(conn, session, work_dir, cfg)
 
         # If --worktree was requested, create one inside the repo and use it
         # as the agent's working directory instead of the repo root.
@@ -878,15 +930,9 @@ def run(
         # Read-write mounts can themselves be git repos, so guard their .git
         # too; read-only mounts can't be written, so they need no guard.
         if not no_git_guard:
-            _setup_git_guard(session, work_dir, container_cwd)
-            for source, mount_cwd, readonly in applied_mounts:
-                if not readonly:
-                    _guard_mount(session, work_dir, source, mount_cwd)
+            _apply_git_guard(session, work_dir, container_cwd, applied_mounts)
 
-        env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
-        env.update(proxy_env)
-        if cfg.wayland:
-            env.update(session.mount_wayland(CONTAINER_USER))
+        env = _session_env(session, cfg, proxy_env)
         with _monitor_pane(work_dir, session.name, enabled=use_tmux):
             rc = session.run_interactive(
                 run_cmd,
