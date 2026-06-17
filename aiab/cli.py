@@ -905,7 +905,6 @@ def run(
         # for the directory is detected and triggers a rebuild (above).
         session.set_config("user.aiab_base", dir_base)
         session.apply_limits(**state.get_limits(work_dir))
-        provision.apply_session_tweaks(session)
 
         run_cmd = _agent_command(cfg, agent_args, shell)
         container_cwd, applied_mounts = _apply_session_mounts(

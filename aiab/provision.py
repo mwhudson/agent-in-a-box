@@ -78,38 +78,11 @@ def _configure_sudo_proxy_env(container: Container) -> None:
     container.exec(["chmod", "0440", _SUDOERS_D_PATH])
 
 
-# --- session-start tweaks ---------------------------------------------------
-#
-# Small, idempotent fixups applied every time a session container starts.
-# These cover the same ground as _add_local_bin_to_path and
-# _configure_sudo_proxy_env but are batched into a single lxc-exec call so
-# the cost is negligible.  When a new tweak is added here it takes effect on
-# the very next session — no template rebuild or upgrade required.
-
-_SESSION_TWEAKS_SCRIPT = f"""\
-set -e
-cat > {_PROFILE_D_PATH} << 'AIAB_EOF'
-{_PROFILE_D_SNIPPET.rstrip()}
-AIAB_EOF
-cat > {_SUDOERS_D_PATH} << 'AIAB_EOF'
-{_SUDOERS_D_SNIPPET.rstrip()}
-AIAB_EOF
-chmod 0440 {_SUDOERS_D_PATH}
-"""
-
-
-def apply_session_tweaks(container: Container) -> None:
-    """Apply cheap, idempotent filesystem tweaks at session start.
-
-    This ensures that fixes added after a template was built still reach
-    running session containers without requiring a template rebuild.  The
-    entire set of tweaks runs inside a single ``sh -c`` call so the
-    overhead is one lxc-exec round-trip.
-    """
-    container.exec(
-        ["sh", "-c", _SESSION_TWEAKS_SCRIPT],
-        stdout=subprocess.DEVNULL,
-    )
+# NOTE: the profile.d / sudoers fixups above are written into the template at
+# build time (_create) and refreshed on `aiab upgrade-templates`
+# (update_template); session containers inherit them by being cloned from the
+# template, so `aiab run` does no per-session tweak step. The trade-off: a new
+# fixup only reaches sessions after the template is rebuilt or upgraded.
 
 
 def provision_base(
