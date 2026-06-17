@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -187,35 +188,72 @@ class Container:
     def __init__(self, lxd: Lxd, name: str) -> None:
         self.lxd = lxd
         self.name = name
+        # Cached result of a single `lxc query` for this instance (status +
+        # config + devices in one round-trip). _snapshot_loaded distinguishes
+        # "not fetched yet" from "fetched, instance absent" (None). Mutating
+        # methods call _invalidate() so the next read re-fetches the truth.
+        self._snapshot: dict[str, Any] | None = None
+        self._snapshot_loaded = False
 
     def _argv(self, args: list[str]) -> list[str]:
         return self.lxd.argv(args)
 
     # -- existence / status / lifecycle --
 
-    def exists(self) -> bool:
-        r = subprocess.run(
-            self._argv(["info", self.name]),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return r.returncode == 0
+    def snapshot(self, *, refresh: bool = False) -> dict[str, Any] | None:
+        """Return this instance's full state (one cached `lxc query`).
 
-    def status(self) -> str:
-        return run(
-            self._argv(["list", self.name, "--format=csv", "--columns=s"]),
+        The parsed /1.0/instances/<name> object carries status, config and
+        devices together, so existence/status/get_config/devices all read from
+        it instead of each spawning their own `lxc` process. Returns None if
+        the instance does not exist. Cached for the life of this handle; pass
+        refresh=True (or rely on _invalidate() after a mutation) to re-fetch.
+        """
+        if self._snapshot_loaded and not refresh:
+            return self._snapshot
+        # `lxc query` ignores the global --project flag (so don't use _argv);
+        # the project must be passed as a URL query parameter instead.
+        path = f"/1.0/instances/{self.name}?project={self.lxd.project}"
+        r = subprocess.run(
+            ["lxc", "query", path],
             capture_output=True,
             text=True,
-        ).stdout.strip()
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            self._snapshot = json.loads(r.stdout)
+        else:
+            self._snapshot = None
+        self._snapshot_loaded = True
+        return self._snapshot
+
+    def _invalidate(self) -> None:
+        """Drop the cached snapshot after a state-changing operation."""
+        self._snapshot = None
+        self._snapshot_loaded = False
+
+    def exists(self) -> bool:
+        return self.snapshot() is not None
+
+    def status(self) -> str:
+        """Return the instance status (e.g. RUNNING), or "" if it is absent.
+
+        LXD's API spells the status "Running"/"Stopped"; uppercase it to match
+        the `lxc list` CSV form callers compare against (== "RUNNING").
+        """
+        snap = self.snapshot()
+        return str(snap.get("status", "")).upper() if snap else ""
 
     def create(self, image: str) -> None:
         run(self._argv(["init", image, self.name]))
+        self._invalidate()
 
     def clone_from(self, base: Container) -> None:
         run(self._argv(["copy", base.name, self.name]))
+        self._invalidate()
 
     def start(self) -> None:
         run(self._argv(["start", self.name]))
+        self._invalidate()
 
     def stop(self, timeout: int | None = None) -> None:
         """Stop the container, optionally falling back to a forced stop.
@@ -225,6 +263,7 @@ class Container:
         valuable state lives in bind mounts on the host — so callers that
         stop them prefer a bounded wait over hanging on a wedged guest.
         """
+        self._invalidate()
         if timeout is None:
             run(self._argv(["stop", self.name]))
             return
@@ -238,6 +277,7 @@ class Container:
 
     def delete(self) -> None:
         run(self._argv(["delete", "--force", self.name]))
+        self._invalidate()
 
     def rename(self, new_name: str) -> "Container":
         """Rename the container; return a new Container handle with the new name.
@@ -246,10 +286,19 @@ class Container:
         temporary container to its final name once provisioning succeeds.
         """
         run(self._argv(["rename", self.name, new_name]))
+        self._invalidate()
         return Container(self.lxd, new_name)
 
     def set_config(self, key: str, value: str) -> None:
+        # Skip the write (and its lxc round-trip) when the value is already
+        # set — common on warm restarts where limits/base have not changed.
+        if self.get_config(key) == value:
+            return
         run(self._argv(["config", "set", self.name, key, value]))
+        # Keep the cached snapshot coherent without a re-query, so a following
+        # set_config (e.g. apply_limits' second key) still reads from cache.
+        if self._snapshot is not None:
+            self._snapshot.setdefault("config", {})[key] = value
 
     def apply_limits(self, cpu: int, memory: str) -> None:
         """Apply CPU and memory limits to a running or stopped container.
@@ -261,11 +310,10 @@ class Container:
 
     def get_config(self, key: str) -> str:
         """Return a config key's value, or "" if it is unset."""
-        return run(
-            self._argv(["config", "get", self.name, key]),
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        snap = self.snapshot()
+        if not snap:
+            return ""
+        return str(snap.get("config", {}).get(key, ""))
 
     def ensure_started(self, base: Container) -> None:
         """Clone from a base container if missing, then ensure it's running."""
@@ -316,13 +364,14 @@ class Container:
     # -- devices (mounts) --
 
     def devices(self) -> dict[str, dict[str, str]]:
-        """Return the container's devices dict (from `config show`)."""
-        result = run(
-            self._argv(["config", "show", self.name]),
-            capture_output=True,
-            text=True,
-        )
-        return yaml.safe_load(result.stdout).get("devices", {})
+        """Return the container's instance-local devices dict.
+
+        Served from the cached snapshot (see snapshot()), so the many callers
+        that check devices before deciding whether to mutate share a single
+        `lxc query` instead of each running their own `config show`.
+        """
+        snap = self.snapshot()
+        return snap.get("devices", {}) if snap else {}
 
     def _device_paths(self) -> set[str]:
         """Return the set of container paths already occupied by disk devices."""
@@ -368,6 +417,7 @@ class Container:
                     ),
                     stdout=subprocess.DEVNULL,
                 )
+                self._invalidate()
                 mode = "read-only" if readonly else "read-write"
                 print(
                     f"Set {host_path} -> container:{container_path} to {mode}",
@@ -407,6 +457,7 @@ class Container:
         if readonly:
             add_cmd.append("readonly=true")
         run(self._argv(add_cmd), stdout=subprocess.DEVNULL)
+        self._invalidate()
         mode = " (read-only)" if readonly else ""
         print(
             f"Mounted {host_path} -> container:{container_path}{mode}",
@@ -431,6 +482,7 @@ class Container:
             self._argv(["config", "device", "remove", self.name, name]),
             stdout=subprocess.DEVNULL,
         )
+        self._invalidate()
         return True
 
     # -- network restriction --
@@ -450,6 +502,7 @@ class Container:
                 self._argv(["config", "device", "add", self.name, name, "none"]),
                 stdout=subprocess.DEVNULL,
             )
+            self._invalidate()
             print(f"Masked network device '{name}'", file=sys.stderr)
 
     def unmask_profile_devices(self, names: list[str]) -> None:
@@ -461,6 +514,7 @@ class Container:
                     self._argv(["config", "device", "remove", self.name, name]),
                     stdout=subprocess.DEVNULL,
                 )
+                self._invalidate()
                 print(f"Unmasked network device '{name}'", file=sys.stderr)
 
     def init_pid(self) -> int | None:
@@ -515,6 +569,7 @@ class Container:
             ),
             stdout=subprocess.DEVNULL,
         )
+        self._invalidate()
 
     def add_config_dir(self, source: StrPath, container_path: str, name: str) -> None:
         """Add a named config disk device (e.g. the agent's persistent home)."""
@@ -533,6 +588,7 @@ class Container:
             ),
             stdout=subprocess.DEVNULL,
         )
+        self._invalidate()
 
     def set_device_source(self, device_name: str, source: StrPath) -> None:
         """Repoint an existing disk device at a new host source."""
@@ -549,6 +605,7 @@ class Container:
             ),
             stdout=subprocess.DEVNULL,
         )
+        self._invalidate()
 
     def add_config_overlay(
         self,
@@ -619,6 +676,7 @@ class Container:
         if readonly:
             add_cmd.append("readonly=true")
         run(self._argv(add_cmd), stdout=subprocess.DEVNULL)
+        self._invalidate()
         mode = " (read-only)" if readonly else ""
         print(
             f"Overlaid {host_path} -> container:{container_path}{mode}",
@@ -702,6 +760,7 @@ class Container:
             ),
             stdout=subprocess.DEVNULL,
         )
+        self._invalidate()
 
         return {
             "WAYLAND_DISPLAY": wayland_display,

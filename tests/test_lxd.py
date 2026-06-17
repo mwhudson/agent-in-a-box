@@ -1,6 +1,10 @@
 # Tests for the pure helper functions in aiab.lxd.
 
-from aiab.lxd import container_name_for_dir, dir_slug, is_source_device
+import json
+import subprocess
+
+from aiab import lxd
+from aiab.lxd import Container, Lxd, container_name_for_dir, dir_slug, is_source_device
 
 
 # ---------------------------------------------------------------------------
@@ -101,3 +105,111 @@ def test_extra_mount_not_recognised():
     container_name = container_name_for_dir("/home/user/project", "claude")
     other_hash = hashlib.md5(b"/home/user/other").hexdigest()[:8]
     assert not is_source_device(f"dir-{other_hash}", container_name)
+
+
+# ---------------------------------------------------------------------------
+# snapshot caching (status/config/devices share one `lxc query`)
+# ---------------------------------------------------------------------------
+
+
+def _fake_lxc(monkeypatch, snapshot):
+    """Patch lxd's subprocess.run; return a list recording every lxc subcommand.
+
+    `query` calls return the given snapshot as JSON; every other call returns a
+    successful empty result. The recorded list holds the lxc verb(s) of each
+    call (e.g. "query", "config set", "config device remove") so tests can
+    assert how many round-trips happened.
+    """
+    calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        # `lxc query` carries the project in the URL, not via --project, so it
+        # has no --project prefix; everything else is ["lxc","--project",P,...].
+        if "query" in cmd:
+            calls.append("query")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(snapshot), "")
+        rest = cmd[3:]  # skip ["lxc", "--project", P]
+        calls.append(" ".join(rest[:2]) if len(rest) > 1 else rest[0])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    return calls
+
+
+def _container(monkeypatch, snapshot):
+    calls = _fake_lxc(monkeypatch, snapshot)
+    return Container(Lxd("aiab"), "c1"), calls
+
+
+SNAP = {
+    "status": "Running",
+    "config": {"limits.cpu": "2", "user.aiab_base": "noble"},
+    "devices": {"dir-abc": {"type": "disk", "source": "/work/x", "path": "/work/x"}},
+}
+
+
+def test_reads_share_one_query(monkeypatch):
+    c, calls = _container(monkeypatch, SNAP)
+    assert c.exists() is True
+    assert c.status() == "RUNNING"  # API "Running" upper-cased
+    assert c.get_config("user.aiab_base") == "noble"
+    assert "dir-abc" in c.devices()
+    assert calls.count("query") == 1  # all four reads served from one snapshot
+
+
+def test_query_passes_project_in_url_not_flag(monkeypatch):
+    # `lxc query` ignores the global --project flag; the project must ride in
+    # the URL as ?project=. Capture the exact argv used for the snapshot.
+    seen = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(SNAP), "")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    Container(Lxd("aiab"), "c1").snapshot()
+    assert seen["cmd"] == ["lxc", "query", "/1.0/instances/c1?project=aiab"]
+    assert "--project" not in seen["cmd"]
+
+
+def test_status_empty_when_absent(monkeypatch):
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "not found")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    c = Container(Lxd("aiab"), "missing")
+    assert c.exists() is False
+    assert c.status() == ""
+    assert c.get_config("anything") == ""
+    assert c.devices() == {}
+
+
+def test_mutation_invalidates_cache(monkeypatch):
+    c, calls = _container(monkeypatch, SNAP)
+    c.devices()  # query #1
+    c.remove_device("dir-abc")  # mutates -> invalidates
+    c.devices()  # query #2 (fresh)
+    assert calls.count("query") == 2
+    assert "config device" in calls  # the remove round-trip happened
+
+
+def test_set_config_skips_unchanged(monkeypatch):
+    c, calls = _container(monkeypatch, SNAP)
+    c.set_config("limits.cpu", "2")  # already 2 -> no write
+    assert "config set" not in calls
+
+
+def test_set_config_writes_when_changed(monkeypatch):
+    c, calls = _container(monkeypatch, SNAP)
+    c.set_config("limits.cpu", "4")  # differs -> write, cache updated in place
+    assert "config set" in calls
+    assert c.get_config("limits.cpu") == "4"  # served from updated cache
+    assert calls.count("query") == 1  # no re-query after the write
+
+
+def test_apply_limits_unchanged_is_free(monkeypatch):
+    snap = {"status": "Running", "config": {"limits.cpu": "2", "limits.memory": "4GiB"}}
+    c, calls = _container(monkeypatch, snap)
+    c.apply_limits(cpu=2, memory="4GiB")
+    assert "config set" not in calls
+    assert calls.count("query") == 1
