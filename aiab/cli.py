@@ -49,7 +49,6 @@ from . import netwatch
 from . import provision
 from . import release
 from . import state
-from .migrate import maybe_migrate
 
 CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
@@ -638,13 +637,14 @@ class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
     Command.invoke() runs only after a successful parse, so `aiab ... --help`
-    (which exits during parsing) triggers neither migration nor project
-    creation. Migration must run before ensure_project() — it keys off whether
-    the 'aiab' project exists yet, and ensure_project() would create it.
+    (which exits during parsing) does not create the project.
+
+    Auto-migration from the old lxd-* layout (aiab.migrate) is intentionally
+    not wired in here for now; ensure_project() just creates the 'aiab' project
+    on first use.
     """
 
     def invoke(self, ctx: click.Context) -> Any:
-        maybe_migrate()
         conn = lxd.Lxd(PROJECT)
         conn.ensure_project()
         ctx.obj = conn
