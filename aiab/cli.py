@@ -108,14 +108,7 @@ def _agent_command(
     """Build the command run interactively inside the session container."""
     if shell:
         return ["bash", "-l"]
-    cmd_args = list(agent_args)
-    if cfg.skip_permissions:
-        # Claude and claude-or use --dangerously-skip-permissions
-        if cfg.command.endswith("/claude"):
-            cmd_args = ["--dangerously-skip-permissions"] + cmd_args
-        # Copilot uses --yolo
-        elif "copilot" in cfg.command:
-            cmd_args = ["--yolo"] + cmd_args
+    cmd_args = list(cfg.extra_args) + list(agent_args)
     return [cfg.command] + cmd_args
 
 

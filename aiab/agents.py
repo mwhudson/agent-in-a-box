@@ -136,8 +136,8 @@ class Agent:
     # Steps run by `aiab upgrade-templates`. Left empty, it defaults to
     # install_cmds (filled in by __post_init__).
     upgrade_cmds: list[Step] = field(default_factory=list)
-    # Prepend --dangerously-skip-permissions to the agent command.
-    skip_permissions: bool = False
+    # Arguments to prepend to the agent command (e.g., permission-skipping flags).
+    extra_args: list[str] = field(default_factory=list)
     # Bind-mount the host Wayland socket (clipboard support).
     wayland: bool = False
     # Versioned config (host_path, container_path) pairs bind-mounted onto the
@@ -160,7 +160,7 @@ AGENTS: dict[str, Agent] = {
     "claude": Agent(
         command=f"{CONTAINER_HOME}/.local/bin/claude",
         install_cmds=_claude_install(),
-        skip_permissions=True,
+        extra_args=["--dangerously-skip-permissions"],
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
         overlays=_overlays(
             ("claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
@@ -175,7 +175,7 @@ AGENTS: dict[str, Agent] = {
         # separate template/config so credentials don't mix. No repo overlay.
         command=f"{CONTAINER_HOME}/.local/bin/claude",
         install_cmds=_claude_install(),
-        skip_permissions=True,
+        extra_args=["--dangerously-skip-permissions"],
         prepare=_ensure_openrouter_config,
         api_domains=["openrouter.ai", "sentry.io"],
     ),
@@ -256,7 +256,7 @@ AGENTS: dict[str, Agent] = {
                 ["npm", "install", "-g", "@github/copilot"],
             ),
         ],
-        skip_permissions=True,
+        extra_args=["--yolo"],
         # github.com covers api. and the device-code login flow;
         # githubcopilot.com is the Copilot API; githubusercontent.com serves
         # auxiliary content.
