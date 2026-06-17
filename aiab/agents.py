@@ -256,6 +256,7 @@ AGENTS: dict[str, Agent] = {
                 ["npm", "install", "-g", "@github/copilot"],
             ),
         ],
+        skip_permissions=True,
         # github.com covers api. and the device-code login flow;
         # githubcopilot.com is the Copilot API; githubusercontent.com serves
         # auxiliary content.
