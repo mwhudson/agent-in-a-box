@@ -27,6 +27,21 @@ aiab lxc ...                # run lxc against the 'aiab' project
 `<agent>` is one of `claude`, `claude-or` (Claude via OpenRouter), `opencode`,
 or `copilot`.
 
+## Why not a devcontainer?
+
+The point of `aiab` is that it needs **nothing in the repo**. Run `aiab run`
+in any checkout and it works — no `.devcontainer/`, no Dockerfile, no
+committed config of any kind. That's the whole reason it exists: I work across
+a lot of repositories, and most of them don't carry any agent or sandbox setup
+(yet). If a project *does* ship a devcontainer (or similar), you'd just use
+that; `aiab` is for the long tail that ships nothing.
+
+It also wraps the agent from the *outside* — the agent process itself runs
+inside the container, so it can only see the directories you've mounted and
+can only reach the domains you've allowed, whether or not it cooperates. That's
+what makes it safe to disable permission prompts, and it's why the same sandbox
+applies equally to Claude, opencode, and Copilot CLI.
+
 ## How it works
 
 The first time you run `aiab run claude` it creates a **base container** from
