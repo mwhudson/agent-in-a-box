@@ -1454,17 +1454,21 @@ _container_option = click.option(
 def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> None:
     """Open the interactive session control panel for a directory.
 
-    Two views in one pane (switch with the header button or `m`):
+    Five tabs in one pane (switch with header buttons or hotkeys 1-5;
+    `m`, `p`, and `l` also jump to Mounts, Ports, and Limits):
 
     \b
-      * network — tails the filtering-proxy logs for this directory's
+      * Network — tails the filtering-proxy logs for this directory's
         containers; while it runs the proxy holds requests for unknown
         domains and prompts here to allow or deny each one (instead of
         refusing them outright), as a row of clickable buttons;
-      * mounts — the directory's recorded extra mounts, each with a
+      * Domains — shows recorded domain policy for this directory;
+      * Mounts — the directory's recorded extra mounts, each with a
         read-only/read-write toggle and a remove button, plus an input
         (with path completion) to add a new one. Edits are recorded and,
-        on a running session, take effect live.
+        on a running session, take effect live;
+      * Ports — shows recorded port forwarding rules for this directory;
+      * Limits — shows recorded resource limits for this directory.
 
     With textual installed each prompt is a row of clickable buttons; the
     plain keystroke network console is the fallback, and --plain forces it.
