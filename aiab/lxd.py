@@ -39,8 +39,65 @@ import yaml
 from . import StrPath
 
 
+# Projects we've already created or confirmed exist this process. The
+# lazy-create path in run() probes/creates each project at most once.
+_ensured_projects: set[str] = set()
+
+# Shared so ensure_project() and the lazy-create path build the project the
+# same way: sharing the default project's profiles and images so containers
+# get networking/storage from the existing 'default' profile and don't
+# re-download base images.
+_PROJECT_CREATE_OPTS = ["-c", "features.images=false", "-c", "features.profiles=false"]
+
+
+def _project_exists(project: str) -> bool:
+    return (
+        subprocess.run(
+            ["lxc", "project", "show", project],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def _create_project(project: str) -> None:
+    print(
+        f"Creating LXD project '{project}' "
+        "(sharing default profiles and images) ...",
+        file=sys.stderr,
+    )
+    subprocess.run(
+        ["lxc", "project", "create", project, *_PROJECT_CREATE_OPTS], check=True
+    )
+
+
+def _project_of(cmd: list[str]) -> str | None:
+    """The project an `lxc --project <p> ...` argv targets, if any."""
+    return cmd[2] if len(cmd) > 2 and cmd[:2] == ["lxc", "--project"] else None
+
+
 def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=True, **kwargs)
+    """Run a checked `lxc` command, creating its project on demand.
+
+    Project creation is lazy: rather than probing with `lxc project show` on
+    every invocation, we let the first project-scoped command run and — only if
+    it fails and the target project turns out not to exist — create the project
+    and retry once. So the probe happens only on the rare failure path, at most
+    once per project per process; the common case (project present) pays
+    nothing.
+    """
+    try:
+        return subprocess.run(cmd, check=True, **kwargs)
+    except subprocess.CalledProcessError:
+        project = _project_of(cmd)
+        if project is None or project in _ensured_projects:
+            raise
+        _ensured_projects.add(project)
+        if _project_exists(project):
+            raise  # project is fine; the command failed for some other reason
+        _create_project(project)
+        return subprocess.run(cmd, check=True, **kwargs)
 
 
 def agent_home_dir(agent: str) -> Path:
@@ -113,39 +170,20 @@ class Lxd:
         return run(self.argv(args), **kwargs)
 
     def project_exists(self) -> bool:
-        r = subprocess.run(
-            ["lxc", "project", "show", self.project],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return r.returncode == 0
+        return _project_exists(self.project)
 
     def ensure_project(self) -> None:
-        """Create the project if missing.
+        """Create the project if missing (eagerly).
 
-        Configured to share the default project's profiles and images so
-        containers get networking/storage from the existing 'default' profile
-        and don't re-download base images.
+        Most callers no longer need this — run() creates the project lazily on
+        first use (see run()). It remains for code paths that must guarantee the
+        project exists up front, such as the migration.
         """
-        if self.project_exists():
+        if self.project in _ensured_projects or self.project_exists():
+            _ensured_projects.add(self.project)
             return
-        print(
-            f"Creating LXD project '{self.project}' "
-            "(sharing default profiles and images) ...",
-            file=sys.stderr,
-        )
-        run(
-            [
-                "lxc",
-                "project",
-                "create",
-                self.project,
-                "-c",
-                "features.images=false",
-                "-c",
-                "features.profiles=false",
-            ]
-        )
+        _create_project(self.project)
+        _ensured_projects.add(self.project)
 
     def delete_project(self) -> None:
         run(["lxc", "project", "delete", self.project])

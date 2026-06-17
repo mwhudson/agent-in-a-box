@@ -636,17 +636,13 @@ def _monitor_pane(work_dir: Path, container_name: str, enabled: bool) -> Iterato
 class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
-    Command.invoke() runs only after a successful parse, so `aiab ... --help`
-    (which exits during parsing) does not create the project.
-
-    Auto-migration from the old lxd-* layout (aiab.migrate) is intentionally
-    not wired in here for now; ensure_project() just creates the 'aiab' project
-    on first use.
+    The 'aiab' project is created lazily on first use (see lxd.run), and
+    auto-migration from the old lxd-* layout is intentionally not wired in for
+    now — so this just builds the connection and stashes it on the context.
     """
 
     def invoke(self, ctx: click.Context) -> Any:
         conn = lxd.Lxd(PROJECT)
-        conn.ensure_project()
         ctx.obj = conn
         return super().invoke(ctx)
 

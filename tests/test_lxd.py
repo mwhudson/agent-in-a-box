@@ -3,6 +3,8 @@
 import json
 import subprocess
 
+import pytest
+
 from aiab import lxd
 from aiab.lxd import Container, Lxd, container_name_for_dir, dir_slug, is_source_device
 
@@ -205,6 +207,64 @@ def test_set_config_writes_when_changed(monkeypatch):
     assert "config set" in calls
     assert c.get_config("limits.cpu") == "4"  # served from updated cache
     assert calls.count("query") == 1  # no re-query after the write
+
+
+# ---------------------------------------------------------------------------
+# lazy project creation in run()
+# ---------------------------------------------------------------------------
+
+
+def test_run_creates_project_on_demand_then_retries(monkeypatch):
+    lxd._ensured_projects.clear()
+    project = {"exists": False}
+    created: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["lxc", "project", "show"]:
+            return subprocess.CompletedProcess(cmd, 0 if project["exists"] else 1)
+        if cmd[:3] == ["lxc", "project", "create"]:
+            created.append(cmd[3])
+            project["exists"] = True
+            return subprocess.CompletedProcess(cmd, 0)
+        # A project-scoped command fails while the project is absent.
+        if cmd[:2] == ["lxc", "--project"] and not project["exists"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    result = lxd.run(["lxc", "--project", "aiab", "init", "img", "c1"])
+    assert result.returncode == 0
+    assert created == ["aiab"]  # created exactly once, on demand
+
+
+def test_run_reraises_when_project_already_exists(monkeypatch):
+    # A genuine failure (project present) must propagate, not be retried.
+    lxd._ensured_projects.clear()
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["lxc", "project", "show"]:
+            return subprocess.CompletedProcess(cmd, 0)  # exists
+        if cmd[:3] == ["lxc", "project", "create"]:
+            raise AssertionError("must not create an existing project")
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        lxd.run(["lxc", "--project", "aiab", "init", "img", "c1"])
+
+
+def test_run_does_not_probe_for_non_project_commands(monkeypatch):
+    lxd._ensured_projects.clear()
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        lxd.run(["lxc", "project", "list"])  # no --project; nothing to create
+    assert seen == [["lxc", "project", "list"]]  # no project show/create probe
 
 
 def test_apply_limits_unchanged_is_free(monkeypatch):
