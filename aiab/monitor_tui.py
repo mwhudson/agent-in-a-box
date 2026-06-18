@@ -57,6 +57,7 @@ import re
 import sys
 from pathlib import Path
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -146,6 +147,17 @@ class DecisionRow(Horizontal):
         yield Button("15m", name=netwatch.TEMP, classes=netwatch.TEMP)
         yield Button("Deny", name=netwatch.DENY, classes=netwatch.DENY)
         yield Button("×", name="remove", classes="remove")
+
+    # Enter/Leave bubble up from the child statics and buttons, so the row sees
+    # them whenever the mouse is anywhere along it. Leave fires when crossing
+    # between children too, so only drop the highlight once the mouse has really
+    # left the row's region (which is_mouse_over reports for the whole row).
+    def on_enter(self, event: events.Enter) -> None:
+        self.add_class("hovered")
+
+    def on_leave(self, event: events.Leave) -> None:
+        if not self.is_mouse_over:
+            self.remove_class("hovered")
 
 
 class MountRow(Horizontal):
@@ -328,6 +340,9 @@ class MonitorApp(App[None]):
     }
     DecisionRow {
         height: 1;
+    }
+    DecisionRow.hovered {
+        background: $panel-lighten-2;
     }
     DecisionRow .domain {
         width: 1fr;

@@ -273,6 +273,32 @@ def test_add_domain_allows_it(work_dir):
     asyncio.run(scenario())
 
 
+def test_hovering_a_domain_row_highlights_it(work_dir):
+    state.add_network_allow(work_dir, "github.com", None)
+    state.add_network_allow(work_dir, "pypi.org", None)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            rows = {row.domain: row for row in app.query(monitor_tui.DecisionRow)}
+
+            # Hovering a button on one row highlights that whole row only.
+            await pilot.hover("DecisionRow .deny")
+            await pilot.pause()
+            assert rows["github.com"].has_class("hovered")
+            assert not rows["pypi.org"].has_class("hovered")
+
+            # Moving onto the other row hands the highlight over.
+            await pilot.hover(rows["pypi.org"])
+            await pilot.pause()
+            assert rows["pypi.org"].has_class("hovered")
+            assert not rows["github.com"].has_class("hovered")
+
+    asyncio.run(scenario())
+
+
 # -- mounts view --
 
 
