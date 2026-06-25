@@ -166,7 +166,14 @@ AGENTS: dict[str, Agent] = {
         + [
             (
                 "Installing wl-clipboard ...",
-                ["apt-get", "install", "-y", "-q", "wl-clipboard"],
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "-q",
+                    "--no-install-recommends",
+                    "wl-clipboard",
+                ],
             ),
         ],
         extra_args=["--dangerously-skip-permissions"],
@@ -208,7 +215,14 @@ AGENTS: dict[str, Agent] = {
             ),
             (
                 "Installing wl-clipboard ...",
-                ["apt-get", "install", "-y", "-q", "wl-clipboard"],
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "-q",
+                    "--no-install-recommends",
+                    "wl-clipboard",
+                ],
             ),
         ],
         # Re-running the installer is enough to upgrade; no need to reinstall
