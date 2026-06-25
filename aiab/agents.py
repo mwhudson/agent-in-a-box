@@ -159,8 +159,20 @@ class Agent:
 AGENTS: dict[str, Agent] = {
     "claude": Agent(
         command=f"{CONTAINER_HOME}/.local/bin/claude",
-        install_cmds=_claude_install(),
+        # wl-clipboard stays in the upgrade path (install_cmds doubles as
+        # upgrade_cmds) so existing templates pick it up; apt-get install is a
+        # no-op once it's present.
+        install_cmds=_claude_install()
+        + [
+            (
+                "Installing wl-clipboard ...",
+                ["apt-get", "install", "-y", "-q", "wl-clipboard"],
+            ),
+        ],
         extra_args=["--dangerously-skip-permissions"],
+        # Claude shells out to wl-clipboard (wl-copy/wl-paste) for clipboard
+        # access on Wayland — image paste in, copy out.
+        wayland=True,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
         overlays=_overlays(
             ("claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
