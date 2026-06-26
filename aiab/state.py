@@ -48,6 +48,14 @@
 # to the session container on every start (LXD applies CPU/memory changes
 # immediately on a running container).
 #
+# A directory's injected environment variables (managed by `aiab env`) live in
+# a fifth JSON file, keyed by directory and then by scope — the "*" bucket
+# applies to every agent run there, an agent-named bucket only to that agent:
+#   { "<dir real path>": { "*": {"FOO": "bar"},
+#                          "<agent>": {"OPENCODE_CONFIG": "..."} } }
+# `aiab run` merges the "*" bucket then the running agent's bucket (agent wins)
+# into the agent process environment (see aiab.cli._session_env).
+#
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
 # the agent itself maintains — notably the /setup-container setup script. A
@@ -72,6 +80,7 @@ _PATH = _STATE_DIR / "mounts.json"
 _NET_PATH = _STATE_DIR / "network.json"
 _BASE_PATH = _STATE_DIR / "base.json"
 _LIMITS_PATH = _STATE_DIR / "limits.json"
+_ENV_PATH = _STATE_DIR / "env.json"
 _DIRSTATE_DIR = _STATE_DIR / "dirstate"
 
 # Records the owning project directory inside each dirstate dir, so
@@ -443,6 +452,68 @@ def set_limits(directory: StrPath, limits: ResourceLimits) -> None:
         _save_file_unlocked(_LIMITS_PATH, data)
 
 
+# -- injected environment variables --
+
+# Bucket name for variables that apply to every agent run in a directory, as
+# opposed to a single agent's bucket (keyed by agent name).
+ENV_ALL_AGENTS = "*"
+
+# The whole env file: dir -> bucket ("*" or agent name) -> {name: value}.
+EnvState = dict[str, dict[str, dict[str, str]]]
+
+
+def get_env(directory: StrPath, agent: str) -> dict[str, str]:
+    """Return the env vars to inject for an agent in a directory.
+
+    Merges the directory-wide ("*") bucket with the agent's own bucket, the
+    agent-specific values winning on conflict. Empty if nothing is recorded.
+    """
+    data: EnvState = _load_file(_ENV_PATH)
+    dir_env = data.get(_key(directory), {})
+    return {**dir_env.get(ENV_ALL_AGENTS, {}), **dir_env.get(agent, {})}
+
+
+def set_env(directory: StrPath, agent: str, name: str, value: str) -> None:
+    """Record an env var for a directory, scoped to one agent or all ("*")."""
+    key = _key(directory)
+    with _locked_path(_ENV_PATH):
+        data: EnvState = _load_file(_ENV_PATH)
+        dir_env = data.setdefault(key, {})
+        dir_env.setdefault(agent, {})[name] = value
+        _save_file_unlocked(_ENV_PATH, data)
+
+
+def unset_env(directory: StrPath, agent: str, name: str) -> bool:
+    """Drop a recorded env var. Return True if it was present.
+
+    Emptied buckets (and then the directory entry) are removed to keep the file
+    tidy.
+    """
+    key = _key(directory)
+    with _locked_path(_ENV_PATH):
+        data: EnvState = _load_file(_ENV_PATH)
+        bucket = data.get(key, {}).get(agent, {})
+        if name not in bucket:
+            return False
+        del bucket[name]
+        if not bucket:
+            data[key].pop(agent, None)
+        if not data[key]:
+            data.pop(key, None)
+        _save_file_unlocked(_ENV_PATH, data)
+    return True
+
+
+def list_env(directory: StrPath) -> dict[str, dict[str, str]]:
+    """Return the recorded env buckets for a directory, unmerged.
+
+    Maps each bucket name ("*" or an agent name) to its {name: value} dict;
+    empty when nothing is recorded.
+    """
+    data: EnvState = _load_file(_ENV_PATH)
+    return data.get(_key(directory), {})
+
+
 # -- per-directory state dir --
 
 
@@ -483,15 +554,17 @@ def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
     return d
 
 
-def prune_stale() -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+def prune_stale() -> (
+    tuple[list[str], list[str], list[str], list[str], list[str], list[str]]
+):
     """Remove records for directories that no longer exist from all state.
 
-    Covers the mount, network, base, and limits JSON files and the
+    Covers the mount, network, base, limits, and env JSON files and the
     per-directory state dirs (a state dir whose recorded .source path is gone
     is deleted, setup script and all; ones without a readable .source are left
     alone). Returns (pruned_mount_dirs, pruned_network_dirs, pruned_base_dirs,
-    pruned_state_dirs, pruned_limit_dirs) as lists of project-directory path
-    strings.
+    pruned_state_dirs, pruned_limit_dirs, pruned_env_dirs) as lists of
+    project-directory path strings.
     """
     pruned_mounts: list[str] = []
     with _locked_path(_PATH):
@@ -533,6 +606,16 @@ def prune_stale() -> tuple[list[str], list[str], list[str], list[str], list[str]
         if pruned_limits:
             _save_file_unlocked(_LIMITS_PATH, limits_data)
 
+    pruned_env: list[str] = []
+    with _locked_path(_ENV_PATH):
+        env_data = _load_file(_ENV_PATH)
+        for key in list(env_data):
+            if not Path(key).is_dir():
+                del env_data[key]
+                pruned_env.append(key)
+        if pruned_env:
+            _save_file_unlocked(_ENV_PATH, env_data)
+
     pruned_state: list[str] = []
     with _locked_path(_DIRSTATE_DIR):
         if _DIRSTATE_DIR.is_dir():
@@ -545,4 +628,11 @@ def prune_stale() -> tuple[list[str], list[str], list[str], list[str], list[str]
                     shutil.rmtree(d)
                     pruned_state.append(source)
 
-    return pruned_mounts, pruned_net, pruned_base, pruned_state, pruned_limits
+    return (
+        pruned_mounts,
+        pruned_net,
+        pruned_base,
+        pruned_state,
+        pruned_limits,
+        pruned_env,
+    )

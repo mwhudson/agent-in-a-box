@@ -744,10 +744,21 @@ def _apply_git_guard(
 
 
 def _session_env(
-    session: lxd.Container, cfg: agents.Agent, proxy_env: dict[str, str]
+    session: lxd.Container,
+    cfg: agents.Agent,
+    proxy_env: dict[str, str],
+    work_dir: Path,
+    agent: str,
 ) -> dict[str, str]:
-    """Environment for the agent or shell process inside the container."""
-    env = {"HOME": CONTAINER_HOME, "PATH": _CONTAINER_PATH}
+    """Environment for the agent or shell process inside the container.
+
+    The directory's recorded `aiab env` vars go in first, so HOME, PATH, the
+    network-proxy vars and the Wayland socket stay authoritative and can't be
+    overridden by a recorded variable.
+    """
+    env = dict(state.get_env(work_dir, agent))
+    env["HOME"] = CONTAINER_HOME
+    env["PATH"] = _CONTAINER_PATH
     env.update(proxy_env)
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
@@ -925,7 +936,7 @@ def run(
         if not no_git_guard:
             _apply_git_guard(session, work_dir, container_cwd, applied_mounts)
 
-        env = _session_env(session, cfg, proxy_env)
+        env = _session_env(session, cfg, proxy_env, work_dir, agent)
         with _monitor_pane(work_dir, session.name, enabled=use_tmux):
             rc = session.run_interactive(
                 run_cmd,
@@ -1407,6 +1418,95 @@ def limits(
     )
 
 
+# --------------------------------------------------------------------------
+# env
+# --------------------------------------------------------------------------
+
+
+# Variables aiab sets itself when launching an agent (see _session_env); they
+# always win over recorded vars, so refuse to record them and avoid the
+# surprise of a setting that silently has no effect.
+_RESERVED_ENV = ("HOME", "PATH")
+
+
+# A plain Group (like net): these verbs only edit recorded state. The recorded
+# vars are merged into the agent process on the next `aiab run` here.
+@main.group(cls=click.Group)
+def env() -> None:
+    """Manage environment variables injected into a directory's agents.
+
+    Variables are recorded per directory and, by default, apply to every agent
+    run there; pass --agent to scope a variable to a single agent (an
+    agent-specific value overrides the directory-wide one). Changes take effect
+    the next time an agent starts here. HOME, PATH, and the network-proxy and
+    Wayland variables are managed by aiab and stay authoritative.
+    """
+
+
+_env_agent_option = click.option(
+    "--agent",
+    "agent",
+    type=AGENT_CHOICE,
+    default=None,
+    help="scope to one agent (default: all agents in the directory)",
+)
+
+
+def _env_scope(agent: str | None) -> str:
+    return f"agent '{agent}'" if agent else "all agents"
+
+
+@env.command("set")
+@_for_dir_option
+@_env_agent_option
+@click.argument("name")
+@click.argument("value")
+def env_set(for_dir: str | None, agent: str | None, name: str, value: str) -> None:
+    """Set environment variable NAME to VALUE for a directory."""
+    if name in _RESERVED_ENV:
+        sys.exit(f"Error: {name} is managed by aiab and can't be set here")
+    target = _realdir(for_dir)
+    state.set_env(target, agent or state.ENV_ALL_AGENTS, name, value)
+    print(f"Set {name} for {target} ({_env_scope(agent)})", file=sys.stderr)
+    print("Takes effect the next time an agent starts here.", file=sys.stderr)
+
+
+@env.command("unset")
+@_for_dir_option
+@_env_agent_option
+@click.argument("name")
+def env_unset(for_dir: str | None, agent: str | None, name: str) -> None:
+    """Remove environment variable NAME for a directory."""
+    target = _realdir(for_dir)
+    if state.unset_env(target, agent or state.ENV_ALL_AGENTS, name):
+        print(f"Unset {name} for {target} ({_env_scope(agent)})", file=sys.stderr)
+    else:
+        print(
+            f"No {name} recorded for {target} ({_env_scope(agent)})",
+            file=sys.stderr,
+        )
+
+
+@env.command("list")
+@_for_dir_option
+def env_list(for_dir: str | None) -> None:
+    """Show recorded environment variables for a directory."""
+    target = _realdir(for_dir)
+    buckets = state.list_env(target)
+    if not buckets:
+        print(f"{target}: (none)")
+        return
+    print(f"{target}:")
+    # Directory-wide bucket first, then per-agent buckets alphabetically.
+    for bucket, variables in sorted(
+        buckets.items(), key=lambda kv: (kv[0] != state.ENV_ALL_AGENTS, kv[0])
+    ):
+        label = "all agents" if bucket == state.ENV_ALL_AGENTS else bucket
+        print(f"  {label}:")
+        for k, v in sorted(variables.items()):
+            print(f"    {k}={v}")
+
+
 def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
     """Open the session control panel for a directory (never returns).
 
@@ -1651,9 +1751,14 @@ def gc(conn: lxd.Lxd) -> None:
             file=sys.stderr,
         )
 
-    pruned_mounts, pruned_net, pruned_base, pruned_state, pruned_limits = (
-        state.prune_stale()
-    )
+    (
+        pruned_mounts,
+        pruned_net,
+        pruned_base,
+        pruned_state,
+        pruned_limits,
+        pruned_env,
+    ) = state.prune_stale()
     for d in pruned_mounts:
         print(f"Pruned mount record for {d}", file=sys.stderr)
     for d in pruned_net:
@@ -1664,6 +1769,8 @@ def gc(conn: lxd.Lxd) -> None:
         print(f"Pruned state dir for {d}", file=sys.stderr)
     for d in pruned_limits:
         print(f"Pruned limits record for {d}", file=sys.stderr)
+    for d in pruned_env:
+        print(f"Pruned env record for {d}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

@@ -52,6 +52,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
     monkeypatch.setattr(state, "_BASE_PATH", tmp_path / "base.json")
     monkeypatch.setattr(state, "_LIMITS_PATH", tmp_path / "limits.json")
+    monkeypatch.setattr(state, "_ENV_PATH", tmp_path / "env.json")
     monkeypatch.setattr(state, "_DIRSTATE_DIR", tmp_path / "dirstate")
 
 
@@ -275,7 +276,7 @@ def test_prune_stale_removes_deleted_base_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_base(gone, "22.04")
 
-    _, _, pruned_base, _, _ = state.prune_stale()
+    _, _, pruned_base, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_base
     assert state.get_base(gone) == release.DEFAULT_BASE
@@ -293,7 +294,7 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
     state.set_mount(gone, tmp_path / "src", readonly=True)
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, _, _, _, _ = state.prune_stale()
+    pruned_mounts, _, _, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_mounts
     assert str(here) not in pruned_mounts
@@ -306,7 +307,7 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     # An explicit open record is the non-default policy that persists.
     state.set_network_mode(gone, state.MODE_OPEN)
 
-    _, pruned_net, _, _, _ = state.prune_stale()
+    _, pruned_net, _, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_net
 
@@ -316,12 +317,12 @@ def test_prune_stale_no_op_when_clean(tmp_path):
     here.mkdir()
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    assert state.prune_stale() == ([], [], [], [], [])
+    assert state.prune_stale() == ([], [], [], [], [], [])
 
 
 def test_prune_stale_empty_files(tmp_path):
     # Should not raise when there's nothing in any file.
-    assert state.prune_stale() == ([], [], [], [], [])
+    assert state.prune_stale() == ([], [], [], [], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +368,7 @@ def test_prune_stale_removes_state_dir_for_deleted_dir(tmp_path):
     here_state = state.dir_state_dir(here)
     gone.rmdir()
 
-    _, _, _, pruned_state, _ = state.prune_stale()
+    _, _, _, pruned_state, _, _ = state.prune_stale()
 
     assert pruned_state == [str(gone)]
     assert not gone_state.exists()
@@ -378,7 +379,7 @@ def test_prune_stale_skips_state_dir_without_source(tmp_path):
     stray = state._DIRSTATE_DIR / "stray"
     stray.mkdir(parents=True)
 
-    _, _, _, pruned_state, _ = state.prune_stale()
+    _, _, _, pruned_state, _, _ = state.prune_stale()
 
     assert pruned_state == []
     assert stray.is_dir()
@@ -557,7 +558,99 @@ def test_prune_stale_removes_deleted_limits_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_limits(gone, {"cpu": 8, "memory": "16GiB"})
 
-    _, _, _, _, pruned_limits = state.prune_stale()
+    _, _, _, _, pruned_limits, _ = state.prune_stale()
 
     assert str(gone) in pruned_limits
     assert state.get_limits(gone) == state.DEFAULT_LIMITS
+
+
+# ---------------------------------------------------------------------------
+# Injected environment variables
+# ---------------------------------------------------------------------------
+
+
+def test_get_env_empty(tmp_path):
+    assert state.get_env(tmp_path, "opencode") == {}
+
+
+def test_set_and_get_env_all_agents(tmp_path):
+    state.set_env(tmp_path, state.ENV_ALL_AGENTS, "FOO", "bar")
+    # The "*" bucket reaches every agent.
+    assert state.get_env(tmp_path, "opencode") == {"FOO": "bar"}
+    assert state.get_env(tmp_path, "claude") == {"FOO": "bar"}
+
+
+def test_set_and_get_env_per_agent(tmp_path):
+    state.set_env(tmp_path, "opencode", "OPENCODE_CONFIG", "/x")
+    assert state.get_env(tmp_path, "opencode") == {"OPENCODE_CONFIG": "/x"}
+    # A different agent doesn't see another agent's bucket.
+    assert state.get_env(tmp_path, "claude") == {}
+
+
+def test_get_env_agent_overrides_all_agents(tmp_path):
+    state.set_env(tmp_path, state.ENV_ALL_AGENTS, "K", "shared")
+    state.set_env(tmp_path, "opencode", "K", "specific")
+    assert state.get_env(tmp_path, "opencode") == {"K": "specific"}
+    assert state.get_env(tmp_path, "claude") == {"K": "shared"}
+
+
+def test_get_env_merges_buckets(tmp_path):
+    state.set_env(tmp_path, state.ENV_ALL_AGENTS, "A", "1")
+    state.set_env(tmp_path, "opencode", "B", "2")
+    assert state.get_env(tmp_path, "opencode") == {"A": "1", "B": "2"}
+
+
+def test_set_env_updates_value(tmp_path):
+    state.set_env(tmp_path, "opencode", "K", "old")
+    state.set_env(tmp_path, "opencode", "K", "new")
+    assert state.get_env(tmp_path, "opencode") == {"K": "new"}
+
+
+def test_unset_env_present(tmp_path):
+    state.set_env(tmp_path, "opencode", "K", "v")
+    assert state.unset_env(tmp_path, "opencode", "K") is True
+    assert state.get_env(tmp_path, "opencode") == {}
+
+
+def test_unset_env_absent(tmp_path):
+    assert state.unset_env(tmp_path, "opencode", "K") is False
+
+
+def test_unset_env_clears_empty_buckets(tmp_path):
+    state.set_env(tmp_path, "opencode", "K", "v")
+    state.unset_env(tmp_path, "opencode", "K")
+    # Both the agent bucket and the directory entry are pruned.
+    assert str(tmp_path) not in state._load_file(state._ENV_PATH)
+
+
+def test_unset_env_keeps_other_buckets(tmp_path):
+    state.set_env(tmp_path, state.ENV_ALL_AGENTS, "A", "1")
+    state.set_env(tmp_path, "opencode", "B", "2")
+    state.unset_env(tmp_path, "opencode", "B")
+    assert state.list_env(tmp_path) == {state.ENV_ALL_AGENTS: {"A": "1"}}
+
+
+def test_list_env(tmp_path):
+    state.set_env(tmp_path, state.ENV_ALL_AGENTS, "A", "1")
+    state.set_env(tmp_path, "opencode", "B", "2")
+    assert state.list_env(tmp_path) == {
+        state.ENV_ALL_AGENTS: {"A": "1"},
+        "opencode": {"B": "2"},
+    }
+
+
+def test_env_keyed_per_directory(tmp_path):
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    state.set_env(dir_a, state.ENV_ALL_AGENTS, "K", "v")
+    assert state.get_env(dir_b, "opencode") == {}
+
+
+def test_prune_stale_removes_deleted_env_dirs(tmp_path):
+    gone = tmp_path / "gone"
+    state.set_env(gone, state.ENV_ALL_AGENTS, "K", "v")
+
+    *_, pruned_env = state.prune_stale()
+
+    assert str(gone) in pruned_env
+    assert state.get_env(gone, "opencode") == {}
