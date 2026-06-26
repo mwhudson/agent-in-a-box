@@ -12,9 +12,14 @@ _aiab() {
         'mount:mount extra directories into a directory'\''s containers'
         'unmount:remove extra directory mounts'
         'net:manage a directory'\''s network access policy'
+        'base:show or set the Ubuntu release a directory builds on'
+        'limits:show or set a directory'\''s resource limits'
+        'env:manage env vars injected into a directory'\''s agents'
+        'opencode:opencode-specific per-directory configuration'
         'monitor:open the interactive session control panel'
         'upgrade-templates:apt upgrade + reinstall agents in templates'
         'list:list aiab containers'
+        'gc:remove stale containers and prune dead records'
         'lxc:run lxc against the aiab project'
     )
     agents=(claude claude-or opencode copilot)
@@ -59,6 +64,32 @@ _aiab() {
                 '--duration[allow temporarily, e.g. 10m, 2h]:duration:' \
                 '1:net command:(status restrict open allow deny)' \
                 '*:domain:'
+            ;;
+        base)
+            _arguments \
+                '--for[target DIR]:directory:_files -/' \
+                '1:release:(default)'
+            ;;
+        limits)
+            _arguments \
+                '--for[target DIR]:directory:_files -/' \
+                '--cpu[number of vCPUs]:cpu:' \
+                '--memory[memory limit, e.g. 8GiB]:memory:' \
+                '--reset[reset all limits to defaults]'
+            ;;
+        env)
+            _arguments \
+                '--for[target DIR]:directory:_files -/' \
+                "--agent[scope to one agent]:agent:(${agents})" \
+                '1:env command:(set unset list)' \
+                '*::args:'
+            ;;
+        opencode)
+            _arguments \
+                '--for[target DIR]:directory:_files -/' \
+                '--unset[remove PATH instead of setting it]' \
+                '1:opencode command:(config)' \
+                '*::args:'
             ;;
         monitor)
             _arguments \

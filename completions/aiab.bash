@@ -12,8 +12,9 @@ _aiab() {
     local cur prev
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
+    COMPREPLY=()
 
-    local subcommands="run remove mount unmount net monitor upgrade-templates list lxc"
+    local subcommands="run remove mount unmount net base limits env opencode monitor upgrade-templates list gc lxc"
     local agents="claude claude-or opencode copilot"
 
     _aiab_dirs() {
@@ -43,6 +44,11 @@ _aiab() {
         return
     fi
 
+    if [[ "$prev" == "--agent" ]]; then
+        COMPREPLY=( $(compgen -W "$agents" -- "$cur") )
+        return
+    fi
+
     case "$sub" in
         run)
             COMPREPLY=( $(compgen -W "$agents --for --add-mount --add-mount-rw --shell" -- "$cur") )
@@ -64,6 +70,18 @@ _aiab() {
             ;;
         net)
             COMPREPLY=( $(compgen -W "status restrict open allow deny --for --duration" -- "$cur") )
+            ;;
+        base)
+            COMPREPLY=( $(compgen -W "--for default" -- "$cur") )
+            ;;
+        limits)
+            COMPREPLY=( $(compgen -W "--for --cpu --memory --reset" -- "$cur") )
+            ;;
+        env)
+            COMPREPLY=( $(compgen -W "set unset list --for --agent" -- "$cur") )
+            ;;
+        opencode)
+            COMPREPLY=( $(compgen -W "config --for --unset" -- "$cur") )
             ;;
         monitor)
             COMPREPLY=( $(compgen -W "--for --plain" -- "$cur") )
