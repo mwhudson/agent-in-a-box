@@ -5,7 +5,14 @@
 
 from typing import Any
 
-from aiab.cli import _guard_git_repo, _reseed_file, _reseed_tree
+from aiab.cli import (
+    _guard_git_repo,
+    _json_set,
+    _json_unset,
+    _parse_config_value,
+    _reseed_file,
+    _reseed_tree,
+)
 
 
 class FakeContainer:
@@ -164,3 +171,72 @@ def test_guard_git_repo_handles_missing_hooks_or_config(tmp_path):
 
     cpaths = [cpath for _host, cpath, _ro in container.overlays]
     assert cpaths == ["/work/repo/.git/config"]
+
+
+# ---------------------------------------------------------------------------
+# _json_set / _json_unset / _parse_config_value (aiab opencode config)
+# ---------------------------------------------------------------------------
+
+
+def test_json_set_nested_creates_path():
+    data: dict = {}
+    _json_set(data, "provider.openrouter.options.apiKey", "sk-or-x")
+    assert data == {"provider": {"openrouter": {"options": {"apiKey": "sk-or-x"}}}}
+
+
+def test_json_set_top_level():
+    data: dict = {}
+    _json_set(data, "model", "anthropic/claude-sonnet-4-6")
+    assert data == {"model": "anthropic/claude-sonnet-4-6"}
+
+
+def test_json_set_preserves_siblings():
+    data = {"provider": {"openrouter": {"options": {"apiKey": "old"}}}}
+    _json_set(data, "provider.openrouter.options.baseURL", "https://x")
+    assert data["provider"]["openrouter"]["options"] == {
+        "apiKey": "old",
+        "baseURL": "https://x",
+    }
+
+
+def test_json_set_overwrites_non_dict_intermediate():
+    data = {"provider": "scalar"}
+    _json_set(data, "provider.openrouter.apiKey", "k")
+    assert data == {"provider": {"openrouter": {"apiKey": "k"}}}
+
+
+def test_json_unset_removes_and_prunes_empty_parents():
+    data = {"provider": {"openrouter": {"options": {"apiKey": "k"}}}}
+    assert _json_unset(data, "provider.openrouter.options.apiKey") is True
+    # The whole now-empty chain is pruned.
+    assert data == {}
+
+
+def test_json_unset_keeps_non_empty_parents():
+    data = {"provider": {"openrouter": {"options": {"apiKey": "k", "x": "y"}}}}
+    assert _json_unset(data, "provider.openrouter.options.apiKey") is True
+    assert data == {"provider": {"openrouter": {"options": {"x": "y"}}}}
+
+
+def test_json_unset_absent_key():
+    data = {"model": "m"}
+    assert _json_unset(data, "provider.openrouter.apiKey") is False
+    assert data == {"model": "m"}
+
+
+def test_json_unset_absent_top_level():
+    assert _json_unset({}, "model") is False
+
+
+def test_parse_config_value_json_literals():
+    assert _parse_config_value("true") is True
+    assert _parse_config_value("false") is False
+    assert _parse_config_value("42") == 42
+
+
+def test_parse_config_value_falls_back_to_string():
+    # Provider keys and model ids aren't valid JSON; keep them as strings.
+    assert _parse_config_value("sk-or-abc123") == "sk-or-abc123"
+    assert _parse_config_value("anthropic/claude-sonnet-4-6") == (
+        "anthropic/claude-sonnet-4-6"
+    )

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -1505,6 +1506,156 @@ def env_list(for_dir: str | None) -> None:
         print(f"  {label}:")
         for k, v in sorted(variables.items()):
             print(f"    {k}={v}")
+
+
+# --------------------------------------------------------------------------
+# opencode
+# --------------------------------------------------------------------------
+
+# opencode merges several config sources, with an OPENCODE_CONFIG file ranking
+# above the global config and — unlike an env var or the stored `opencode auth
+# login` — able to override a logged-in provider key (config > auth > env).
+# `aiab opencode config` keeps a per-directory overlay here and points opencode
+# at it via an OPENCODE_CONFIG var injected for the opencode agent (see `aiab
+# env`), so a directory can use its own key/model while every other directory
+# keeps the shared login. The overlay lives in the directory's state dir,
+# mounted at STATE_MOUNT, so it survives container recreation and the agent can
+# read it, but it never lands in the repo tree.
+_OPENCODE_OVERLAY = "opencode.json"
+_OPENCODE_CONFIG_ENV = "OPENCODE_CONFIG"
+
+
+def _json_set(data: dict, dotted: str, value: Any) -> None:
+    """Set a nested key (dotted path) in data, creating intermediate dicts."""
+    *parents, last = dotted.split(".")
+    cur = data
+    for part in parents:
+        child = cur.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            cur[part] = child
+        cur = child
+    cur[last] = value
+
+
+def _json_unset(data: dict, dotted: str) -> bool:
+    """Remove a nested key (dotted path) from data, pruning emptied parents.
+
+    Returns True if the key was present.
+    """
+    *parents, last = dotted.split(".")
+    cur = data
+    chain: list[tuple[dict, str]] = []
+    for part in parents:
+        child = cur.get(part)
+        if not isinstance(child, dict):
+            return False
+        chain.append((cur, part))
+        cur = child
+    if last not in cur:
+        return False
+    del cur[last]
+    for parent, part in reversed(chain):
+        if parent[part]:
+            break
+        del parent[part]
+    return True
+
+
+def _parse_config_value(raw: str) -> Any:
+    """Read a CLI value as JSON (so true/false/numbers work), else as a str."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _write_json(path: Path, data: dict) -> None:
+    with path.open("w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+# A plain Group (like net/env): only edits recorded state, no LXD.
+@main.group(cls=click.Group)
+def opencode() -> None:
+    """opencode-specific per-directory configuration."""
+
+
+@opencode.command("config")
+@_for_dir_option
+@click.option(
+    "--unset", "unset", is_flag=True, help="remove PATH instead of setting it"
+)
+@click.argument("path", required=False)
+@click.argument("value", required=False)
+def opencode_config(
+    for_dir: str | None, unset: bool, path: str | None, value: str | None
+) -> None:
+    """Show or edit this directory's opencode config overlay.
+
+    With no PATH, prints the overlay. Given a dotted PATH and VALUE, sets that
+    key (e.g. `provider.openrouter.options.apiKey sk-or-...`, or `model
+    anthropic/claude-sonnet-4-6`) in a per-directory opencode.json and points
+    opencode at it via OPENCODE_CONFIG — overriding the shared login for this
+    directory only. `--unset PATH` removes a key. VALUE is read as JSON when it
+    parses (so true/false/numbers work), otherwise as a string. Takes effect
+    the next time opencode starts here.
+    """
+    target = _realdir(for_dir)
+    overlay_path = state.dir_state_dir(target) / _OPENCODE_OVERLAY
+    container_path = f"{STATE_MOUNT}/{_OPENCODE_OVERLAY}"
+
+    def _load() -> dict:
+        try:
+            with overlay_path.open() as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
+    if path is None:
+        if unset:
+            sys.exit("Error: --unset needs a PATH")
+        data = _load()
+        if not data:
+            print(f"{target}: (no opencode overlay)")
+            return
+        print(f"{target} ({container_path}):")
+        print(json.dumps(data, indent=2))
+        return
+
+    data = _load()
+
+    if unset:
+        if value is not None:
+            sys.exit("Error: pass either VALUE or --unset, not both")
+        if not _json_unset(data, path):
+            print(f"No {path} in opencode overlay for {target}", file=sys.stderr)
+            return
+        if data:
+            _write_json(overlay_path, data)
+        else:
+            # Last key gone: drop the overlay file and the OPENCODE_CONFIG pointer.
+            overlay_path.unlink(missing_ok=True)
+            state.unset_env(target, "opencode", _OPENCODE_CONFIG_ENV)
+        print(f"Unset {path} for {target}", file=sys.stderr)
+        print("Takes effect the next time opencode starts here.", file=sys.stderr)
+        return
+
+    if value is None:
+        sys.exit("Error: setting PATH needs a VALUE (or use --unset)")
+
+    _json_set(data, path, _parse_config_value(value))
+    _write_json(overlay_path, data)
+    state.set_env(target, "opencode", _OPENCODE_CONFIG_ENV, container_path)
+    print(f"Set {path} for {target} (opencode)", file=sys.stderr)
+    print("Takes effect the next time opencode starts here.", file=sys.stderr)
+    if state.get_network(target)["mode"] == state.MODE_RESTRICTED:
+        print(
+            "Network here is restricted; if this points opencode at a new "
+            "provider, allow its API domain with 'aiab net allow'.",
+            file=sys.stderr,
+        )
 
 
 def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
