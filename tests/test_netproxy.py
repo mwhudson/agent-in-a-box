@@ -68,3 +68,39 @@ def test_api_domains_beat_deny():
 def test_host_normalisation():
     policy = _policy(allow=["github.com"])
     assert evaluate("GitHub.COM.", [], policy) == ALLOW
+
+
+def test_global_allow_supplements_local():
+    # A globally-allowed domain is allowed even with an empty local allowlist.
+    glob = _policy(allow=["github.com"])
+    assert evaluate("api.github.com", [], _policy(), glob) == ALLOW
+
+
+def test_global_deny_supplements_local():
+    glob = _policy(deny=["tracker.example"])
+    assert evaluate("cdn.tracker.example", [], _policy(), glob) == DENY
+
+
+def test_local_allow_overrides_global_deny_on_tie():
+    # Same-length match: the directory's own rule wins over the global one.
+    glob = _policy(deny=["x.com"])
+    assert evaluate("x.com", [], _policy(allow=["x.com"]), glob) == ALLOW
+
+
+def test_local_deny_overrides_global_allow_on_tie():
+    glob = _policy(allow=["x.com"])
+    assert evaluate("x.com", [], _policy(deny=["x.com"]), glob) == DENY
+
+
+def test_longer_global_rule_beats_shorter_local_rule():
+    # Most-specific-wins still holds across scopes: a longer global allow
+    # pokes a hole in a shorter local deny.
+    glob = _policy(allow=["api.x.com"])
+    local = _policy(deny=["x.com"])
+    assert evaluate("api.x.com", [], local, glob) == ALLOW
+    assert evaluate("www.x.com", [], local, glob) == DENY
+
+
+def test_global_ignored_in_open_mode():
+    glob = _policy(deny=["github.com"])
+    assert evaluate("github.com", [], _policy(mode=state.MODE_OPEN), glob) == ALLOW

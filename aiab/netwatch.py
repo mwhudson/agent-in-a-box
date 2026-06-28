@@ -174,6 +174,14 @@ def _print_policy(work_dir: Path) -> None:
         print("  allowed: " + ", ".join(a["domain"] for a in policy["allow"]))
     if policy["deny"]:
         print("  denied:  " + ", ".join(policy["deny"]))
+    global_policy = state.get_global_network()
+    if global_policy["allow"]:
+        print(
+            "  allowed (global): "
+            + ", ".join(a["domain"] for a in global_policy["allow"])
+        )
+    if global_policy["deny"]:
+        print("  denied (global):  " + ", ".join(global_policy["deny"]))
 
 
 def _read_key(timeout: float) -> str | None:

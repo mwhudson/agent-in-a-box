@@ -205,6 +205,41 @@ def test_remove_network_allow_absent(tmp_path):
     assert removed is False
 
 
+def test_global_allow_recorded_separately(tmp_path):
+    state.add_network_allow(None, "example.com", expires=None, global_=True)
+    # The global rule is on the shared list, not on any directory's policy.
+    assert any(
+        a["domain"] == "example.com" for a in state.get_global_network()["allow"]
+    )
+    assert state.get_network(tmp_path)["allow"] == []
+
+
+def test_global_deny_recorded_separately(tmp_path):
+    state.add_network_deny(None, "tracker.example", global_=True)
+    assert state.get_global_network()["deny"] == ["tracker.example"]
+    assert state.get_network(tmp_path)["deny"] == []
+
+
+def test_global_allow_deny_disjoint(tmp_path):
+    state.add_network_allow(None, "example.com", expires=None, global_=True)
+    state.add_network_deny(None, "example.com", global_=True)
+    glob = state.get_global_network()
+    assert glob["deny"] == ["example.com"]
+    assert not any(a["domain"] == "example.com" for a in glob["allow"])
+
+
+def test_remove_global_allow(tmp_path):
+    state.add_network_allow(None, "example.com", expires=None, global_=True)
+    assert state.remove_network_allow(None, "example.com", global_=True) is True
+    assert state.get_global_network()["allow"] == []
+
+
+def test_global_default_empty(tmp_path):
+    glob = state.get_global_network()
+    assert glob["allow"] == []
+    assert glob["deny"] == []
+
+
 def test_expired_allow_filtered_from_get(tmp_path):
     state.set_network_mode(tmp_path, state.MODE_RESTRICTED)
     past = time.time() - 1
@@ -310,6 +345,18 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     _, pruned_net, _, _, _, _ = state.prune_stale()
 
     assert str(gone) in pruned_net
+
+
+def test_prune_stale_keeps_global_network(tmp_path):
+    # The global policy belongs to no directory, so prune must never drop it.
+    state.add_network_allow(None, "example.com", expires=None, global_=True)
+
+    _, pruned_net, _, _, _, _ = state.prune_stale()
+
+    assert state.GLOBAL_KEY not in pruned_net
+    assert any(
+        a["domain"] == "example.com" for a in state.get_global_network()["allow"]
+    )
 
 
 def test_prune_stale_no_op_when_clean(tmp_path):

@@ -92,7 +92,12 @@ DENY = "deny"
 ASK = "ask"
 
 
-def evaluate(host: str, api_domains: list[str], policy: state.NetworkPolicy) -> str:
+def evaluate(
+    host: str,
+    api_domains: list[str],
+    policy: state.NetworkPolicy,
+    global_policy: state.NetworkPolicy | None = None,
+) -> str:
     """Classify a host against a policy: ALLOW, DENY, or ASK.
 
     API domains always win. Otherwise the most specific (longest) matching
@@ -100,6 +105,11 @@ def evaluate(host: str, api_domains: list[str], policy: state.NetworkPolicy) -> 
     api.x.com pokes a hole in a deny for x.com. A host matching neither
     list is ASK: the caller chooses between refusing it outright and parking
     the request for an interactive decision.
+
+    A global_policy supplies allow/deny rules shared by every directory. The
+    directory's own rules take precedence: on an equal-length match a local
+    rule beats a global one, but a longer global rule still beats a shorter
+    local one (the most-specific-wins rule is preserved across both scopes).
     """
     host = host.lower().rstrip(".")
     if policy["mode"] != state.MODE_RESTRICTED:
@@ -110,13 +120,20 @@ def evaluate(host: str, api_domains: list[str], policy: state.NetworkPolicy) -> 
 
     if any(matches(d) for d in api_domains):
         return ALLOW
+
+    # (domain, verdict, is_local); local rules win ties via the score below.
+    rules = [(a["domain"], ALLOW, True) for a in policy["allow"]]
+    rules += [(d, DENY, True) for d in policy["deny"]]
+    if global_policy is not None:
+        rules += [(a["domain"], ALLOW, False) for a in global_policy["allow"]]
+        rules += [(d, DENY, False) for d in global_policy["deny"]]
+
     verdict = ASK
-    best = -1
-    rules = [(a["domain"], ALLOW) for a in policy["allow"]]
-    rules += [(d, DENY) for d in policy["deny"]]
-    for domain, kind in rules:
-        if matches(domain) and len(domain) > best:
-            best = len(domain)
+    best = (-1, False)  # (match length, is_local)
+    for domain, kind, is_local in rules:
+        score = (len(domain), is_local)
+        if matches(domain) and score > best:
+            best = score
             verdict = kind
     return verdict
 
@@ -154,7 +171,12 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         super().__init__(socket_path, _Handler)
 
     def decide(self, host: str) -> str:
-        return evaluate(host, self.api_domains, state.get_network(self.work_dir))
+        return evaluate(
+            host,
+            self.api_domains,
+            state.get_network(self.work_dir),
+            state.get_global_network(),
+        )
 
     def verify_request(self, request: Any, client_address: Any) -> bool:
         """Accept connections from root (LXD's forkproxy) and our own uid only.

@@ -36,6 +36,13 @@
 # deny list records domains the user has explicitly refused, so the proxy can
 # fail them fast instead of re-asking an attached `aiab monitor` session.
 #
+# A directory's allow/deny lists can be supplemented by a *global* allow/deny
+# list that applies to every directory. It lives in the same file under the
+# reserved key "*" (which can never collide with a resolved, absolute path),
+# carries only allow/deny (its mode is unused), and is managed with
+# `aiab net allow/deny --global`. A directory's own rules take precedence over
+# the global ones (see aiab.netproxy.evaluate).
+#
 # A directory's base Ubuntu release (managed by `aiab base`) lives in a third
 # JSON file with the same keying:
 #   { "<dir real path>": "22.04" }
@@ -213,8 +220,21 @@ class NetworkPolicy(TypedDict):
     deny: list[str]
 
 
-# The whole network state file: project dir -> its policy.
+# The whole network state file: project dir -> its policy. The reserved key
+# below holds the global allow/deny list shared by every directory.
 NetState = dict[str, NetworkPolicy]
+
+# Key for the global policy in the network file. A real key is always a
+# resolved, absolute path, so "*" can never collide with one.
+GLOBAL_KEY = "*"
+
+
+def _policy_key(directory: StrPath | None, global_: bool) -> str:
+    """Resolve the network-file key: the global one, or a directory's path."""
+    if global_:
+        return GLOBAL_KEY
+    assert directory is not None, "directory is required unless global_ is set"
+    return _key(directory)
 
 
 def _normalize_domain(domain: str) -> str:
@@ -237,6 +257,22 @@ def get_network(directory: StrPath) -> NetworkPolicy:
     if policy is None:
         return {"mode": DEFAULT_MODE, "allow": [], "deny": []}
     policy.setdefault("deny", [])  # records from before the deny list existed
+    policy["allow"] = _unexpired(policy["allow"])
+    return policy
+
+
+def get_global_network() -> NetworkPolicy:
+    """Return the global allow/deny list shared by every directory.
+
+    Only the allow and deny lists are meaningful; the mode field is unused
+    (global policy never restricts a directory by itself). Expired allow
+    entries are filtered out, as in get_network.
+    """
+    data: NetState = _load_file(_NET_PATH)
+    policy = data.get(GLOBAL_KEY)
+    if policy is None:
+        return {"mode": DEFAULT_MODE, "allow": [], "deny": []}
+    policy.setdefault("deny", [])
     policy["allow"] = _unexpired(policy["allow"])
     return policy
 
@@ -278,15 +314,23 @@ def set_network_mode(directory: StrPath, mode: str) -> None:
         _save_file_unlocked(_NET_PATH, data)
 
 
-def add_network_allow(directory: StrPath, domain: str, expires: float | None) -> None:
-    """Allow a domain (and its subdomains) for a directory.
+def add_network_allow(
+    directory: StrPath | None,
+    domain: str,
+    expires: float | None,
+    *,
+    global_: bool = False,
+) -> None:
+    """Allow a domain (and its subdomains) for a directory (or globally).
 
     If the domain is already allowed, its expiry is replaced — so re-allowing
     with expires=None makes a previously temporary grant permanent. Any deny
-    record for the same domain is dropped, so allow/deny stay disjoint.
+    record for the same domain is dropped, so allow/deny stay disjoint. With
+    global_=True the rule lands on the global list shared by every directory
+    and ``directory`` is ignored.
     """
     domain = _normalize_domain(domain)
-    key = _key(directory)
+    key = _policy_key(directory, global_)
     with _locked_path(_NET_PATH):
         data: NetState = _load_file(_NET_PATH)
         policy = data.get(key)
@@ -305,10 +349,15 @@ def add_network_allow(directory: StrPath, domain: str, expires: float | None) ->
         _save_file_unlocked(_NET_PATH, data)
 
 
-def remove_network_allow(directory: StrPath, domain: str) -> bool:
-    """Drop an allowed domain. Return True if it was present (and unexpired)."""
+def remove_network_allow(
+    directory: StrPath | None, domain: str, *, global_: bool = False
+) -> bool:
+    """Drop an allowed domain. Return True if it was present (and unexpired).
+
+    With global_=True the global list is edited and ``directory`` is ignored.
+    """
     domain = _normalize_domain(domain)
-    key = _key(directory)
+    key = _policy_key(directory, global_)
     with _locked_path(_NET_PATH):
         data: NetState = _load_file(_NET_PATH)
         policy = data.get(key)
@@ -332,15 +381,18 @@ def remove_network_allow(directory: StrPath, domain: str) -> bool:
     return True
 
 
-def add_network_deny(directory: StrPath, domain: str) -> None:
-    """Deny a domain (and its subdomains) for a directory.
+def add_network_deny(
+    directory: StrPath | None, domain: str, *, global_: bool = False
+) -> None:
+    """Deny a domain (and its subdomains) for a directory (or globally).
 
     A denied domain is refused by the proxy without asking an attached
     `aiab monitor` session. Any allow record for the same domain is
-    dropped, so allow/deny stay disjoint.
+    dropped, so allow/deny stay disjoint. With global_=True the rule lands on
+    the global list shared by every directory and ``directory`` is ignored.
     """
     domain = _normalize_domain(domain)
-    key = _key(directory)
+    key = _policy_key(directory, global_)
     with _locked_path(_NET_PATH):
         data: NetState = _load_file(_NET_PATH)
         policy = data.get(key)
@@ -356,10 +408,15 @@ def add_network_deny(directory: StrPath, domain: str) -> None:
         _save_file_unlocked(_NET_PATH, data)
 
 
-def remove_network_deny(directory: StrPath, domain: str) -> bool:
-    """Drop a denied domain. Return True if it was present."""
+def remove_network_deny(
+    directory: StrPath | None, domain: str, *, global_: bool = False
+) -> bool:
+    """Drop a denied domain. Return True if it was present.
+
+    With global_=True the global list is edited and ``directory`` is ignored.
+    """
     domain = _normalize_domain(domain)
-    key = _key(directory)
+    key = _policy_key(directory, global_)
     with _locked_path(_NET_PATH):
         data: NetState = _load_file(_NET_PATH)
         policy = data.get(key)
@@ -580,6 +637,8 @@ def prune_stale() -> (
     with _locked_path(_NET_PATH):
         net_data = _load_file(_NET_PATH)
         for key in list(net_data):
+            if key == GLOBAL_KEY:
+                continue  # the global policy belongs to no directory
             if not Path(key).is_dir():
                 del net_data[key]
                 pruned_net.append(key)

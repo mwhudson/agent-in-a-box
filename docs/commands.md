@@ -96,8 +96,8 @@ existing containers, so it isn't replayed on the next run.
 aiab net status   [--for DIR]
 aiab net restrict [--for DIR]
 aiab net open     [--for DIR]
-aiab net allow    [--for DIR] [--duration TIME] DOMAIN...
-aiab net deny     [--for DIR] DOMAIN...
+aiab net allow    [--for DIR | --global] [--duration TIME] DOMAIN...
+aiab net deny     [--for DIR | --global] DOMAIN...
 ```
 
 The interactive console for steering the proxy live is a separate command,
@@ -135,6 +135,14 @@ when the agent hits a wall mid-task, run `aiab net allow some.domain` from
 another terminal and it can carry on. `--duration 10m` (also `90s`, `2h`,
 `1d`; bare numbers are minutes) makes a grant that lapses on its own;
 re-allowing a domain replaces its expiry.
+
+`--global` records the rule on a single allow/deny list shared by **every**
+directory, instead of the current one — handy for the domains you find
+yourself allowing in project after project. A directory's own rules take
+precedence over the global ones (on an equal-length match the local rule
+wins; a longer global rule still beats a shorter local one), and `aiab net
+status` prints the global list under its own heading. `--global` can't be
+combined with `--for`.
 
 Mode changes (`restrict`/`open`) only take *full* effect the next time an
 agent starts, because the NIC masking and proxy environment are applied at

@@ -1185,6 +1185,25 @@ _for_dir_option = click.option(
     help="target DIR (default: current directory)",
 )
 
+_global_option = click.option(
+    "--global",
+    "global_",
+    is_flag=True,
+    help="apply to the global list shared by every directory",
+)
+
+
+def _net_target(for_dir: str | None, global_: bool) -> Path | None:
+    """Resolve the target for a net allow/deny: None when global, else a dir.
+
+    Errors if --global is combined with --for, since they pick rival targets.
+    """
+    if global_:
+        if for_dir is not None:
+            raise click.UsageError("--global cannot be combined with --for")
+        return None
+    return _realdir(for_dir)
+
 
 @net.command()
 @_for_dir_option
@@ -1210,6 +1229,13 @@ def status(for_dir: str | None) -> None:
         print("denied domains:")
         for d in policy["deny"]:
             print(f"  {d}")
+    global_policy = state.get_global_network()
+    if global_policy["allow"] or global_policy["deny"]:
+        print("global (every directory):")
+        for a in global_policy["allow"]:
+            print(f"  allow {a['domain']}{_format_expiry(a['expires'])}")
+        for d in global_policy["deny"]:
+            print(f"  deny  {d}")
 
 
 @net.command()
@@ -1247,20 +1273,30 @@ def open_(for_dir: str | None) -> None:
     default=None,
     help="allow temporarily, e.g. 90s, 10m, 2h (bare numbers are minutes)",
 )
+@_global_option
 @click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
-def allow(for_dir: str | None, duration: str | None, domains: tuple[str, ...]) -> None:
+def allow(
+    for_dir: str | None,
+    duration: str | None,
+    global_: bool,
+    domains: tuple[str, ...],
+) -> None:
     """Allow domains (and their subdomains) for a directory.
 
     Takes effect immediately in running restricted sessions. Re-allowing a
     domain replaces its expiry, so a plain `allow` makes a temporary grant
-    permanent.
+    permanent. With --global the domains are allowed in every directory.
     """
-    target = _realdir(for_dir)
+    target = _net_target(for_dir, global_)
     expires = time.time() + _parse_duration(duration) if duration else None
+    scope = " globally" if global_ else ""
     for domain in domains:
-        state.add_network_allow(target, domain, expires)
-        print(f"Allowed {domain}{_format_expiry(expires)}", file=sys.stderr)
-    if state.get_network(target)["mode"] != state.MODE_RESTRICTED:
+        state.add_network_allow(target, domain, expires, global_=global_)
+        print(f"Allowed {domain}{_format_expiry(expires)}{scope}", file=sys.stderr)
+    if (
+        target is not None
+        and state.get_network(target)["mode"] != state.MODE_RESTRICTED
+    ):
         print(
             "Note: network mode here is open; the allowlist only takes "
             "effect after 'aiab net restrict'.",
@@ -1270,19 +1306,22 @@ def allow(for_dir: str | None, duration: str | None, domains: tuple[str, ...]) -
 
 @net.command()
 @_for_dir_option
+@_global_option
 @click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
-def deny(for_dir: str | None, domains: tuple[str, ...]) -> None:
+def deny(for_dir: str | None, global_: bool, domains: tuple[str, ...]) -> None:
     """Deny domains (and their subdomains) for a directory.
 
     Drops the domains from the allowlist and records them on the denylist,
     so requests fail fast instead of prompting a watch session. Takes effect
     immediately in running restricted sessions; 'aiab net allow' reverses
-    it. The agent's own API domains cannot be denied.
+    it. The agent's own API domains cannot be denied. With --global the
+    domains are denied in every directory.
     """
-    target = _realdir(for_dir)
+    target = _net_target(for_dir, global_)
+    scope = " globally" if global_ else ""
     for domain in domains:
-        state.add_network_deny(target, domain)
-        print(f"Denied {domain}", file=sys.stderr)
+        state.add_network_deny(target, domain, global_=global_)
+        print(f"Denied {domain}{scope}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

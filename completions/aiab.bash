@@ -69,7 +69,7 @@ _aiab() {
             _aiab_dirs
             ;;
         net)
-            COMPREPLY=( $(compgen -W "status restrict open allow deny --for --duration" -- "$cur") )
+            COMPREPLY=( $(compgen -W "status restrict open allow deny --for --global --duration" -- "$cur") )
             ;;
         base)
             COMPREPLY=( $(compgen -W "--for default" -- "$cur") )
