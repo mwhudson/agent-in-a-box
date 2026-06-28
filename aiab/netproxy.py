@@ -40,7 +40,7 @@
 # poll the same policy, so one answer releases them all.
 #
 # Run as:
-#   python3 -m aiab.netproxy --socket PATH --dir DIR [--api-domain D]...
+#   python3 -m aiab.netproxy --socket PATH --dir DIR --agent NAME
 #       [--pending-dir DIR]
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ from types import FrameType
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import agents
 from . import state
 
 # Where the proxy listens inside the container (forwarded by the LXD proxy
@@ -154,7 +155,7 @@ def _log(message: str) -> None:
 
 
 class ProxyServer(socketserver.ThreadingUnixStreamServer):
-    """A unix-socket HTTP proxy enforcing one directory's allowlist."""
+    """A unix-socket HTTP proxy enforcing one directory+agent's allowlist."""
 
     daemon_threads = True
 
@@ -162,11 +163,16 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         self,
         socket_path: str,
         work_dir: Path,
-        api_domains: list[str],
+        agent: str,
         pending_dir: Path | None = None,
     ) -> None:
         self.work_dir = work_dir
-        self.api_domains = [d.lower() for d in api_domains]
+        self.agent = agent
+        # The always-allowed defaults: the shared baseline plus this agent's
+        # own API/auth/telemetry domains, sourced from the agent registry
+        # rather than passed in (see aiab.agents).
+        defaults = agents.BASELINE_DOMAINS + agents.get(agent).api_domains
+        self.api_domains = [d.lower() for d in defaults]
         self.pending_dir = pending_dir
         super().__init__(socket_path, _Handler)
 
@@ -174,8 +180,8 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         return evaluate(
             host,
             self.api_domains,
-            state.get_network(self.work_dir),
-            state.get_global_network(),
+            state.network_for_agent(self.work_dir, self.agent),
+            state.global_for_agent(self.agent),
         )
 
     def verify_request(self, request: Any, client_address: Any) -> bool:
@@ -372,10 +378,9 @@ def main(argv: list[str] | None = None) -> None:
         "--dir", required=True, help="project directory whose policy applies"
     )
     parser.add_argument(
-        "--api-domain",
-        action="append",
-        default=[],
-        help="domain that is always allowed (repeatable)",
+        "--agent",
+        required=True,
+        help="agent being served; selects its defaults and per-agent rules",
     )
     parser.add_argument(
         "--pending-dir",
@@ -405,12 +410,12 @@ def main(argv: list[str] | None = None) -> None:
         pending_dir = Path(args.pending_dir)
         pending_dir.mkdir(parents=True, exist_ok=True)
 
-    server = ProxyServer(address, Path(args.dir), args.api_domain, pending_dir)
+    server = ProxyServer(address, Path(args.dir), args.agent, pending_dir)
     if not abstract:
         os.chmod(address, 0o600)
     _log(
-        f"proxy listening on {args.socket} for {args.dir} "
-        f"(api domains: {', '.join(args.api_domain) or 'none'})"
+        f"proxy listening on {args.socket} for {args.dir} ({args.agent}; "
+        f"api domains: {', '.join(server.api_domains) or 'none'})"
     )
     try:
         server.serve_forever()

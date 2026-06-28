@@ -155,6 +155,13 @@ class Agent:
             self.upgrade_cmds = self.install_cmds
 
 
+# Domains every agent needs regardless of which one runs — the Ubuntu apt
+# mirrors used during container setup. Always allowed in restricted mode, like
+# each agent's api_domains; they are the all-agents default of the net rules
+# (see aiab.netproxy / aiab.state), not a hardcoded special case in the proxy.
+BASELINE_DOMAINS: list[str] = ["archive.ubuntu.com", "security.ubuntu.com"]
+
+
 # The registry. Keys are agent names.
 AGENTS: dict[str, Agent] = {
     "claude": Agent(

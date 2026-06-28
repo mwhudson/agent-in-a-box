@@ -240,6 +240,77 @@ def test_global_default_empty(tmp_path):
     assert glob["deny"] == []
 
 
+# -- per-agent axis --
+
+
+def test_agent_allow_isolated_to_agent(tmp_path):
+    state.add_network_allow(tmp_path, "mcp.example", expires=None, agent="opencode")
+    # The all-agents view and other agents don't see the rule...
+    assert state.get_network(tmp_path)["allow"] == []
+    assert state.network_for_agent(tmp_path, "claude")["allow"] == []
+    # ...but the named agent's flattened view does.
+    flat = state.network_for_agent(tmp_path, "opencode")
+    assert any(a["domain"] == "mcp.example" for a in flat["allow"])
+
+
+def test_agent_flatten_merges_all_agents_and_agent(tmp_path):
+    state.add_network_allow(tmp_path, "shared.example", expires=None)
+    state.add_network_allow(tmp_path, "mcp.example", expires=None, agent="opencode")
+    flat = state.network_for_agent(tmp_path, "opencode")
+    domains = {a["domain"] for a in flat["allow"]}
+    assert domains == {"shared.example", "mcp.example"}
+
+
+def test_agent_deny_isolated(tmp_path):
+    state.add_network_deny(tmp_path, "ads.example", agent="opencode")
+    assert state.get_network(tmp_path)["deny"] == []
+    assert state.network_for_agent(tmp_path, "opencode")["deny"] == ["ads.example"]
+    assert state.network_for_agent(tmp_path, "claude")["deny"] == []
+
+
+def test_global_agent_rule(tmp_path):
+    state.add_network_allow(
+        None, "mcp.example", expires=None, global_=True, agent="opencode"
+    )
+    assert state.global_for_agent("opencode")["allow"][0]["domain"] == "mcp.example"
+    assert state.global_for_agent("claude")["allow"] == []
+
+
+def test_agent_allow_deny_disjoint(tmp_path):
+    state.add_network_allow(tmp_path, "x.example", expires=None, agent="opencode")
+    state.add_network_deny(tmp_path, "x.example", agent="opencode")
+    flat = state.network_for_agent(tmp_path, "opencode")
+    assert flat["deny"] == ["x.example"]
+    assert flat["allow"] == []
+
+
+def test_remove_agent_allow_empties_record(tmp_path):
+    state.add_network_allow(tmp_path, "x.example", expires=None, agent="opencode")
+    assert state.remove_network_allow(tmp_path, "x.example", agent="opencode") is True
+    # The now-empty agent overlay is compacted away, dropping the whole record.
+    assert str(tmp_path) not in state._load_file(state._NET_PATH)
+
+
+def test_agent_rule_keeps_all_agents_rule_on_compact(tmp_path):
+    state.add_network_allow(tmp_path, "keep.example", expires=None)
+    state.add_network_allow(tmp_path, "tmp.example", expires=None, agent="opencode")
+    state.remove_network_allow(tmp_path, "tmp.example", agent="opencode")
+    policy = state.get_network(tmp_path)
+    assert {a["domain"] for a in policy["allow"]} == {"keep.example"}
+    assert "agents" not in policy or policy["agents"] == {}
+
+
+def test_old_record_without_agents_key_still_loads(tmp_path):
+    # A policy written before the agent axis existed has no "agents" key.
+    state._save_file(
+        state._NET_PATH,
+        {str(tmp_path.resolve()): {"mode": "restricted", "allow": [], "deny": ["x"]}},
+    )
+    policy = state.get_network(tmp_path)
+    assert policy["deny"] == ["x"]
+    assert state.network_for_agent(tmp_path, "opencode")["deny"] == ["x"]
+
+
 def test_expired_allow_filtered_from_get(tmp_path):
     state.set_network_mode(tmp_path, state.MODE_RESTRICTED)
     past = time.time() - 1

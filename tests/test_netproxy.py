@@ -104,3 +104,39 @@ def test_longer_global_rule_beats_shorter_local_rule():
 def test_global_ignored_in_open_mode():
     glob = _policy(deny=["github.com"])
     assert evaluate("github.com", [], _policy(mode=state.MODE_OPEN), glob) == ALLOW
+
+
+# -- ProxyServer wiring (agent axis) --
+
+from aiab import agents  # noqa: E402
+from aiab.netproxy import ProxyServer  # noqa: E402
+
+
+def test_proxy_derives_api_domains_from_agent(tmp_path):
+    srv = ProxyServer("\0aiab-test-derive", tmp_path, "claude")
+    try:
+        expected = {
+            d.lower()
+            for d in agents.BASELINE_DOMAINS + agents.get("claude").api_domains
+        }
+        assert set(srv.api_domains) == expected
+    finally:
+        srv.server_close()
+
+
+def test_proxy_decide_honors_per_agent_rules(tmp_path, monkeypatch):
+    monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
+    work = tmp_path / "proj"
+    work.mkdir()
+    state.set_network_mode(work, state.MODE_RESTRICTED)
+    state.add_network_allow(work, "mcp.example", expires=None, agent="opencode")
+
+    opencode = ProxyServer("\0aiab-test-oc", work, "opencode")
+    claude = ProxyServer("\0aiab-test-cl", work, "claude")
+    try:
+        # The rule applies to opencode only; claude has to ask.
+        assert opencode.decide("mcp.example") == ALLOW
+        assert claude.decide("mcp.example") == ASK
+    finally:
+        opencode.server_close()
+        claude.server_close()

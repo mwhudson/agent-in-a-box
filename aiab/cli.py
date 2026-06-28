@@ -86,11 +86,6 @@ _STOPPER_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "stopper"
 # namespace.
 _PROXY_DIR: Path = netproxy.PROXY_DIR
 
-# Domains every restricted container may always reach, whatever the agent:
-# the Ubuntu archives, so apt works inside the container (apt's traffic is
-# proxy-aware plain HTTP, which the proxy forwards).
-BASELINE_DOMAINS: list[str] = ["archive.ubuntu.com", "security.ubuntu.com"]
-
 
 def _proxy_socket_name(container_name: str) -> str:
     """The abstract socket address for a container's proxy, with leading @.
@@ -154,9 +149,7 @@ def _proxy_socket_live(socket_name: str) -> bool:
     return True
 
 
-def _ensure_proxy(
-    session: lxd.Container, work_dir: Path, api_domains: list[str]
-) -> str:
+def _ensure_proxy(session: lxd.Container, work_dir: Path, agent: str) -> str:
     """Start the filtering proxy for a session container (or reuse a live one).
 
     Returns the abstract socket address (with leading @) the proxy listens
@@ -175,8 +168,9 @@ def _ensure_proxy(
         "aiab.netproxy",
         f"--socket={sock_name}",
         f"--dir={work_dir}",
+        f"--agent={agent}",
         f"--pending-dir={netwatch.pending_dir(work_dir)}",
-    ] + [f"--api-domain={d}" for d in api_domains + BASELINE_DOMAINS]
+    ]
     with log.open("ab") as log_fd:
         proc = subprocess.Popen(
             argv,
@@ -701,7 +695,7 @@ def _apply_session_mounts(
 
 
 def _apply_network_policy(
-    conn: lxd.Lxd, session: lxd.Container, work_dir: Path, cfg: agents.Agent
+    conn: lxd.Lxd, session: lxd.Container, work_dir: Path, agent: str
 ) -> dict[str, str]:
     """Apply the recorded network policy and return proxy env vars."""
     policy = state.get_network(work_dir)
@@ -712,7 +706,7 @@ def _apply_network_policy(
         return {}
 
     session.mask_profile_devices(nic_names)
-    sock_name = _ensure_proxy(session, work_dir, cfg.api_domains)
+    sock_name = _ensure_proxy(session, work_dir, agent)
     session.add_proxy_device(
         "netproxy",
         listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
@@ -918,7 +912,7 @@ def run(
         container_cwd, applied_mounts = _apply_session_mounts(
             session, cfg, work_dir, add_mount, add_mount_rw
         )
-        proxy_env = _apply_network_policy(conn, session, work_dir, cfg)
+        proxy_env = _apply_network_policy(conn, session, work_dir, agent)
 
         # If --worktree was requested, create one inside the repo and use it
         # as the agent's working directory instead of the repo root.
@@ -1160,6 +1154,24 @@ def _format_expiry(expires: float | None) -> str:
     return f" (expires in {remaining / 3600:.1f}h)"
 
 
+def _has_user_rules(policy: state.NetworkPolicy) -> bool:
+    return bool(policy["allow"] or policy["deny"] or policy.get("agents"))
+
+
+def _print_rules(policy: state.NetworkPolicy, indent: str = "  ") -> None:
+    """Print a policy's allow/deny rules, all-agents first then per-agent."""
+    for a in policy["allow"]:
+        print(f"{indent}allow {a['domain']}{_format_expiry(a['expires'])}")
+    for d in policy["deny"]:
+        print(f"{indent}deny  {d}")
+    for name, bucket in sorted(policy.get("agents", {}).items()):
+        for a in bucket["allow"]:
+            exp = _format_expiry(a["expires"])
+            print(f"{indent}allow {a['domain']}{exp} [{name}]")
+        for d in bucket["deny"]:
+            print(f"{indent}deny  {d} [{name}]")
+
+
 # A plain Group: the net commands only edit recorded state, so they skip the
 # _Command machinery (migration check + LXD connection) the other verbs need.
 @main.group(cls=click.Group)
@@ -1192,6 +1204,14 @@ _global_option = click.option(
     help="apply to the global list shared by every directory",
 )
 
+_agent_option = click.option(
+    "--agent",
+    "agent",
+    type=AGENT_CHOICE,
+    default=None,
+    help="scope the rule to one agent (default: all agents)",
+)
+
 
 def _net_target(for_dir: str | None, global_: bool) -> Path | None:
     """Resolve the target for a net allow/deny: None when global, else a dir.
@@ -1205,6 +1225,16 @@ def _net_target(for_dir: str | None, global_: bool) -> Path | None:
     return _realdir(for_dir)
 
 
+def _scope_label(global_: bool, agent: str | None) -> str:
+    """A trailing ' for X globally'-style suffix describing a rule's scope."""
+    parts = []
+    if agent:
+        parts.append(f"for {agent}")
+    if global_:
+        parts.append("globally")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 @net.command()
 @_for_dir_option
 def status(for_dir: str | None) -> None:
@@ -1214,28 +1244,20 @@ def status(for_dir: str | None) -> None:
     print(f"{target}: {policy['mode']}")
     if policy["mode"] != state.MODE_RESTRICTED:
         return
-    print("always allowed:")
-    print(f"  baseline: {', '.join(BASELINE_DOMAINS)}")
+    print("always allowed (built-in defaults):")
+    print(f"  baseline (all agents): {', '.join(agents.BASELINE_DOMAINS)}")
     for name in agents.AGENT_NAMES:
         domains = agents.get(name).api_domains
         print(f"  {name}: {', '.join(domains) if domains else '(none)'}")
-    if policy["allow"]:
-        print("allowed domains:")
-        for a in policy["allow"]:
-            print(f"  {a['domain']}{_format_expiry(a['expires'])}")
+    if _has_user_rules(policy):
+        print("rules:")
+        _print_rules(policy)
     else:
-        print("allowed domains: (none)")
-    if policy["deny"]:
-        print("denied domains:")
-        for d in policy["deny"]:
-            print(f"  {d}")
+        print("rules: (none)")
     global_policy = state.get_global_network()
-    if global_policy["allow"] or global_policy["deny"]:
-        print("global (every directory):")
-        for a in global_policy["allow"]:
-            print(f"  allow {a['domain']}{_format_expiry(a['expires'])}")
-        for d in global_policy["deny"]:
-            print(f"  deny  {d}")
+    if _has_user_rules(global_policy):
+        print("global rules (every directory):")
+        _print_rules(global_policy)
 
 
 @net.command()
@@ -1274,24 +1296,29 @@ def open_(for_dir: str | None) -> None:
     help="allow temporarily, e.g. 90s, 10m, 2h (bare numbers are minutes)",
 )
 @_global_option
+@_agent_option
 @click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
 def allow(
     for_dir: str | None,
     duration: str | None,
     global_: bool,
+    agent: str | None,
     domains: tuple[str, ...],
 ) -> None:
     """Allow domains (and their subdomains) for a directory.
 
     Takes effect immediately in running restricted sessions. Re-allowing a
     domain replaces its expiry, so a plain `allow` makes a temporary grant
-    permanent. With --global the domains are allowed in every directory.
+    permanent. --global allows the domains in every directory; --agent scopes
+    them to one agent (the two axes combine).
     """
     target = _net_target(for_dir, global_)
     expires = time.time() + _parse_duration(duration) if duration else None
-    scope = " globally" if global_ else ""
+    scope = _scope_label(global_, agent)
     for domain in domains:
-        state.add_network_allow(target, domain, expires, global_=global_)
+        state.add_network_allow(
+            target, domain, expires, global_=global_, agent=agent
+        )
         print(f"Allowed {domain}{_format_expiry(expires)}{scope}", file=sys.stderr)
     if (
         target is not None
@@ -1307,20 +1334,26 @@ def allow(
 @net.command()
 @_for_dir_option
 @_global_option
+@_agent_option
 @click.argument("domains", nargs=-1, required=True, metavar="DOMAIN...")
-def deny(for_dir: str | None, global_: bool, domains: tuple[str, ...]) -> None:
+def deny(
+    for_dir: str | None,
+    global_: bool,
+    agent: str | None,
+    domains: tuple[str, ...],
+) -> None:
     """Deny domains (and their subdomains) for a directory.
 
     Drops the domains from the allowlist and records them on the denylist,
     so requests fail fast instead of prompting a watch session. Takes effect
     immediately in running restricted sessions; 'aiab net allow' reverses
-    it. The agent's own API domains cannot be denied. With --global the
-    domains are denied in every directory.
+    it. The agent's own API domains cannot be denied. --global denies in every
+    directory; --agent scopes to one agent (the two axes combine).
     """
     target = _net_target(for_dir, global_)
-    scope = " globally" if global_ else ""
+    scope = _scope_label(global_, agent)
     for domain in domains:
-        state.add_network_deny(target, domain, global_=global_)
+        state.add_network_deny(target, domain, global_=global_, agent=agent)
         print(f"Denied {domain}{scope}", file=sys.stderr)
 
 

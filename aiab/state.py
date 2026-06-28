@@ -30,7 +30,11 @@
 # file with the same keying:
 #   { "<dir real path>": { "mode": "open" | "restricted",
 #                          "allow": [ {"domain": str, "expires": float|null} ],
-#                          "deny": [ str, ... ] } }
+#                          "deny": [ str, ... ],
+#                          "agents": { "<agent>": {"allow": [...],
+#                                                  "deny": [...]} } } }
+# The "allow"/"deny" lists apply to every agent; the optional "agents" overlay
+# adds rules for one agent only (orthogonal to directory — see below).
 # The filtering proxy (aiab.netproxy) re-reads it on every request, so
 # `aiab net allow`/`deny` take effect immediately in running sessions. The
 # deny list records domains the user has explicitly refused, so the proxy can
@@ -77,6 +81,7 @@ from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from typing import Iterator
+from typing import NotRequired
 from typing import TypedDict
 
 from . import StrPath, release
@@ -212,12 +217,28 @@ class Allow(TypedDict):
     expires: float | None
 
 
+class AgentRules(TypedDict):
+    """One agent's scoped allow/deny lists within a policy."""
+
+    allow: list[Allow]
+    deny: list[str]
+
+
 class NetworkPolicy(TypedDict):
-    """A directory's network policy: mode, allowed domains, denied domains."""
+    """A directory's network policy.
+
+    ``mode`` plus the all-agents ``allow``/``deny`` lists, and an optional
+    ``agents`` overlay keyed by agent name. The agent the proxy is serving
+    gets its overlay's rules on top of the all-agents ones (see
+    network_for_agent); other agents never see them. The agent axis is
+    orthogonal to the directory axis — each has an "all" default: the
+    all-agents lists here, and the global policy (GLOBAL_KEY) across dirs.
+    """
 
     mode: str
     allow: list[Allow]
     deny: list[str]
+    agents: NotRequired[dict[str, AgentRules]]
 
 
 # The whole network state file: project dir -> its policy. The reserved key
@@ -246,72 +267,117 @@ def _unexpired(allows: list[Allow]) -> list[Allow]:
     return [a for a in allows if a["expires"] is None or a["expires"] > now]
 
 
+def _blank_policy() -> NetworkPolicy:
+    return {"mode": DEFAULT_MODE, "allow": [], "deny": [], "agents": {}}
+
+
+def _normalized(raw: NetworkPolicy | None) -> NetworkPolicy:
+    """Return a policy with every field present and expired allows dropped.
+
+    Tolerates records written by older versions (no ``deny``, no ``agents``).
+    """
+    if raw is None:
+        return _blank_policy()
+    raw.setdefault("deny", [])
+    raw.setdefault("agents", {})
+    raw["allow"] = _unexpired(raw["allow"])
+    for bucket in raw["agents"].values():
+        bucket.setdefault("deny", [])
+        bucket["allow"] = _unexpired(bucket.get("allow", []))
+    return raw
+
+
+def _scope(
+    policy: NetworkPolicy, agent: str | None
+) -> AgentRules | NetworkPolicy:
+    """Return the mapping whose ``allow``/``deny`` an agent scope writes to.
+
+    agent=None targets the all-agents lists (the policy itself); a name targets
+    that agent's overlay bucket, created empty if missing.
+    """
+    if agent is None:
+        return policy
+    return policy.setdefault("agents", {}).setdefault(
+        agent, {"allow": [], "deny": []}
+    )
+
+
+def _is_default(policy: NetworkPolicy) -> bool:
+    return policy["mode"] == DEFAULT_MODE and not (
+        policy["allow"] or policy["deny"] or policy.get("agents")
+    )
+
+
+def _compact(policy: NetworkPolicy) -> None:
+    """Drop empty agent overlays (and the ``agents`` key when none remain) so
+    the file stays tidy and round-trips to the old shape when unused."""
+    overlays = policy.get("agents", {})
+    for name in list(overlays):
+        if not overlays[name]["allow"] and not overlays[name]["deny"]:
+            del overlays[name]
+    if not overlays:
+        policy.pop("agents", None)
+
+
+@contextmanager
+def _open_policy(key: str) -> Iterator[NetworkPolicy]:
+    """Lock the network file, yield the normalized policy for ``key``, then
+    save it back compacted — or drop the record if it's back to the default."""
+    with _locked_path(_NET_PATH):
+        data: NetState = _load_file(_NET_PATH)
+        policy = _normalized(data.get(key))
+        yield policy
+        _compact(policy)
+        if _is_default(policy):
+            data.pop(key, None)  # back to the default; keep the file tidy
+        else:
+            data[key] = policy
+        _save_file_unlocked(_NET_PATH, data)
+
+
 def get_network(directory: StrPath) -> NetworkPolicy:
     """Return the network policy for a directory (default: DEFAULT_MODE, empty).
 
     Expired allow entries are filtered from the returned policy; they are only
     actually pruned from the file by the mutating functions below.
     """
-    data: NetState = _load_file(_NET_PATH)
-    policy = data.get(_key(directory))
-    if policy is None:
-        return {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-    policy.setdefault("deny", [])  # records from before the deny list existed
-    policy["allow"] = _unexpired(policy["allow"])
-    return policy
+    return _normalized(_load_file(_NET_PATH).get(_key(directory)))
 
 
 def get_global_network() -> NetworkPolicy:
-    """Return the global allow/deny list shared by every directory.
+    """Return the global policy shared by every directory.
 
-    Only the allow and deny lists are meaningful; the mode field is unused
-    (global policy never restricts a directory by itself). Expired allow
-    entries are filtered out, as in get_network.
+    Only the allow/deny lists (all-agents and per-agent) are meaningful; the
+    mode field is unused (global policy never restricts a directory by itself).
     """
-    data: NetState = _load_file(_NET_PATH)
-    policy = data.get(GLOBAL_KEY)
-    if policy is None:
-        return {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-    policy.setdefault("deny", [])
-    policy["allow"] = _unexpired(policy["allow"])
-    return policy
+    return _normalized(_load_file(_NET_PATH).get(GLOBAL_KEY))
 
 
-def _save_network_policy(key: str, policy: NetworkPolicy) -> None:
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy["allow"] = _unexpired(policy["allow"])
-        if (
-            policy["mode"] == DEFAULT_MODE
-            and not policy["allow"]
-            and not policy["deny"]
-        ):
-            data.pop(key, None)  # back to the default; keep the file tidy
-        else:
-            data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
+def _flatten(policy: NetworkPolicy, agent: str) -> NetworkPolicy:
+    """Collapse a policy for one agent: the all-agents rules plus that agent's
+    overlay, carrying the mode through. Used to feed the proxy."""
+    bucket = policy.get("agents", {}).get(agent, {"allow": [], "deny": []})
+    return {
+        "mode": policy["mode"],
+        "allow": policy["allow"] + bucket["allow"],
+        "deny": policy["deny"] + bucket["deny"],
+    }
+
+
+def network_for_agent(directory: StrPath, agent: str) -> NetworkPolicy:
+    """A directory's policy flattened for one agent (see _flatten)."""
+    return _flatten(get_network(directory), agent)
+
+
+def global_for_agent(agent: str) -> NetworkPolicy:
+    """The global policy flattened for one agent (see _flatten)."""
+    return _flatten(get_global_network(), agent)
 
 
 def set_network_mode(directory: StrPath, mode: str) -> None:
     """Set a directory's network mode (MODE_OPEN or MODE_RESTRICTED)."""
-    key = _key(directory)
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy = data.get(key)
-        if policy is None:
-            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-        policy.setdefault("deny", [])
-        policy["allow"] = _unexpired(policy["allow"])
+    with _open_policy(_key(directory)) as policy:
         policy["mode"] = mode
-        if (
-            policy["mode"] == DEFAULT_MODE
-            and not policy["allow"]
-            and not policy["deny"]
-        ):
-            data.pop(key, None)  # back to the default; keep the file tidy
-        else:
-            data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
 
 
 def add_network_allow(
@@ -320,124 +386,83 @@ def add_network_allow(
     expires: float | None,
     *,
     global_: bool = False,
+    agent: str | None = None,
 ) -> None:
-    """Allow a domain (and its subdomains) for a directory (or globally).
+    """Allow a domain (and its subdomains) in one scope.
 
-    If the domain is already allowed, its expiry is replaced — so re-allowing
-    with expires=None makes a previously temporary grant permanent. Any deny
-    record for the same domain is dropped, so allow/deny stay disjoint. With
-    global_=True the rule lands on the global list shared by every directory
-    and ``directory`` is ignored.
+    If the domain is already allowed in the same scope its expiry is replaced
+    — so re-allowing with expires=None makes a temporary grant permanent. Any
+    deny record for the same domain in that scope is dropped, so allow/deny
+    stay disjoint. global_=True targets the shared global list (``directory``
+    ignored); ``agent`` restricts the rule to one agent (default: all agents).
     """
     domain = _normalize_domain(domain)
-    key = _policy_key(directory, global_)
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy = data.get(key)
-        if policy is None:
-            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-        policy.setdefault("deny", [])
-        policy["allow"] = _unexpired(policy["allow"])
-        policy["deny"] = [d for d in policy["deny"] if d != domain]
-        for a in policy["allow"]:
+    with _open_policy(_policy_key(directory, global_)) as policy:
+        scope = _scope(policy, agent)
+        scope["deny"] = [d for d in scope["deny"] if d != domain]
+        for a in scope["allow"]:
             if a["domain"] == domain:
                 a["expires"] = expires
                 break
         else:
-            policy["allow"].append({"domain": domain, "expires": expires})
-        data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
+            scope["allow"].append({"domain": domain, "expires": expires})
 
 
 def remove_network_allow(
-    directory: StrPath | None, domain: str, *, global_: bool = False
+    directory: StrPath | None,
+    domain: str,
+    *,
+    global_: bool = False,
+    agent: str | None = None,
 ) -> bool:
-    """Drop an allowed domain. Return True if it was present (and unexpired).
-
-    With global_=True the global list is edited and ``directory`` is ignored.
-    """
+    """Drop an allowed domain from a scope. Return True if it was present."""
     domain = _normalize_domain(domain)
-    key = _policy_key(directory, global_)
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy = data.get(key)
-        if policy is None:
-            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-        policy.setdefault("deny", [])
-        policy["allow"] = _unexpired(policy["allow"])
-        kept = [a for a in policy["allow"] if a["domain"] != domain]
-        if len(kept) == len(policy["allow"]):
-            return False
-        policy["allow"] = kept
-        if (
-            policy["mode"] == DEFAULT_MODE
-            and not policy["allow"]
-            and not policy["deny"]
-        ):
-            data.pop(key, None)  # back to the default; keep the file tidy
-        else:
-            data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
-    return True
+    with _open_policy(_policy_key(directory, global_)) as policy:
+        scope = _scope(policy, agent)
+        kept = [a for a in scope["allow"] if a["domain"] != domain]
+        present = len(kept) != len(scope["allow"])
+        scope["allow"] = kept
+    return present
 
 
 def add_network_deny(
-    directory: StrPath | None, domain: str, *, global_: bool = False
+    directory: StrPath | None,
+    domain: str,
+    *,
+    global_: bool = False,
+    agent: str | None = None,
 ) -> None:
-    """Deny a domain (and its subdomains) for a directory (or globally).
+    """Deny a domain (and its subdomains) in one scope.
 
     A denied domain is refused by the proxy without asking an attached
-    `aiab monitor` session. Any allow record for the same domain is
-    dropped, so allow/deny stay disjoint. With global_=True the rule lands on
-    the global list shared by every directory and ``directory`` is ignored.
+    `aiab monitor` session. Any allow record for the same domain in that scope
+    is dropped, so allow/deny stay disjoint. global_=True targets the shared
+    global list (``directory`` ignored); ``agent`` restricts the rule to one
+    agent (default: all agents).
     """
     domain = _normalize_domain(domain)
-    key = _policy_key(directory, global_)
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy = data.get(key)
-        if policy is None:
-            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-        policy.setdefault("deny", [])
-        policy["allow"] = [
-            a for a in _unexpired(policy["allow"]) if a["domain"] != domain
-        ]
-        if domain not in policy["deny"]:
-            policy["deny"].append(domain)
-        data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
+    with _open_policy(_policy_key(directory, global_)) as policy:
+        scope = _scope(policy, agent)
+        scope["allow"] = [a for a in scope["allow"] if a["domain"] != domain]
+        if domain not in scope["deny"]:
+            scope["deny"].append(domain)
 
 
 def remove_network_deny(
-    directory: StrPath | None, domain: str, *, global_: bool = False
+    directory: StrPath | None,
+    domain: str,
+    *,
+    global_: bool = False,
+    agent: str | None = None,
 ) -> bool:
-    """Drop a denied domain. Return True if it was present.
-
-    With global_=True the global list is edited and ``directory`` is ignored.
-    """
+    """Drop a denied domain from a scope. Return True if it was present."""
     domain = _normalize_domain(domain)
-    key = _policy_key(directory, global_)
-    with _locked_path(_NET_PATH):
-        data: NetState = _load_file(_NET_PATH)
-        policy = data.get(key)
-        if policy is None:
-            policy = {"mode": DEFAULT_MODE, "allow": [], "deny": []}
-        policy.setdefault("deny", [])
-        policy["allow"] = _unexpired(policy["allow"])
-        kept = [d for d in policy["deny"] if d != domain]
-        if len(kept) == len(policy["deny"]):
-            return False
-        policy["deny"] = kept
-        if (
-            policy["mode"] == DEFAULT_MODE
-            and not policy["allow"]
-            and not policy["deny"]
-        ):
-            data.pop(key, None)  # back to the default; keep the file tidy
-        else:
-            data[key] = policy
-        _save_file_unlocked(_NET_PATH, data)
-    return True
+    with _open_policy(_policy_key(directory, global_)) as policy:
+        scope = _scope(policy, agent)
+        kept = [d for d in scope["deny"] if d != domain]
+        present = len(kept) != len(scope["deny"])
+        scope["deny"] = kept
+    return present
 
 
 # -- base release --

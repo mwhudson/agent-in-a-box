@@ -96,8 +96,8 @@ existing containers, so it isn't replayed on the next run.
 aiab net status   [--for DIR]
 aiab net restrict [--for DIR]
 aiab net open     [--for DIR]
-aiab net allow    [--for DIR | --global] [--duration TIME] DOMAIN...
-aiab net deny     [--for DIR | --global] DOMAIN...
+aiab net allow    [--for DIR | --global] [--agent AGENT] [--duration TIME] DOMAIN...
+aiab net deny     [--for DIR | --global] [--agent AGENT] DOMAIN...
 ```
 
 The interactive console for steering the proxy live is a separate command,
@@ -143,6 +143,22 @@ precedence over the global ones (on an equal-length match the local rule
 wins; a longer global rule still beats a shorter local one), and `aiab net
 status` prints the global list under its own heading. `--global` can't be
 combined with `--for`.
+
+`--agent AGENT` scopes a rule to one agent — handy when only one agent needs a
+domain, e.g. an MCP server you've installed for `opencode`:
+
+```
+aiab net allow --global --agent opencode mcp.example.com
+```
+
+The agent axis is orthogonal to the directory axis, so they combine freely:
+`--agent` on its own scopes to the current directory for that agent, add
+`--global` to cover every directory, or `--for DIR` for another one. An agent
+sees the all-agents rules plus its own; other agents never see agent-scoped
+rules. The built-in defaults are themselves the all-agents/per-agent layer of
+this system: the apt baseline applies to every agent, and each agent's own
+API/auth/telemetry domains (shown by `aiab net status`) are its per-agent
+defaults — they are always allowed and can't be denied.
 
 Mode changes (`restrict`/`open`) only take *full* effect the next time an
 agent starts, because the NIC masking and proxy environment are applied at

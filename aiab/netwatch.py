@@ -167,21 +167,26 @@ def log_tails(work_dir: Path) -> list[_LogTail]:
     ]
 
 
+def _print_rules(policy: state.NetworkPolicy, suffix: str = "") -> None:
+    """Print a policy's allow/deny lists (all-agents then per-agent) as
+    one-line summaries, each tagged with ``suffix`` (e.g. ' (global)')."""
+    if policy["allow"]:
+        print(f"  allowed{suffix}: " + ", ".join(a["domain"] for a in policy["allow"]))
+    if policy["deny"]:
+        print(f"  denied{suffix}:  " + ", ".join(policy["deny"]))
+    for name, bucket in sorted(policy.get("agents", {}).items()):
+        tag = f"{suffix} [{name}]"
+        if bucket["allow"]:
+            print(f"  allowed{tag}: " + ", ".join(a["domain"] for a in bucket["allow"]))
+        if bucket["deny"]:
+            print(f"  denied{tag}:  " + ", ".join(bucket["deny"]))
+
+
 def _print_policy(work_dir: Path) -> None:
     policy = state.get_network(work_dir)
     print(f"Watching network access for {work_dir} (mode: {policy['mode']})")
-    if policy["allow"]:
-        print("  allowed: " + ", ".join(a["domain"] for a in policy["allow"]))
-    if policy["deny"]:
-        print("  denied:  " + ", ".join(policy["deny"]))
-    global_policy = state.get_global_network()
-    if global_policy["allow"]:
-        print(
-            "  allowed (global): "
-            + ", ".join(a["domain"] for a in global_policy["allow"])
-        )
-    if global_policy["deny"]:
-        print("  denied (global):  " + ", ".join(global_policy["deny"]))
+    _print_rules(policy)
+    _print_rules(state.get_global_network(), suffix=" (global)")
 
 
 def _read_key(timeout: float) -> str | None:

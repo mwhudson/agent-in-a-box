@@ -62,6 +62,7 @@ _aiab() {
             _arguments \
                 '--for[target DIR]:directory:_files -/' \
                 '--global[apply to the global list shared by every directory]' \
+                "--agent[scope the rule to one agent]:agent:(${agents})" \
                 '--duration[allow temporarily, e.g. 10m, 2h]:duration:' \
                 '1:net command:(status restrict open allow deny)' \
                 '*:domain:'
