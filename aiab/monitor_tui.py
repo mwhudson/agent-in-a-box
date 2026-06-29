@@ -919,9 +919,7 @@ class MonitorApp(App[None]):
                 if cpu < 1:
                     raise ValueError
             except ValueError:
-                self._write_log(
-                    f"invalid cpu: {value!r} — must be a positive integer"
-                )
+                self._write_log(f"invalid cpu: {value!r} — must be a positive integer")
                 return
             limits["cpu"] = cpu
         elif field == "memory":

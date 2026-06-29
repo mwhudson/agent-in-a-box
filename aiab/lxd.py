@@ -38,7 +38,6 @@ import yaml
 
 from . import StrPath
 
-
 # Projects we've already created or confirmed exist this process. The
 # lazy-create path in run() probes/creates each project at most once.
 _ensured_projects: set[str] = set()

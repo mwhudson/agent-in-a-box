@@ -861,11 +861,7 @@ def run(
     # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
-    use_tmux = (
-        not no_tmux
-        and sys.stdin.isatty()
-        and shutil.which("tmux") is not None
-    )
+    use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
     if use_tmux and "TMUX" not in os.environ:
         _reexec_under_tmux()  # does not return
 
@@ -1316,9 +1312,7 @@ def allow(
     expires = time.time() + _parse_duration(duration) if duration else None
     scope = _scope_label(global_, agent)
     for domain in domains:
-        state.add_network_allow(
-            target, domain, expires, global_=global_, agent=agent
-        )
+        state.add_network_allow(target, domain, expires, global_=global_, agent=agent)
         print(f"Allowed {domain}{_format_expiry(expires)}{scope}", file=sys.stderr)
     if (
         target is not None
@@ -1412,9 +1406,7 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
 # limits
 # --------------------------------------------------------------------------
 
-_SIZE_RE = re.compile(
-    r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE
-)
+_SIZE_RE = re.compile(r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE)
 
 
 def _validate_size(value: str, label: str) -> str:
@@ -1427,12 +1419,13 @@ def _validate_size(value: str, label: str) -> str:
 
 @main.command(cls=click.Command)
 @_for_dir_option
-@click.option("--cpu", "cpu", metavar="N", default=None, type=int,
-              help="number of vCPUs")
-@click.option("--memory", "memory", metavar="SIZE", default=None,
-              help="memory limit, e.g. 8GiB")
-@click.option("--reset", "reset", is_flag=True,
-              help="reset all limits to defaults")
+@click.option(
+    "--cpu", "cpu", metavar="N", default=None, type=int, help="number of vCPUs"
+)
+@click.option(
+    "--memory", "memory", metavar="SIZE", default=None, help="memory limit, e.g. 8GiB"
+)
+@click.option("--reset", "reset", is_flag=True, help="reset all limits to defaults")
 def limits(
     for_dir: str | None,
     cpu: int | None,

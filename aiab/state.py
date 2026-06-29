@@ -287,9 +287,7 @@ def _normalized(raw: NetworkPolicy | None) -> NetworkPolicy:
     return raw
 
 
-def _scope(
-    policy: NetworkPolicy, agent: str | None
-) -> AgentRules | NetworkPolicy:
+def _scope(policy: NetworkPolicy, agent: str | None) -> AgentRules | NetworkPolicy:
     """Return the mapping whose ``allow``/``deny`` an agent scope writes to.
 
     agent=None targets the all-agents lists (the policy itself); a name targets
@@ -297,9 +295,7 @@ def _scope(
     """
     if agent is None:
         return policy
-    return policy.setdefault("agents", {}).setdefault(
-        agent, {"allow": [], "deny": []}
-    )
+    return policy.setdefault("agents", {}).setdefault(agent, {"allow": [], "deny": []})
 
 
 def _is_default(policy: NetworkPolicy) -> bool:
