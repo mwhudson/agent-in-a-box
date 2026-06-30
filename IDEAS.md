@@ -22,6 +22,30 @@
   those worktrees, diff them, or pull the result out into a branch. Something
   like `aiab worktrees list`/`adopt` would close the loop, especially when
   running parallel sessions.
+- **Bypass a split-tunnel VPN for container egress** — when the host is on a
+  non-full-tunnel VPN, the host proxy's outbound `create_connection`
+  (`aiab/netproxy.py`) follows the host routing table, so the container can
+  reach VPN-routed resources via the tunnel. When those resources also have a
+  non-VPN path, you may want the container's traffic to take the physical link
+  instead. The lever is the proxy process's routing, not the container (the
+  container has no independent egress) and not DNS (routing, not name→IP,
+  decides the path). Two near-equivalent framings:
+  - *Source-based policy routing.* One-time host setup (needs root, but only
+    once): a lean routing table holding just the physical default route, plus
+    `ip rule add from <physical-ip> lookup <table>`. Then the proxy binds its
+    outbound sockets to `<physical-ip>` — `create_connection` at
+    `netproxy.py:266` already takes `source_address=`, and binding a local IP
+    is unprivileged, so the recurring half lives in aiab with no privilege.
+  - *Always egress via the default gateway.* Same lean table, but don't be
+    selective — route all proxy egress out the physical default route. Since
+    that's the same gateway main uses for non-VPN destinations, they behave
+    identically; only the VPN's more-specific routes get bypassed.
+  Either way aiab grows a per-dir setting (proxy source IP / egress interface)
+  that feeds `source_address`; the only root/one-time bits are the table, the
+  rule, and a stable physical IP. Cheaper alternative if the VPN resources are
+  tunnel-*only* (no other path): just deny them by CIDR in the proxy, since
+  route-around and block are then the same outcome — but `evaluate()`
+  (`netproxy.py:96`) matches hostnames only, so CIDR/IP deny would be new.
 - **IDE integration** — aiab's value (confined agent process, network lockdown,
   git guard, "safe to disable permission prompts") is about *where the agent
   runs*, not the terminal front-end, so it carries over to IDE users. Three
