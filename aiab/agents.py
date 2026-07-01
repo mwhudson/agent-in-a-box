@@ -194,7 +194,7 @@ AGENTS: dict[str, Agent] = {
         ),
         # anthropic.com covers api./statsig./console.; claude.ai is used for
         # OAuth login; sentry.io for crash reporting.
-        api_domains=["anthropic.com", "claude.ai", "sentry.io"],
+        api_domains=["anthropic.com", "claude.ai", "claude.com", "sentry.io"],
     ),
     "claude-or": Agent(
         # Claude pointed at OpenRouter instead of the Claude API. Same binary,
