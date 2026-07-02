@@ -159,7 +159,11 @@ class Agent:
 # mirrors used during container setup. Always allowed in restricted mode, like
 # each agent's api_domains; they are the all-agents default of the net rules
 # (see aiab.netproxy / aiab.state), not a hardcoded special case in the proxy.
-BASELINE_DOMAINS: list[str] = ["archive.ubuntu.com", "security.ubuntu.com"]
+BASELINE_DOMAINS: list[str] = [
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+]
 
 
 # The registry. Keys are agent names.
