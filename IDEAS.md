@@ -13,6 +13,38 @@
 
 ## Project usability
 
+- **Git guard: follow `core.hooksPath`** — `_guard_git_repo` (`cli.py:419`)
+  hardcodes `.git/hooks`, but that's only where git looks by default. Husky
+  (and anything else setting `core.hooksPath`) relocates the hook dir into the
+  worktree, typically `.husky/_`. The agent can't *set* the key — `.git/config`
+  is shadowed read-only — but in a repo where it's *already* set, the container
+  reads that config, so the effective hook dir is a path in the mounted
+  worktree that the guard doesn't shadow and the agent can write. Host `git
+  commit` then runs it. That's the same trigger the guard already exists to
+  block, reached by a path it doesn't follow, so closing it is finishing the
+  stated guarantee rather than widening it. Bounded, too: a `core.hooksPath`
+  pointing *outside* the worktree (`~/.githooks`) isn't mounted, so the agent
+  can't write it — only in-worktree targets need anything.
+  Two things make this less clear-cut than the `.git/hooks` case, and worth
+  settling before building it:
+  - *A planted husky hook is visible.* `.husky/` is tracked, so it shows up in
+    `git status`/`git diff`, unlike `.git/hooks` which git never reports. The
+    exposure is only the window where you commit without reading every changed
+    file — real, but much weaker than the invisible case.
+  - *Shadowing it would break legitimate work.* `.git/hooks` isn't source
+    controlled, so a read-write sidecar costs nothing; `.husky/` is part of the
+    project, and "add a pre-commit hook" is an ordinary task whose result is
+    supposed to land in the tree. Shadowing would silently discard it. So the
+    fix may be to warn rather than shadow.
+  Explicitly *not* doing the rest of the "protect config files" list that
+  code-on-incus ships (`.vscode`, `.claude/settings.json`, …). Those either
+  fire only when you run something that obviously executes project code — you
+  own that, and you reviewed the diff first — or defend against an agent
+  weakening its own sandbox, which is a threat aiab doesn't have because the
+  confinement is external and an agent editing its own settings gains nothing.
+  What's left is host-config-dependent (it matters only if you run agents or
+  open editors on the host), so it belongs in an opt-in list, if anywhere, not
+  in the default guard.
 - **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device and
   persisted to state. Port detection and interactive forwarding already work in
   the monitor's Ports tab, but there's no CLI flag and forwarding isn't
