@@ -45,6 +45,43 @@
   What's left is host-config-dependent (it matters only if you run agents or
   open editors on the host), so it belongs in an opt-in list, if anywhere, not
   in the default guard.
+- **Git guard: the `sudo umount` bypass (known, accepted)** — the shadows are
+  bind mounts layered over the real `.git`, which lives inside the mounted work
+  dir, so container root can `umount /work/<proj>/.git/hooks` and get the
+  host's real hooks dir back, read-write. Recorded here because it's worth not
+  rediscovering, and because the obvious fixes all turn out worse than the
+  hole:
+  - *Unprivileged processes already can't do it.* `unshare -Urm` then `umount`
+    fails with `EINVAL` — mounts inherited through a user namespace are locked
+    together and can't be detached individually. So this needs deliberate use
+    of the container's passwordless sudo; nothing an agent stumbles into.
+  - *Layering doesn't help.* Constructing `.git` from separately-mounted pieces
+    (objects/refs/HEAD/index in, hooks/config sidecar-only) sounds like it
+    removes what's underneath, but it doesn't: the work dir mount's source is
+    the host repo, so the real `.git` is inherently in the tree. Umounting the
+    pieces reveals an empty dir, umounting *that* reveals the real `.git`. It
+    adds steps, not a ceiling. It only works if the mount source genuinely
+    lacks `.git`, which LXD disk devices can't express (no exclusions) — you'd
+    need a host-side prepared view (overlayfs / bind farm), and that wants host
+    root, costing the "needs no privilege" property that makes `aiab run`
+    cheap.
+  - *Dropping sudo in the container would close it* — that's the only real
+    lever, since the kernel already handles the unprivileged case — but
+    passwordless sudo is far too useful (`/setup-container` installs
+    toolchains with it) to trade away for a threat outside the stated model.
+    Decided against.
+  - *`chattr +i` on the host paths* (what code-on-incus does) is the one thing
+    that would defend even against container root: the immutable flag can't be
+    cleared or bypassed from the container, since that check lands in the
+    initial user namespace. But it needs host root on every run, it makes the
+    paths immutable *for the host user too* while a session is open (so
+    host-side `git config`/`git remote add` fail), on a directory it only
+    blocks create/delete/rename rather than edits to existing files, and a
+    crash leaves flags set that need root to clear. Not worth it here.
+  So: accepted, and `concepts.md` now says so plainly rather than claiming it
+  would take a kernel escape. Worth revisiting only if aiab ever grows a mode
+  aimed at deliberately hostile code rather than a wandering agent — that mode
+  would want the no-sudo container, and the guard question answers itself.
 - **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device and
   persisted to state. Port detection and interactive forwarding already work in
   the monitor's Ports tab, but there's no CLI flag and forwarding isn't

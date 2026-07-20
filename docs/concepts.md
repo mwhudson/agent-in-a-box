@@ -104,8 +104,13 @@ bind-mounted over them:
 The host's real `.git/hooks` and `.git/config` are shadowed and left untouched.
 The copies live under the directory's state dir and are reseeded on every run,
 so they're disposable. Like the rest of the sandbox this is a guard against an
-agent wandering, not against a deliberate exploit — defeating it would take a
-kernel container escape.
+agent wandering, not against a deliberate exploit. The shadows are bind mounts
+over the real `.git` — which is inside the mounted work dir — so `sudo umount
+.git/hooks` in the container exposes the host's real hooks dir, read-write. No
+kernel bug needed; it just takes deliberately reaching for it. What the kernel
+*does* rule out is the unprivileged version: a process that isn't root in the
+container can't detach the shadow, because mounts inherited through a user
+namespace are locked together and `umount` fails with `EINVAL`.
 
 Notes:
 
