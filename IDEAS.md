@@ -180,6 +180,43 @@
   referenced. Keep it short and factual: it competes for context with the
   actual instructions. Prior art: code-on-incus auto-injects a
   `SANDBOX_CONTEXT.md` into each tool's native context system.
+- **Named profiles — i.e. generalize `GLOBAL_KEY`** — the two-layer version of
+  this already exists for network policy: `GLOBAL_KEY = "*"` (`state.py:250`)
+  is a reserved key in the same structure directories use, `_policy_key()`
+  chooses between it and a directory's path, and `_flatten()` merges them with
+  the directory's own rules winning (`state.py:47`). A profile is that
+  mechanism with an arbitrary name rather than one hardcoded one: storage
+  shape, merge, and precedence are already written. Precedence extends
+  naturally to **dir > profile > global**, and `--global` becomes sugar for a
+  reserved profile every directory implicitly uses — so every command that
+  takes `--global` grows `--profile NAME` alongside it.
+  The cost isn't the naming, it's that *only* network is layered: `get_base`,
+  `get_limits` and `get_env` are keyed by directory with no global tier and no
+  merge, so profiling them means building layering that doesn't exist yet.
+  Mounts should stay out — they're absolute host paths belonging to one
+  directory, with nothing to reuse.
+  What justifies it is **a hardened profile**, not the obvious per-language
+  one. Its value is exactly that it spans setting *types* no single command
+  covers — restricted net with only the agent's API domain, tight limits, git
+  guard forced on, and the no-sudo container from the `sudo umount` entry
+  above. That's a mode you want to enter atomically and be certain of, and
+  it's error-prone to assemble by hand; it's also the natural home for the
+  "deliberately hostile code" mode that entry says would settle the guard
+  question. The per-language case (a `rust` profile allowing crates.io, …) is
+  weaker and probably doesn't pay for itself: `--global` already covers the
+  domains every repo needs, and if profiles would differ by two domains each,
+  a couple of `aiab net allow` calls per repo is less machinery than a profile
+  system.
+  One decision to make deliberately rather than discover: whether applying a
+  profile *copies* its settings into the directory's state or *references* it.
+  Copying is predictable but forfeits the "fix the allowlist once, every repo
+  using it follows" benefit that motivates profiles at all. Referencing keeps
+  it — but since the proxy re-reads policy per request, editing a profile
+  changes a running session's network policy immediately, which is welcome
+  when widening and a trap when narrowing. Referencing matches how global
+  already behaves, so probably that, eyes open. Auto-selection (`Cargo.toml`
+  present → apply `rust`) is the magic that makes behaviour hard to reason
+  about; leave it out of a first cut, it's easy to add once profiles exist.
 
 ## Smaller items
 
