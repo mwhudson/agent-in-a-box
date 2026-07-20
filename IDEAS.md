@@ -67,6 +67,50 @@
     pulls toward the devcontainer world concepts.md positions against, and since
     LXD isn't Docker you'd need sshd + reachability and Remote-SSH (not "attach
     to running container").
+- **Per-repo deploy keys so the agent can push** — there's no git-remote
+  credential story today: the agent can commit locally but nothing lets it
+  reach a remote, and the obvious fix (mounting `~/.ssh` in) would hand a
+  wandering agent your whole GitHub identity. The scoped-credential shape,
+  borrowed from [sandbox-claude](https://github.com/pvillega/sandbox-claude):
+  generate an ed25519 key per session container, register it on *just* this
+  repo as a deploy key via `gh`, and drop it when the container goes away
+  (`aiab remove`/`gc`). Blast radius is then one repo rather than every repo
+  the host key can reach. Two things to decide: where the private half lives —
+  sandbox-claude keeps it only in an in-container ssh-agent, never on disk,
+  which is nice but means re-adding it on every container start, whereas the
+  dirstate dir is the natural home if we accept it at rest; and whether
+  registration is worth automating at all, since `gh` needs admin on the repo
+  and only works for GitHub, so a manual "here's the pubkey, add it yourself"
+  mode has to exist anyway. Note this also needs an egress hole: `restrict`
+  mode masks the NIC and only proxies HTTP(S), so `git push` over ssh has no
+  path out — HTTPS remotes would work through the proxy, ssh remotes wouldn't
+  without new plumbing.
+- **A structured audit log of network decisions** — the proxy already sees and
+  rules on every request and logs denials to stderr, which `aiab run`
+  redirects to a per-container file under `PROXY_DIR`
+  (`netproxy.py`), and `aiab monitor` tails. That's live-only and
+  unstructured: once the session is gone there's no answering "what did this
+  agent try to reach, and when?". Writing one JSON line per decision
+  (timestamp, host, allow/deny, which rule matched, parked-then-approved or
+  not) into the directory's state dir would make it durable and greppable,
+  and give the monitor something better to render than log text. Cheap,
+  because the decision point is already a single place (`evaluate()`).
+  Prior art: code-on-incus ships a JSONL audit log and a `coi audit` stream.
+- **Tell the agent it's in a sandbox** — nothing currently explains the
+  confinement to the agent. The shipped `claude/CLAUDE.md` /
+  `opencode/AGENTS.md` overlays are static and say nothing about the network
+  policy, so a denied request surfaces as an opaque 403 and the agent either
+  flails or invents a reason. A generated per-session file — network mode and
+  the current allow/deny lists, what's mounted and read-write vs read-only,
+  that `.git/config` is deliberately read-only, and above all *that the user
+  can allow a domain with `aiab net allow` if asked* — turns "mysterious
+  failure" into "ask for what I need". The overlay machinery (`agents.py`
+  `overlays`) already puts files in the container home, but these overlays are
+  versioned repo files; this one is generated per run, so it wants either a
+  second generated-overlay path or to be written into the dirstate dir and
+  referenced. Keep it short and factual: it competes for context with the
+  actual instructions. Prior art: code-on-incus auto-injects a
+  `SANDBOX_CONTEXT.md` into each tool's native context system.
 
 ## Smaller items
 
