@@ -27,15 +27,31 @@ started shipping their own isolation — Claude Code has a sandboxed Bash tool
 (Seatbelt on macOS, bubblewrap on Linux) and an experimental
 `@anthropic-ai/sandbox-runtime` that wraps the whole process, and third-party
 wrappers around bubblewrap do the same for several agents at once. Those are
-lighter than a container and worth using; if you run one agent and don't need
-anything installed, they're less machinery than this. What `aiab` gives you
-that they don't is a **whole operating system**: you can `apt install`, run
-Docker, and keep a real dev environment that
-[`/setup-container`](#per-directory-state-and-the-setup-script-aiab) rebuilds
-from scratch, where a process sandbox gives you your host filesystem with
-paths subtracted. And the boundary is **one mechanism for every agent**,
-configured the same way, rather than a per-agent feature that only exists for
-the agents that happen to ship one.
+lighter than a container and worth using: if you run one agent, on a machine
+you already trust, and don't need anything installed, they're less machinery
+than this. The differences that stay:
+
+- **What the agent can see.** `aiab` mounts the directories you name and
+  nothing else, so the visible filesystem is an allowlist. A process sandbox
+  starts from your whole host filesystem and subtracts from it —
+  `sandbox-runtime` today denies writes and network by default but allows
+  *reads* everywhere, so `~/.ssh`, your other checkouts and anything else on
+  disk stay readable until you enumerate them. Listing the secrets is the
+  wrong shape for the problem; forgetting one is silent.
+- **Whose credentials are at stake.** Each agent gets its own home under
+  `~/.local/share/aiab/<agent>/home`, so what's reachable in a session is a
+  login kept for that purpose. Wrapping the host's binary means the host's
+  config and credentials instead, writable — including the agent's own
+  settings file, which is somewhere hooks can live.
+- **How the network is enforced.** Both filter egress through a proxy, but
+  here the container's NIC is masked, so a tool that ignores `HTTP_PROXY` has
+  no route at all rather than a way around the filter.
+- **A whole operating system.** You can `apt install`, run Docker, and keep a
+  real dev environment that
+  [`/setup-container`](#per-directory-state-and-the-setup-script-aiab)
+  rebuilds from scratch.
+- **One mechanism for every agent**, configured the same way, rather than a
+  per-agent feature that only exists for the agents that ship one.
 
 They also compose: nothing stops you running an agent's own sandbox *inside*
 an `aiab` container if you want a second layer.
