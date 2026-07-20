@@ -136,24 +136,29 @@
     pulls toward the devcontainer world concepts.md positions against, and since
     LXD isn't Docker you'd need sshd + reachability and Remote-SSH (not "attach
     to running container").
-- **Per-repo deploy keys so the agent can push** — there's no git-remote
-  credential story today: the agent can commit locally but nothing lets it
-  reach a remote, and the obvious fix (mounting `~/.ssh` in) would hand a
-  wandering agent your whole GitHub identity. The scoped-credential shape,
-  borrowed from [sandbox-claude](https://github.com/pvillega/sandbox-claude):
-  generate an ed25519 key per session container, register it on *just* this
-  repo as a deploy key via `gh`, and drop it when the container goes away
-  (`aiab remove`/`gc`). Blast radius is then one repo rather than every repo
-  the host key can reach. Two things to decide: where the private half lives —
-  sandbox-claude keeps it only in an in-container ssh-agent, never on disk,
-  which is nice but means re-adding it on every container start, whereas the
-  dirstate dir is the natural home if we accept it at rest; and whether
-  registration is worth automating at all, since `gh` needs admin on the repo
-  and only works for GitHub, so a manual "here's the pubkey, add it yourself"
-  mode has to exist anyway. Note this also needs an egress hole: `restrict`
-  mode masks the NIC and only proxies HTTP(S), so `git push` over ssh has no
-  path out — HTTPS remotes would work through the proxy, ssh remotes wouldn't
-  without new plumbing.
+- **Let the agent reach a git remote, via a credential broker** — there's no
+  git-remote credential story today: the agent can commit locally but nothing
+  lets it push, and the obvious fix (mounting `~/.ssh` in) would hand a
+  wandering agent your whole identity. The shape to copy is the one Claude
+  Code on the web uses: the token stays *outside* the boundary and a proxy
+  issues scoped, short-lived credentials for use inside it. code-on-incus does
+  the same thing with a unix socket forwarded by an Incus proxy device, where
+  the host end never enters the container — and aiab already has exactly that
+  plumbing, since `netproxy.py` listens on an abstract unix socket reached
+  through an LXD proxy device. So a small host-side broker that mints a
+  short-lived, single-repo token on request fits the existing architecture
+  with no new mechanism.
+  Prefer that to the alternative,
+  [sandbox-claude](https://github.com/pvillega/sandbox-claude)'s per-container
+  ed25519 deploy keys registered on one repo via `gh`: those put key material
+  inside the boundary, need admin on the repo, only work for GitHub, and need
+  a manual "add this pubkey yourself" fallback anyway. The broker beats it on
+  every axis — worth writing down because deploy keys are the more obvious
+  design and it'd be easy to reach for them first.
+  Either way this needs an egress hole: `restrict` mode masks the NIC and only
+  proxies HTTP(S), so `git push` over ssh has no path out. HTTPS remotes work
+  through the proxy, which suits token-based auth and is another point for the
+  broker.
 - **A structured audit log of network decisions** — the proxy already sees and
   rules on every request and logs denials to stderr, which `aiab run`
   redirects to a per-container file under `PROXY_DIR`
@@ -220,6 +225,12 @@
 
 ## Smaller items
 
+- **Let the agent's own sandbox work inside the container** — agents now ship
+  their own isolation (Claude Code's `/sandbox`, bubblewrap-based on Linux),
+  and it composes with ours as a second layer for anyone who wants it. The
+  docs note unprivileged containers need a nested-sandbox setting before it'll
+  work, so this is probably one setting in the templates plus a line in the
+  docs, not a feature.
 - More agents in the registry (gemini-cli, codex, aider) — the dataclass
   design makes each one a single entry.
 - A `--name`/session-suffix option so two agents of the same kind can run

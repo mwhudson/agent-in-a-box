@@ -2,12 +2,12 @@
 
 How `aiab` works under the hood and the safety model it gives you.
 
-- [Why not a devcontainer?](#why-not-a-devcontainer)
+- [Why not a devcontainer, or a process sandbox?](#why-not-a-devcontainer-or-a-process-sandbox)
 - [How it works](#how-it-works)
 - [Per-directory state and the setup script (`/aiab`)](#per-directory-state-and-the-setup-script-aiab)
 - [Protecting the host repo (the git guard)](#protecting-the-host-repo-the-git-guard)
 
-## Why not a devcontainer?
+## Why not a devcontainer, or a process sandbox?
 
 The point of `aiab` is that it needs **nothing in the repo**. Run `aiab run`
 in any checkout and it works — no `.devcontainer/`, no Dockerfile, no
@@ -21,6 +21,24 @@ inside the container, so it can only see the directories you've mounted and
 can only reach the domains you've allowed, whether or not it cooperates. That's
 what makes it safe to disable permission prompts, and it's why the same sandbox
 applies equally to Claude, opencode, and Copilot CLI.
+
+Devcontainers aren't really the live comparison any more, though. Agents have
+started shipping their own isolation — Claude Code has a sandboxed Bash tool
+(Seatbelt on macOS, bubblewrap on Linux) and an experimental
+`@anthropic-ai/sandbox-runtime` that wraps the whole process, and third-party
+wrappers around bubblewrap do the same for several agents at once. Those are
+lighter than a container and worth using; if you run one agent and don't need
+anything installed, they're less machinery than this. What `aiab` gives you
+that they don't is a **whole operating system**: you can `apt install`, run
+Docker, and keep a real dev environment that
+[`/setup-container`](#per-directory-state-and-the-setup-script-aiab) rebuilds
+from scratch, where a process sandbox gives you your host filesystem with
+paths subtracted. And the boundary is **one mechanism for every agent**,
+configured the same way, rather than a per-agent feature that only exists for
+the agents that happen to ship one.
+
+They also compose: nothing stops you running an agent's own sandbox *inside*
+an `aiab` container if you want a second layer.
 
 ## How it works
 

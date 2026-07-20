@@ -11,7 +11,8 @@ managed per directory with [`aiab net`](docs/commands.md#aiab-net).
 It needs **nothing in the repo** — no `.devcontainer/`, no Dockerfile, no
 committed config — and wraps the agent from the *outside*, so the same sandbox
 applies whether or not the agent cooperates. See
-[Concepts](docs/concepts.md#why-not-a-devcontainer) for the rationale.
+[Concepts](docs/concepts.md#why-not-a-devcontainer-or-a-process-sandbox) for
+the rationale.
 
 Everything is driven by a single command, `aiab`, with a subcommand per task:
 
