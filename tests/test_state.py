@@ -644,14 +644,13 @@ def test_get_limits_returns_defaults_when_unset(tmp_path):
 
 
 def test_set_and_get_limits(tmp_path):
-    new = {"cpu": 8, "memory": "16GiB"}
+    new: state.ResourceLimits = {"cpu": 8, "memory": "16GiB"}
     state.set_limits(tmp_path, new)
     assert state.get_limits(tmp_path) == new
 
 
 def test_set_limits_partial_update(tmp_path):
-    current = dict(state.DEFAULT_LIMITS)
-    current["cpu"] = 8
+    current: state.ResourceLimits = {**state.DEFAULT_LIMITS, "cpu": 8}
     state.set_limits(tmp_path, current)
     got = state.get_limits(tmp_path)
     assert got["cpu"] == 8

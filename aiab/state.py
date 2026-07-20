@@ -510,8 +510,8 @@ def get_limits(directory: StrPath) -> ResourceLimits:
     data: dict[str, ResourceLimits] = _load_file(_LIMITS_PATH)
     recorded = data.get(_key(directory))
     if recorded is None:
-        return dict(DEFAULT_LIMITS)  # type: ignore[return-value]
-    return {**DEFAULT_LIMITS, **recorded}  # type: ignore[return-value]
+        return {**DEFAULT_LIMITS}
+    return {**DEFAULT_LIMITS, **recorded}
 
 
 def set_limits(directory: StrPath, limits: ResourceLimits) -> None:

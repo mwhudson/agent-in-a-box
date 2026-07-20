@@ -8,10 +8,15 @@
 
 [tool.black]
 line-length = 88
+# Deliberately behind the mypy pin below: this controls the syntax black may
+# *emit*, and py314 would rewrite `except (A, B):` to the PEP 758 bare form,
+# which is a SyntaxError on older Pythons. aiab is run from a checkout, so
+# keeping it parseable there costs nothing and fails more kindly.
 target-version = ["py312"]
 
 [tool.mypy]
-python_version = "3.12"
+# aiab targets Ubuntu 26.04+, which ships Python 3.14; check against that.
+python_version = "3.14"
 files = ["aiab", "tests"]
 # A reasonable baseline: warn on obviously-untyped or dead constructs without
 # demanding full strictness across every internal helper.
