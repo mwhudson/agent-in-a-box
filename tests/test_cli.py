@@ -3,8 +3,13 @@
 # Only the host-side filesystem helpers are covered here; the parts that drive
 # LXD (containers, devices) need a live LXD and are exercised manually.
 
+from pathlib import Path
 from typing import Any
 
+import pytest
+
+from aiab import CONTAINER_HOME
+from aiab import agents, profiles, state
 from aiab.cli import (
     _guard_git_repo,
     _json_set,
@@ -12,6 +17,8 @@ from aiab.cli import (
     _parse_config_value,
     _reseed_file,
     _reseed_tree,
+    _resolve_profile,
+    _session_env,
 )
 
 
@@ -240,3 +247,66 @@ def test_parse_config_value_falls_back_to_string():
     assert _parse_config_value("anthropic/claude-sonnet-4-6") == (
         "anthropic/claude-sonnet-4-6"
     )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_profile
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_profile_none_is_none():
+    assert _resolve_profile(None, "claude") is None
+
+
+def test_resolve_profile_returns_builtin():
+    assert _resolve_profile("openrouter", "claude") == profiles.BUILTIN["openrouter"]
+
+
+def test_resolve_profile_unknown_name_exits():
+    with pytest.raises(SystemExit) as e:
+        _resolve_profile("nosuch", "claude")
+    assert "no profile 'nosuch'" in str(e.value)
+
+
+def test_resolve_profile_wrong_agent_exits():
+    # A profile scoped to another agent is an error, not a silent no-op: the
+    # run would otherwise look like it had been applied.
+    with pytest.raises(SystemExit) as e:
+        _resolve_profile("openrouter", "copilot")
+    assert "applies to claude" in str(e.value)
+
+
+# ---------------------------------------------------------------------------
+# _session_env precedence
+# ---------------------------------------------------------------------------
+
+
+class _EnvFakeContainer:
+    def mount_wayland(self, user):
+        return {"WAYLAND_DISPLAY": "wayland-0"}
+
+
+def _env_for(monkeypatch, dir_env, profile_env):
+    """Run _session_env with a stubbed directory env and no proxy."""
+    monkeypatch.setattr(state, "get_env", lambda work_dir, agent: dir_env)
+    cfg = agents.get("claude")
+    container: Any = _EnvFakeContainer()
+    return _session_env(container, cfg, {}, Path("/tmp/x"), "claude", profile_env)
+
+
+def test_session_env_includes_profile_vars(monkeypatch):
+    env = _env_for(monkeypatch, {}, {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api"})
+    assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+
+
+def test_session_env_directory_beats_profile(monkeypatch):
+    # dir > profile: a profile is a reusable default, a variable set for one
+    # directory is the more specific statement.
+    env = _env_for(monkeypatch, {"FOO": "from-dir"}, {"FOO": "from-profile"})
+    assert env["FOO"] == "from-dir"
+
+
+def test_session_env_aiab_vars_beat_both(monkeypatch):
+    # HOME/PATH are managed by aiab and can't be displaced by either source.
+    env = _env_for(monkeypatch, {"HOME": "/nope"}, {"HOME": "/also-nope"})
+    assert env["HOME"] == CONTAINER_HOME
