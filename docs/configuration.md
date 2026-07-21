@@ -46,10 +46,13 @@ Notes:
 - Your **credentials** are *not* versioned — they stay in the per-agent
   config dir (`~/.local/share/aiab/claude/home/.claude/`); only `CLAUDE.md` and
   `commands/` are overlaid from the repo.
-- This applies to the default (Claude API) `claude` agent only. The `claude-or`
-  / OpenRouter agent does not get the overlay.
-- Missing entries are skipped, so it's fine to delete `agent-config/claude/CLAUDE.md` or
-  leave `agent-config/claude/commands/` empty.
+- Profile sessions get the overlay too: a profile changes an agent's
+  configuration, not which agent it is, so `aiab run --profile openrouter
+  claude` is still `claude` as far as the overlay is concerned. (The old
+  `claude-or` agent this replaced did *not* get it.)
+- Missing entries are skipped, so it's fine to delete
+  `agent-config/claude/CLAUDE.md` or leave `agent-config/claude/commands/`
+  empty.
 
 ## Versioned opencode config (AGENTS.md + commands)
 
@@ -124,11 +127,15 @@ path, and applied on the next `aiab run` there):
   agent process — directory-wide, or scoped to one agent with `--agent`. This is
   the way to give an agent a directory-specific value of anything it reads from
   the environment, including credentials. For example, a different OpenRouter key
-  for `claude-or` in one directory:
+  in one directory:
 
   ```
-  aiab env set --agent claude-or ANTHROPIC_AUTH_TOKEN sk-or-...
+  aiab env set --agent claude ANTHROPIC_AUTH_TOKEN sk-or-...
   ```
+
+  A directory's variables also override a [profile's](commands.md#aiab-profile),
+  which is how you vary one setting of a profile in a single directory without
+  defining a new profile.
 
 - [`aiab opencode config`](commands.md#aiab-opencode) sets keys in a
   per-directory opencode config overlay (e.g. a provider key or model). opencode

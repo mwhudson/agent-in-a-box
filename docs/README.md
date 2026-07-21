@@ -5,7 +5,8 @@
   protects your host repo.
 - **[Configuration](configuration.md)** — versioned config overlays for Claude,
   opencode, and Copilot, plus per-directory environment variables and opencode
-  keys.
+  keys. Settings you want to reuse across directories go in a
+  [profile](commands.md#aiab-profile) instead.
 - **[Command reference](commands.md)** — every `aiab` subcommand and its
   options.
 - **[Installation](install.md)** — requirements, install, shell completion, and

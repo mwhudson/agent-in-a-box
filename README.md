@@ -33,8 +33,9 @@ aiab gc                     # remove containers whose directory is gone
 aiab lxc ...                # run lxc against the 'aiab' project
 ```
 
-`<agent>` is one of `claude`, `claude-or` (Claude via OpenRouter), `opencode`,
-or `copilot`. Full options for every subcommand are in the
+`<agent>` is one of `claude`, `opencode`, or `copilot`. To vary how one runs —
+Claude against OpenRouter, say — use a profile: `aiab run --profile openrouter
+claude`. Full options for every subcommand are in the
 [command reference](docs/commands.md).
 
 ## Quick start

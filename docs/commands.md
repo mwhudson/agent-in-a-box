@@ -10,6 +10,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 - [aiab base](#aiab-base)
 - [aiab limits](#aiab-limits)
 - [aiab env](#aiab-env)
+- [aiab profile](#aiab-profile)
 - [aiab opencode](#aiab-opencode)
 - [aiab monitor](#aiab-monitor)
 - [aiab upgrade-templates](#aiab-upgrade-templates)
@@ -20,14 +21,16 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ## aiab run
 
 ```
-aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--no-git-guard] [--shell] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--profile NAME] [--no-git-guard] [--shell] [-- AGENT_ARGS...]
 ```
 
-- `<agent>` — `claude`, `claude-or`, `opencode`, or `copilot`.
+- `<agent>` — `claude`, `opencode`, or `copilot`.
 - `--for DIR` — run the agent for `DIR` instead of the current directory; `DIR`
   is the container's working directory, mounted at `/work/<basename>`.
 - `--add-mount DIR` — mount `DIR` **read-only** into the container and record it for this directory (repeatable).
 - `--add-mount-rw DIR` — mount `DIR` read-write and record it (repeatable).
+- `--profile NAME` — apply a named profile for this run (see
+  [`aiab profile`](#aiab-profile)).
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).
 - `--shell` — open an interactive shell in the container instead of the agent.
@@ -42,21 +45,28 @@ The base container is created automatically on first use. Authenticate inside
 the container on first run; credentials are stored under
 `~/.local/share/aiab/<agent>/home` and reused afterwards.
 
-`claude-or` runs Claude against [OpenRouter](https://openrouter.ai) instead of
-the Claude API, using a separate base container and config dir. On first use it
-prompts for your OpenRouter API key and model and writes them to
-`~/.local/share/aiab/claude-or/home/.claude/settings.json`. To use a different
-key in one directory only, see [`aiab env`](#aiab-env).
+To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
+API, use the built-in `openrouter` profile:
+
+```
+aiab run --profile openrouter claude
+```
+
+On first use it prompts for your OpenRouter API key and writes it to
+`~/.local/share/aiab/claude@openrouter/home/.claude/settings.json`. This was
+previously a separate `claude-or` agent; if you used it, its credentials are
+moved across automatically on the next run. See [`aiab profile`](#aiab-profile).
 
 ## aiab remove
 
 ```
-aiab remove <agent> [--for DIR]
+aiab remove <agent> [--for DIR] [--profile NAME]
 ```
 
 Deletes the session container for the directory (current directory, or `--for
 DIR`). The base/template container is left intact, so the next run clones a
-fresh one quickly.
+fresh one quickly. An isolated profile runs in its own container, so pass
+`--profile NAME` to remove that one.
 
 ## aiab mount / aiab unmount
 
@@ -66,8 +76,8 @@ aiab unmount [--for DIR] DIR [DIR ...]
 ```
 
 `mount` records each `DIR` as an **extra mount for the project directory** and
-adds it to every agent container (`claude`, `claude-or`, `opencode`,
-`copilot`) that already exists for it. Because the set is recorded (in
+adds it to every agent container (`claude`, `opencode`, `copilot`) that
+already exists for it. Because the set is recorded (in
 `~/.local/share/aiab/mounts.json`, keyed by the directory), it also reaches
 containers that don't exist yet: a different agent started for the same
 directory, or a container deleted and recreated, gets the same mounts
@@ -244,11 +254,11 @@ overridden by a recorded value.
 
 This is the building block for per-directory credentials. Agents that read their
 key straight from the environment can be pointed at a directory-specific key
-this way — for example, a different OpenRouter key for `claude-or` in one
+this way — for example, a different OpenRouter key for `claude` in one
 directory:
 
 ```
-aiab env set --agent claude-or ANTHROPIC_AUTH_TOKEN sk-or-...
+aiab env set --agent claude ANTHROPIC_AUTH_TOKEN sk-or-...
 ```
 
 opencode is the exception: its stored login (`opencode auth login`) takes
@@ -256,6 +266,78 @@ precedence over an environment variable, so a per-directory opencode key goes
 through [`aiab opencode config`](#aiab-opencode) instead, which writes a config
 file (config outranks the login) and injects the pointer to it via this
 mechanism.
+
+## aiab profile
+
+```
+aiab profile list
+aiab profile show NAME
+aiab profile add NAME [--agent AGENT]... [--isolated] [--env NAME=VALUE]... [--allow DOMAIN]... [--description TEXT]
+aiab profile remove NAME
+```
+
+A **profile** is a reusable bundle of settings applied with `aiab run --profile
+NAME`. Unlike everything under [`aiab env`](#aiab-env) or [`aiab
+net`](#aiab-net), it isn't recorded against a project directory — it's chosen
+per run, so the same directory can be used with and without one.
+
+A profile carries:
+
+- `--env NAME=VALUE` — environment variables injected into the agent. A
+  variable recorded for the *directory* wins over the profile's, so precedence
+  is dir > profile: a profile is a reusable default, and a variable set for one
+  directory is the more specific statement.
+- `--allow DOMAIN` — domains always reachable while the directory is in
+  restricted mode. These join the agent's own API domains rather than the
+  recorded allow list, so a profile that points an agent at a different
+  endpoint works without a separate `aiab net allow`.
+- `--agent AGENT` — restrict the profile to one or more agents (repeatable).
+  Running it against an agent it doesn't list is an error, not a silent no-op.
+  Omit it and the profile applies to any agent.
+- `--isolated` — give the profile its own **credential store** and **session
+  container**, instead of sharing the agent's.
+
+### When to use --isolated
+
+`--isolated` is the difference between a profile that changes an agent's
+*settings* and one that forks its *identity*.
+
+Use it when the profile changes who the agent authenticates as — the built-in
+`openrouter` profile sets it, so an OpenRouter token never lands in the same
+`~/.claude` as a Claude login. Credentials live in
+`~/.local/share/aiab/<agent>@<profile>/home`, and sessions run in a container
+named `<agent>-<profile>-<dir>`.
+
+Leave it off when the profile only layers settings — a profile that tightens
+the network, say. It then reuses the agent's normal credential store and
+container, so entering it doesn't mean authenticating again.
+
+Either way the **template container is shared**: a profile changes how an agent
+is *configured*, never how it's *installed*, so there's nothing to build twice.
+
+### The built-in openrouter profile
+
+`openrouter` ships with aiab and points Claude Code at
+[OpenRouter](https://openrouter.ai):
+
+```
+aiab run --profile openrouter claude
+```
+
+It is scoped to `claude`, isolated, allows `openrouter.ai`, and sets the
+endpoint plus a `/model` picker entry. On first use it prompts for your API key
+and stores it in the profile's own credential store.
+
+It sets `ANTHROPIC_CUSTOM_MODEL_OPTION` rather than `ANTHROPIC_MODEL`
+deliberately: an environment variable outranks Claude Code's `model` setting,
+but `/model` saves a switch *into* that setting — so setting `ANTHROPIC_MODEL`
+would make an in-session model switch silently revert on the next launch. The
+custom-model-option variable leaves the setting free and adds an entry to the
+`/model` picker, which otherwise lists only Anthropic model names this endpoint
+won't accept.
+
+Built-in profiles can't be edited or removed. To vary one, record your own
+profile under a different name.
 
 ## aiab opencode
 
