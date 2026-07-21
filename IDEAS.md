@@ -205,8 +205,9 @@
   confinement to the agent. The shipped `agent-config/claude/CLAUDE.md` /
   `agent-config/opencode/AGENTS.md` overlays are static and say nothing about
   the network policy, so a denied request surfaces as an opaque 403 and the
-  agent either flails or invents a reason. A generated per-session file — network mode and
-  the current allow/deny lists, what's mounted and read-write vs read-only,
+  agent either flails or invents a reason. A generated per-session file —
+  network mode and the current allow/deny lists, what's mounted and
+  read-write vs read-only,
   that `.git/config` is deliberately read-only, and above all *that the user
   can allow a domain with `aiab net allow` if asked* — turns "mysterious
   failure" into "ask for what I need". The overlay machinery (`agents.py`
@@ -253,6 +254,40 @@
   already behaves, so probably that, eyes open. Auto-selection (`Cargo.toml`
   present → apply `rust`) is the magic that makes behaviour hard to reason
   about; leave it out of a first cut, it's easy to add once profiles exist.
+  The other thing that justifies profiles is **replacing the `claude-or`
+  agent**, which is a profile already built by hand. It shares `command`,
+  `install_cmds` and `extra_args` with `claude` verbatim (`agents.py:199`),
+  differing only in the env it injects (via a `prepare` hook writing
+  `settings.json`), its `api_domains`, its lack of overlays, and its separate
+  credential store. `aiab run --profile openrouter claude` expresses all of
+  that, and drops a duplicate template container built from byte-identical
+  install steps — `upgrade-templates` currently does that work twice. The
+  hand-duplication has already drifted: `claude` sets `wayland=True` and
+  `claude-or` doesn't, so it silently has no clipboard support.
+  The env half is exactly the `get_env` layering gap above; the network half
+  is nearly free, since `api_domains` is a per-agent default the two-tier
+  machinery could override. What profiles as described *don't* cover is
+  identity: `agent_home_dir()` (`lxd.py:102`) is keyed by agent name, so a
+  profile that swaps credentials has to key that too — otherwise an OpenRouter
+  token lands in the same `~/.claude` as the Anthropic OAuth login, which is
+  the whole reason `claude-or` is a separate agent. That follows through to
+  the container: a profile changing both env and credentials must not share a
+  session container with plain `claude` in the same directory, so the profile
+  name wants to be the container-name suffix — which is the `--name` item
+  under Smaller items, arriving as a consequence rather than a separate
+  feature.
+  Two details to carry over. `claude-or` gets no CLAUDE.md overlay today,
+  documented as a quirk in `docs/configuration.md`; under a profile it would
+  get one, which is a fix rather than a regression. And the profile should set
+  `ANTHROPIC_CUSTOM_MODEL_OPTION` rather than the `ANTHROPIC_MODEL` the hook
+  writes now: env outranks the `model` settings field, but `/model` persists a
+  switch *into* that field, so a model picked with `/model` silently reverts
+  on the next launch. The custom-model-option variable leaves the field free
+  and adds an entry to the `/model` picker, which otherwise lists only
+  Anthropic model names the endpoint won't accept.
+  A naming note: `profile` already means an LXD profile in `lxd.py`
+  (`profile_nic_names`, `mask_profile_devices`), so the user-facing word wants
+  to be different, or reading the code gets confusing fast.
 
 ## Smaller items
 
@@ -265,6 +300,7 @@
 - More agents in the registry (gemini-cli, codex, aider) — the dataclass
   design makes each one a single entry.
 - A `--name`/session-suffix option so two agents of the same kind can run
-  concurrently in one directory with separate containers.
+  concurrently in one directory with separate containers. Note this falls out
+  of named profiles above, which need the same suffix for a different reason.
 - **`aiab doctor`** — check LXD init state and idmap support; first-run
   failures there are probably the worst onboarding experience.
