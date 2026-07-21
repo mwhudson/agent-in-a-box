@@ -67,6 +67,14 @@
 # `aiab run` merges the "*" bucket then the running agent's bucket (agent wins)
 # into the agent process environment (see aiab.cli._session_env).
 #
+# User-defined profiles (managed by `aiab profile`) are the one record here
+# that is *not* keyed by directory, since a profile is a reusable bundle
+# selected per run rather than a property of a project dir. They live in a
+# sixth JSON file as a flat name -> settings map:
+#   { "<name>": {"agents": [str], "isolated": bool, "env": {...},
+#                "allow": [str, ...]} }
+# See aiab.profiles for the shape and for the built-in profiles.
+#
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
 # the agent itself maintains — notably the /setup-container setup script. A
@@ -93,6 +101,7 @@ _NET_PATH = _STATE_DIR / "network.json"
 _BASE_PATH = _STATE_DIR / "base.json"
 _LIMITS_PATH = _STATE_DIR / "limits.json"
 _ENV_PATH = _STATE_DIR / "env.json"
+_PROFILES_PATH = _STATE_DIR / "profiles.json"
 _DIRSTATE_DIR = _STATE_DIR / "dirstate"
 
 # Records the owning project directory inside each dirstate dir, so
@@ -590,6 +599,50 @@ def list_env(directory: StrPath) -> dict[str, dict[str, str]]:
     """
     data: EnvState = _load_file(_ENV_PATH)
     return data.get(_key(directory), {})
+
+
+# -- user-defined profiles --
+#
+# Unlike everything else in this module, profiles are *not* keyed by directory:
+# a profile is a reusable bundle selected per run with `aiab run --profile`.
+# The file is a flat name -> settings map with the shape aiab.profiles.Profile
+# describes:
+#   { "<name>": {"description": str, "agents": [str], "isolated": bool,
+#                "env": {name: value}, "allow": [domain, ...]} }
+# Built-in profiles live in aiab.profiles.BUILTIN and are not stored here; the
+# CLI refuses to record a user profile under a built-in name, so a lookup never
+# has to choose between two definitions.
+
+
+def get_profile(name: str) -> dict | None:
+    """Return a recorded user profile, or None if there's no such profile."""
+    data: dict[str, dict] = _load_file(_PROFILES_PATH)
+    return data.get(name)
+
+
+def list_profiles() -> dict[str, dict]:
+    """Return every recorded user profile, keyed by name."""
+    data: dict[str, dict] = _load_file(_PROFILES_PATH)
+    return data
+
+
+def set_profile(name: str, profile: dict) -> None:
+    """Record (or replace) a user profile."""
+    with _locked_path(_PROFILES_PATH):
+        data: dict[str, dict] = _load_file(_PROFILES_PATH)
+        data[name] = profile
+        _save_file_unlocked(_PROFILES_PATH, data)
+
+
+def remove_profile(name: str) -> bool:
+    """Drop a user profile. Return True if it was present."""
+    with _locked_path(_PROFILES_PATH):
+        data: dict[str, dict] = _load_file(_PROFILES_PATH)
+        if name not in data:
+            return False
+        del data[name]
+        _save_file_unlocked(_PROFILES_PATH, data)
+    return True
 
 
 # -- per-directory state dir --
