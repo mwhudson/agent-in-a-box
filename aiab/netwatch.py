@@ -49,6 +49,7 @@ from pathlib import Path
 from . import StrPath
 from . import agents
 from . import netproxy
+from . import profiles
 from . import state
 from .lxd import container_name_for_dir, dir_slug
 
@@ -154,16 +155,19 @@ class _LogTail:
 
 
 def log_tails(work_dir: Path) -> list[_LogTail]:
-    """One tail per agent the directory could be running.
+    """One tail per session the directory could be running.
 
-    Logs that don't exist (yet) just stay silent.
+    That's every agent, plus every isolated profile of one — those get their
+    own container, and so their own proxy log. Logs that don't exist (yet)
+    just stay silent.
     """
     return [
         _LogTail(
-            netproxy.PROXY_DIR / f"{container_name_for_dir(work_dir, agent)}.log",
-            agent,
+            netproxy.PROXY_DIR / f"{container_name_for_dir(work_dir, prefix)}.log",
+            prefix,
         )
         for agent in agents.AGENT_NAMES
+        for prefix in profiles.session_prefixes(agent)
     ]
 
 

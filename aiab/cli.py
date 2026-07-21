@@ -1041,16 +1041,30 @@ def _destroy_session(session: lxd.Container) -> None:
     default=None,
     help="target the container for DIR (default: current directory)",
 )
+@click.option(
+    "--profile",
+    "profile_name",
+    metavar="NAME",
+    default=None,
+    help="target the container the named profile runs in",
+)
 @click.pass_obj
-def remove(conn: lxd.Lxd, agent: str, for_dir: str | None) -> None:
+def remove(
+    conn: lxd.Lxd, agent: str, for_dir: str | None, profile_name: str | None
+) -> None:
     """Delete the session container for a directory.
 
     The base/template container is left intact, so the next run clones a fresh
     one quickly. Any leftover git worktrees created by --worktree are pruned
-    from the host directory before deleting the container.
+    from the host directory before deleting the container. An isolated profile
+    runs in its own container, so removing that one needs --profile.
     """
     work_dir = _realdir(for_dir)
-    session = conn.container_for_dir(work_dir, agent)
+    profile = _resolve_profile(profile_name, agent)
+    isolated = bool(profile.get("isolated")) if profile else False
+    session = conn.container_for_dir(
+        work_dir, profiles.container_prefix(agent, profile_name, isolated)
+    )
     if not session.exists():
         print(f"No container '{session.name}' to remove.", file=sys.stderr)
         return
@@ -2112,7 +2126,11 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
     states = conn.instances()
     if for_dir:
         target = _realdir(for_dir)
-        wanted = {conn.container_for_dir(target, a).name for a in agents.AGENT_NAMES}
+        wanted = {
+            conn.container_for_dir(target, prefix).name
+            for agent in agents.AGENT_NAMES
+            for prefix in profiles.session_prefixes(agent)
+        }
         names = [n for n in states if n in wanted]
     else:
         # Skip the template containers (default and alternate-release bases);

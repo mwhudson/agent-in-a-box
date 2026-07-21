@@ -107,3 +107,32 @@ def test_non_isolated_profile_shares_the_agent_identity():
 def test_container_prefix_avoids_the_at_sign():
     # LXD instance names are hostnames; '@' is fine in the home dir but not here.
     assert "@" not in profiles.container_prefix("claude", "openrouter", True)
+
+
+# ---------------------------------------------------------------------------
+# session_prefixes
+# ---------------------------------------------------------------------------
+
+
+def test_session_prefixes_includes_the_bare_agent():
+    assert "opencode" in profiles.session_prefixes("opencode")
+
+
+def test_session_prefixes_adds_isolated_profiles_that_apply():
+    assert profiles.session_prefixes("claude") == ["claude", "claude-openrouter"]
+
+
+def test_session_prefixes_skips_profiles_scoped_to_another_agent():
+    # openrouter is claude-only, so copilot has no profile container.
+    assert profiles.session_prefixes("copilot") == ["copilot"]
+
+
+def test_session_prefixes_skips_non_isolated_profiles():
+    # A settings-only profile shares the agent's container, so it adds no name.
+    state.set_profile("hardened", {"allow": ["example.com"]})
+    assert profiles.session_prefixes("copilot") == ["copilot"]
+
+
+def test_session_prefixes_includes_isolated_user_profiles():
+    state.set_profile("scratch", {"isolated": True})
+    assert profiles.session_prefixes("copilot") == ["copilot", "copilot-scratch"]

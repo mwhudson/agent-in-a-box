@@ -164,6 +164,23 @@ def names() -> list[str]:
     return sorted({*BUILTIN, *state.list_profiles()})
 
 
+def session_prefixes(agent: str) -> list[str]:
+    """Every container prefix a directory could have sessions under, for agent.
+
+    That's the bare agent name plus one per *isolated* profile that applies to
+    it — a non-isolated profile shares the agent's container, so it adds no
+    name. Callers that enumerate a directory's containers (`aiab list --for`,
+    the monitor, the netwatch log tails) need this rather than the agent name
+    alone, or they silently miss profile sessions.
+    """
+    found = [agent]
+    for name in names():
+        profile = get(name)
+        if profile and profile.get("isolated") and applies_to(profile, agent):
+            found.append(container_prefix(agent, name, True))
+    return found
+
+
 def applies_to(profile: Profile, agent: str) -> bool:
     """True if profile is usable with agent (no `agents` list means any)."""
     allowed = profile.get("agents")

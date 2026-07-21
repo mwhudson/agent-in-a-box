@@ -68,6 +68,7 @@ from . import PROJECT, WORK_PREFIX
 from . import agents
 from . import netproxy
 from . import netwatch
+from . import profiles
 from . import state
 from .lxd import Lxd
 
@@ -741,7 +742,8 @@ class MonitorApp(App[None]):
             return [
                 container
                 for agent in agents.AGENT_NAMES
-                for container in [self._lxd.container_for_dir(self.work_dir, agent)]
+                for prefix in profiles.session_prefixes(agent)
+                for container in [self._lxd.container_for_dir(self.work_dir, prefix)]
                 if container.exists()
             ]
         except OSError:  # lxc not installed / not reachable
