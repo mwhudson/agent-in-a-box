@@ -41,7 +41,7 @@
 #
 # Run as:
 #   python3 -m aiab.netproxy --socket PATH --dir DIR --agent NAME
-#       [--pending-dir DIR]
+#       [--pending-dir DIR] [--profile NAME]
 
 from __future__ import annotations
 
@@ -63,6 +63,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import agents
+from . import profiles
 from . import state
 
 # Where the proxy listens inside the container (forwarded by the LXD proxy
@@ -165,13 +166,21 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         work_dir: Path,
         agent: str,
         pending_dir: Path | None = None,
+        profile: str | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.agent = agent
         # The always-allowed defaults: the shared baseline plus this agent's
         # own API/auth/telemetry domains, sourced from the agent registry
-        # rather than passed in (see aiab.agents).
+        # rather than passed in (see aiab.agents). A profile's `allow` list
+        # joins them rather than the user rules, for the same reason the
+        # agent's do — a profile that points the agent at a different endpoint
+        # would be useless if reaching it needed a separate `aiab net allow`.
         defaults = agents.BASELINE_DOMAINS + agents.get(agent).api_domains
+        if profile:
+            entry = profiles.get(profile)
+            if entry:
+                defaults = defaults + list(entry.get("allow", []))
         self.api_domains = [d.lower() for d in defaults]
         self.pending_dir = pending_dir
         super().__init__(socket_path, _Handler)
@@ -387,6 +396,11 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="dir where undecided hosts are parked for 'aiab monitor'",
     )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="profile in force; its allow list joins the always-allowed defaults",
+    )
     args = parser.parse_args(argv)
 
     # An abstract socket (@name) lives in the network namespace rather than
@@ -410,11 +424,12 @@ def main(argv: list[str] | None = None) -> None:
         pending_dir = Path(args.pending_dir)
         pending_dir.mkdir(parents=True, exist_ok=True)
 
-    server = ProxyServer(address, Path(args.dir), args.agent, pending_dir)
+    server = ProxyServer(address, Path(args.dir), args.agent, pending_dir, args.profile)
     if not abstract:
         os.chmod(address, 0o600)
     _log(
-        f"proxy listening on {args.socket} for {args.dir} ({args.agent}; "
+        f"proxy listening on {args.socket} for {args.dir} ({args.agent}"
+        f"{'/' + args.profile if args.profile else ''}; "
         f"api domains: {', '.join(server.api_domains) or 'none'})"
     )
     try:

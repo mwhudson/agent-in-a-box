@@ -150,7 +150,9 @@ def _proxy_socket_live(socket_name: str) -> bool:
     return True
 
 
-def _ensure_proxy(session: lxd.Container, work_dir: Path, agent: str) -> str:
+def _ensure_proxy(
+    session: lxd.Container, work_dir: Path, agent: str, profile: str | None = None
+) -> str:
     """Start the filtering proxy for a session container (or reuse a live one).
 
     Returns the abstract socket address (with leading @) the proxy listens
@@ -172,6 +174,8 @@ def _ensure_proxy(session: lxd.Container, work_dir: Path, agent: str) -> str:
         f"--agent={agent}",
         f"--pending-dir={netwatch.pending_dir(work_dir)}",
     ]
+    if profile:
+        argv.append(f"--profile={profile}")
     with log.open("ab") as log_fd:
         proc = subprocess.Popen(
             argv,
@@ -696,7 +700,11 @@ def _apply_session_mounts(
 
 
 def _apply_network_policy(
-    conn: lxd.Lxd, session: lxd.Container, work_dir: Path, agent: str
+    conn: lxd.Lxd,
+    session: lxd.Container,
+    work_dir: Path,
+    agent: str,
+    profile: str | None = None,
 ) -> dict[str, str]:
     """Apply the recorded network policy and return proxy env vars."""
     policy = state.get_network(work_dir)
@@ -707,7 +715,7 @@ def _apply_network_policy(
         return {}
 
     session.mask_profile_devices(nic_names)
-    sock_name = _ensure_proxy(session, work_dir, agent)
+    sock_name = _ensure_proxy(session, work_dir, agent, profile)
     session.add_proxy_device(
         "netproxy",
         listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
@@ -745,20 +753,43 @@ def _session_env(
     proxy_env: dict[str, str],
     work_dir: Path,
     agent: str,
+    profile_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Environment for the agent or shell process inside the container.
 
-    The directory's recorded `aiab env` vars go in first, so HOME, PATH, the
-    network-proxy vars and the Wayland socket stay authoritative and can't be
-    overridden by a recorded variable.
+    A profile's vars go in first and the directory's recorded `aiab env` vars
+    on top, so the precedence is dir > profile: a profile is a reusable
+    default, and a variable set for one directory is the more specific
+    statement. Both are then overlaid with HOME, PATH, the network-proxy vars
+    and the Wayland socket, which aiab manages and which stay authoritative.
     """
-    env = dict(state.get_env(work_dir, agent))
+    env = dict(profile_env or {})
+    env.update(state.get_env(work_dir, agent))
     env["HOME"] = CONTAINER_HOME
     env["PATH"] = _CONTAINER_PATH
     env.update(proxy_env)
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
     return env
+
+
+def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
+    """Look up a --profile name and check it applies to the agent being run.
+
+    A profile that doesn't list the agent is an error rather than a silent
+    no-op: `--profile openrouter copilot` asks for something that can't work,
+    and quietly ignoring it would look like it had been applied.
+    """
+    if name is None:
+        return None
+    profile = profiles.get(name)
+    if profile is None:
+        known = ", ".join(profiles.names()) or "none"
+        sys.exit(f"Error: no profile '{name}' (known: {known})")
+    if not profiles.applies_to(profile, agent):
+        scope = ", ".join(profile.get("agents") or [])
+        sys.exit(f"Error: profile '{name}' applies to {scope}, not '{agent}'")
+    return profile
 
 
 @main.command()
@@ -791,6 +822,13 @@ def _session_env(
     default=None,
     help="build/use Ubuntu RELEASE (e.g. 22.04 or jammy) and record it for "
     "this directory",
+)
+@click.option(
+    "--profile",
+    "profile_name",
+    metavar="NAME",
+    default=None,
+    help="apply the named profile for this run (see `aiab profile list`)",
 )
 @click.option(
     "--worktree",
@@ -828,6 +866,7 @@ def run(
     add_mount: tuple[str, ...],
     add_mount_rw: tuple[str, ...],
     base_release: str | None,
+    profile_name: str | None,
     worktree: bool,
     worktree_keep: bool,
     no_git_guard: bool,
@@ -845,7 +884,15 @@ def run(
     if worktree_keep:
         worktree = True
     cfg = agents.get(agent)
-    config_host_dir = lxd.agent_home_dir(agent)
+    profile = _resolve_profile(profile_name, agent)
+    isolated = bool(profile.get("isolated")) if profile else False
+    # An isolated profile forks the agent's identity: its own credential store
+    # and its own session container, so its credentials and environment can't
+    # mix with the plain agent's. The *template* container stays keyed by the
+    # agent alone — a profile never changes how the agent is installed.
+    home_key = profiles.home_key(agent, profile_name, isolated)
+    container_prefix = profiles.container_prefix(agent, profile_name, isolated)
+    config_host_dir = lxd.agent_home_dir(home_key)
 
     work_dir = _realdir(for_dir)
 
@@ -866,12 +913,18 @@ def run(
     if use_tmux and "TMUX" not in os.environ:
         _reexec_under_tmux()  # does not return
 
-    # One-time prepare hook (OpenRouter key prompt, opencode permissive config).
+    # One-time prepare hooks (opencode's permissive config; a built-in
+    # profile's credential setup, e.g. the OpenRouter key prompt). Both run
+    # against the credential store this session will actually use.
     if cfg.prepare:
         cfg.prepare(config_host_dir)
+    if profile_name:
+        profile_prepare = profiles.PREPARE.get(profile_name)
+        if profile_prepare:
+            profile_prepare(config_host_dir)
 
     base = conn.container(release.base_container_name(agent, dir_base))
-    session = conn.container_for_dir(work_dir, agent)
+    session = conn.container_for_dir(work_dir, container_prefix)
 
     # A session cloned from a different base (the directory's base changed since
     # it was created) is discarded so it re-clones from the right template.
@@ -890,7 +943,11 @@ def run(
         provision.provision_base(
             base,
             image=release.image_for(dir_base),
-            config_host_dir=config_host_dir,
+            # Always the *agent's* own home, never a profile's: the template is
+            # shared by every profile, so building it under an isolated
+            # profile's credential store would hand that store to plain runs
+            # too. Sessions that need a different one are repointed below.
+            config_host_dir=lxd.agent_home_dir(agent),
             config_container_path=CONFIG_CONTAINER_PATH,
             config_device_name=f"{agent}config",
             install_cmds=cfg.install_cmds,
@@ -903,13 +960,20 @@ def run(
         # Record the base this session was cloned from, so a later base change
         # for the directory is detected and triggers a rebuild (above).
         session.set_config("user.aiab_base", dir_base)
+        # An isolated profile's session inherits the template's config device,
+        # which points at the agent's own home; repoint it at the profile's
+        # store. Done every run rather than at creation so it self-heals, and
+        # recorded so `aiab list` can say which profile a container belongs to.
+        if isolated:
+            session.set_device_source(f"{agent}config", config_host_dir)
+            session.set_config("user.aiab_profile", profile_name or "")
         session.apply_limits(**state.get_limits(work_dir))
 
         run_cmd = _agent_command(cfg, agent_args, shell)
         container_cwd, applied_mounts = _apply_session_mounts(
             session, cfg, work_dir, add_mount, add_mount_rw
         )
-        proxy_env = _apply_network_policy(conn, session, work_dir, agent)
+        proxy_env = _apply_network_policy(conn, session, work_dir, agent, profile_name)
 
         # If --worktree was requested, create one inside the repo and use it
         # as the agent's working directory instead of the repo root.
@@ -928,7 +992,14 @@ def run(
         if not no_git_guard:
             _apply_git_guard(session, work_dir, container_cwd, applied_mounts)
 
-        env = _session_env(session, cfg, proxy_env, work_dir, agent)
+        env = _session_env(
+            session,
+            cfg,
+            proxy_env,
+            work_dir,
+            agent,
+            profile.get("env") if profile else None,
+        )
         with _monitor_pane(work_dir, session.name, enabled=use_tmux):
             rc = session.run_interactive(
                 run_cmd,
