@@ -18,13 +18,15 @@
 # Each agent is described entirely as data: the binary to run, how to install
 # it, whether to skip permission prompts, which versioned config to overlay,
 # and an optional one-time prepare() hook for anything that can't be expressed
-# as data (the OpenRouter key prompt, opencode's permissive config). The cli
-# and migration modules iterate over this single table, so adding an agent
-# means adding one entry here.
+# as data (opencode's permissive config). The cli and migration modules
+# iterate over this single table, so adding an agent means adding one entry
+# here.
+#
+# A *variant* of an agent -- same binary, different endpoint and
+# credentials -- is not an entry here; that's a profile (see aiab.profiles).
 
 from __future__ import annotations
 
-import getpass
 import json
 import sys
 from collections.abc import Callable
@@ -36,8 +38,6 @@ from . import CONTAINER_HOME
 # Repo root (the directory containing this package), used to locate the
 # versioned config overlays that ship alongside the code.
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-
-DEFAULT_OR_MODEL: str = "anthropic/claude-sonnet-4-6"
 
 # An install/upgrade step: a human-readable description and the argv to run
 # inside the container.
@@ -59,36 +59,6 @@ def _claude_install() -> list[Step]:
             ],
         ),
     ]
-
-
-def _ensure_openrouter_config(config_host_dir: Path) -> None:
-    """Write ~/.claude/settings.json with OpenRouter config if not present."""
-    settings_path = Path(config_host_dir) / ".claude" / "settings.json"
-    if settings_path.exists():
-        return
-
-    print("OpenRouter config not found — setting up now.", file=sys.stderr)
-    print(file=sys.stderr)
-
-    api_key = getpass.getpass("OpenRouter API key (sk-or-...): ").strip()
-    if not api_key:
-        sys.exit("Error: API key is required")
-
-    model = input(f"Model [{DEFAULT_OR_MODEL}]: ").strip() or DEFAULT_OR_MODEL
-
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings = {
-        "env": {
-            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
-            "ANTHROPIC_AUTH_TOKEN": api_key,
-            "ANTHROPIC_MODEL": model,
-        }
-    }
-    with settings_path.open("w") as f:
-        json.dump(settings, f, indent=2)
-        f.write("\n")
-    print(f"Wrote OpenRouter config to {settings_path}", file=sys.stderr)
-    print(file=sys.stderr)
 
 
 def _ensure_opencode_permissive_config(config_host_dir: Path) -> None:
@@ -199,15 +169,6 @@ AGENTS: dict[str, Agent] = {
         # anthropic.com covers api./statsig./console.; claude.ai is used for
         # OAuth login; sentry.io for crash reporting.
         api_domains=["anthropic.com", "claude.ai", "claude.com", "sentry.io"],
-    ),
-    "claude-or": Agent(
-        # Claude pointed at OpenRouter instead of the Claude API. Same binary,
-        # separate template/config so credentials don't mix. No repo overlay.
-        command=f"{CONTAINER_HOME}/.local/bin/claude",
-        install_cmds=_claude_install(),
-        extra_args=["--dangerously-skip-permissions"],
-        prepare=_ensure_openrouter_config,
-        api_domains=["openrouter.ai", "sentry.io"],
     ),
     "opencode": Agent(
         command=f"{CONTAINER_HOME}/.opencode/bin/opencode",

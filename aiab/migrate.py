@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-# aiab.migrate - one-time, implicit migration from the old lxd-* tools.
+# aiab.migrate - one-time, implicit migrations between aiab layouts.
 #
 # The previous generation of scripts (lxd-claude, lxd-opencode, ...) put their
 # containers in an LXD project named 'lxd-ai', persisted config under
@@ -21,18 +21,25 @@
 # <agent>-<hash>-<basename>. aiab uses the project 'aiab',
 # ~/.local/share/aiab/<agent>/, and <agent>-<basename>-<hash>.
 #
-# maybe_migrate() runs at startup and moves everything across the first time it
-# sees the old layout. It is keyed solely off the project pair, so once 'aiab'
-# exists it does nothing.
+# maybe_migrate() moves everything across the first time it sees the old
+# layout. It is keyed solely off the project pair, so once 'aiab' exists it
+# does nothing.
+#
+# migrate_claude_or() is a later, separate migration: claude-or stopped being
+# an agent and became the built-in 'openrouter' profile. It is called from
+# `aiab run` and keyed off the old credential store still being present.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import re
 import shutil
 import sys
 from pathlib import Path
 
 from . import PROJECT
+from . import profiles
 from .agents import AGENT_NAMES
 from .lxd import Lxd, agent_home_dir
 
@@ -151,3 +158,115 @@ def _agent_for(name: str) -> str | None:
         if name == agent or name.startswith(agent + "-"):
             return agent
     return None
+
+
+# ---------------------------------------------------------------------------
+# claude-or -> the 'openrouter' profile
+# ---------------------------------------------------------------------------
+#
+# claude-or used to be an agent in its own right: the same claude binary with
+# a different endpoint, its own credential store, and its own template. It is
+# now the built-in 'openrouter' profile (see aiab.profiles), so the only thing
+# worth carrying across is the credential store — session containers are
+# disposable by design and the template is rebuilt from the shared 'claude'
+# one.
+#
+# This runs from `aiab run` rather than at startup, and is keyed off the old
+# store still being there, so it is a single stat() on every other run.
+
+_OLD_OR_AGENT = "claude-or"
+_NEW_OR_HOME = "claude@openrouter"
+
+# Supplied by the profile's env now, so they're dropped from the migrated
+# settings.json. ANTHROPIC_MODEL is not merely redundant: env outranks the
+# `model` settings field but `/model` persists a switch into it, so leaving it
+# set makes an in-session model switch silently revert on the next launch.
+_PROFILE_MANAGED = ("ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
+
+
+def migrate_claude_or(conn: Lxd) -> None:
+    """Move the old claude-or credential store to the openrouter profile's.
+
+    A no-op once done (or on an install that never used claude-or). Leftover
+    claude-or containers are reported rather than deleted: they're cheap to
+    recreate but they're the user's to remove.
+    """
+    old_home = agent_home_dir(_OLD_OR_AGENT)
+    new_home = agent_home_dir(_NEW_OR_HOME)
+    if not old_home.is_dir() or new_home.exists():
+        return
+
+    print(
+        "claude-or is now the 'openrouter' profile; moving its credentials ...",
+        file=sys.stderr,
+    )
+    new_home.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(old_home), str(new_home))
+    print(f"  Moved {old_home} -> {new_home}", file=sys.stderr)
+    # Only 'home' moved; drop the agent dir it sat in if nothing else is there.
+    with contextlib.suppress(OSError):
+        old_home.parent.rmdir()
+    _rewrite_or_settings(new_home)
+    _report_stale_or_containers(conn)
+    print("Run it with: aiab run --profile openrouter claude\n", file=sys.stderr)
+
+
+def _rewrite_or_settings(home: Path) -> None:
+    """Strip the now profile-supplied vars from a migrated settings.json.
+
+    Everything else in the file is left alone — it may hold settings the user
+    added themselves. A model that wasn't the profile's default is called out,
+    since dropping ANTHROPIC_MODEL does change which model is selected.
+    """
+    settings_path = home / ".claude" / "settings.json"
+    try:
+        with settings_path.open() as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        return
+
+    model = env.get("ANTHROPIC_MODEL")
+    dropped = [k for k in _PROFILE_MANAGED if k in env]
+    if not dropped:
+        return
+    for key in dropped:
+        del env[key]
+    with settings_path.open("w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    print(f"  Dropped {', '.join(dropped)} from {settings_path}", file=sys.stderr)
+    print("    (the profile supplies them now)", file=sys.stderr)
+    if model and model != profiles.DEFAULT_OR_MODEL:
+        print(
+            f"    Note: your model was {model}; the profile defaults to "
+            f"{profiles.DEFAULT_OR_MODEL}. To keep yours, pick it with /model, "
+            "or set it per directory with\n"
+            f"      aiab env set --agent claude ANTHROPIC_CUSTOM_MODEL_OPTION {model}",
+            file=sys.stderr,
+        )
+
+
+def _report_stale_or_containers(conn: Lxd) -> None:
+    """Name any leftover claude-or containers so the user can clear them out."""
+    try:
+        stale = [
+            n
+            for n in conn.instances()
+            if n == _OLD_OR_AGENT or n.startswith(_OLD_OR_AGENT + "-")
+        ]
+    except OSError:
+        return
+    if not stale:
+        return
+    print(
+        f"  {len(stale)} old claude-or container(s) are now unused: "
+        f"{', '.join(sorted(stale))}",
+        file=sys.stderr,
+    )
+    print(
+        "    Remove them with: lxc --project aiab delete --force <name>",
+        file=sys.stderr,
+    )

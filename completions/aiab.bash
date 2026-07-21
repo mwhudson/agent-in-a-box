@@ -14,8 +14,8 @@ _aiab() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     COMPREPLY=()
 
-    local subcommands="run remove mount unmount net base limits env opencode monitor upgrade-templates list gc lxc"
-    local agents="claude claude-or opencode copilot"
+    local subcommands="run remove mount unmount net base limits env profile opencode monitor upgrade-templates list gc lxc"
+    local agents="claude opencode copilot"
 
     _aiab_dirs() {
         if declare -F _filedir >/dev/null 2>&1; then
@@ -51,11 +51,14 @@ _aiab() {
 
     case "$sub" in
         run)
-            COMPREPLY=( $(compgen -W "$agents --for --add-mount --add-mount-rw --shell" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$agents --for --add-mount --add-mount-rw --profile --shell" -- "$cur") )
             _aiab_dirs
             ;;
         remove)
-            COMPREPLY=( $(compgen -W "$agents --for" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$agents --for --profile" -- "$cur") )
+            ;;
+        profile)
+            COMPREPLY=( $(compgen -W "add remove list show --agent --isolated --no-isolated --env --allow --description" -- "$cur") )
             ;;
         upgrade-templates)
             COMPREPLY=( $(compgen -W "$agents" -- "$cur") )

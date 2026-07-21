@@ -15,6 +15,7 @@ _aiab() {
         'base:show or set the Ubuntu release a directory builds on'
         'limits:show or set a directory'\''s resource limits'
         'env:manage env vars injected into a directory'\''s agents'
+        'profile:manage named bundles of settings for `run --profile`'
         'opencode:opencode-specific per-directory configuration'
         'monitor:open the interactive session control panel'
         'upgrade-templates:apt upgrade + reinstall agents in templates'
@@ -22,7 +23,7 @@ _aiab() {
         'gc:remove stale containers and prune dead records'
         'lxc:run lxc against the aiab project'
     )
-    agents=(claude claude-or opencode copilot)
+    agents=(claude opencode copilot)
 
     if (( CURRENT == 2 )); then
         _describe -t commands 'aiab command' subcommands
@@ -35,13 +36,25 @@ _aiab() {
                 '--for[run the agent for DIR]:directory:_files -/' \
                 '--add-mount[mount DIR read-only and record it]:directory:_files -/' \
                 '--add-mount-rw[mount DIR read-write and record it]:directory:_files -/' \
+                '--profile[apply the named profile for this run]:profile:' \
                 '--shell[open a shell instead of the agent]' \
                 "1:agent:(${agents})"
             ;;
         remove)
             _arguments \
                 '--for[target the container for DIR]:directory:_files -/' \
+                '--profile[target the container the profile runs in]:profile:' \
                 "1:agent:(${agents})"
+            ;;
+        profile)
+            _arguments \
+                "--agent[restrict the profile to one agent]:agent:(${agents})" \
+                '--isolated[give it its own credential store and container]' \
+                '--env[environment variable to inject]:assignment:' \
+                '--allow[domain to allow in restricted mode]:domain:' \
+                '--description[one-line description]:text:' \
+                '1:profile command:(add remove list show)' \
+                '*:name:'
             ;;
         upgrade-templates)
             _values 'agent' $agents

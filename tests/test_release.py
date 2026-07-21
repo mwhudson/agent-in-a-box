@@ -60,13 +60,15 @@ def test_base_name_alternate_gets_token_suffix():
 # is_base_container_name
 # ---------------------------------------------------------------------------
 
-AGENTS = ("claude", "claude-or", "opencode", "copilot")
+# Synthetic: "two-words" stands in for an agent name containing a hyphen,
+# which must not confuse the '<agent>-base-<token>' pattern.
+AGENTS = ("claude", "two-words", "opencode", "copilot")
 
 
 def test_is_base_recognises_default_and_alternate():
     assert release.is_base_container_name("claude", AGENTS)
     assert release.is_base_container_name("claude-base-2204", AGENTS)
-    assert release.is_base_container_name("claude-or-base-2404", AGENTS)
+    assert release.is_base_container_name("two-words-base-2404", AGENTS)
 
 
 def test_is_base_rejects_session_names():

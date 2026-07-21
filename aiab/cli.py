@@ -45,6 +45,7 @@ import click
 from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX, STATE_MOUNT
 from . import agents
 from . import lxd
+from . import migrate
 from . import netproxy
 from . import netwatch
 from . import profiles
@@ -884,6 +885,10 @@ def run(
     if worktree_keep:
         worktree = True
     cfg = agents.get(agent)
+    # claude-or used to be its own agent; carry its credentials over to the
+    # profile that replaced it. Keyed off the old store still existing, so
+    # this is one stat() on every run after the first.
+    migrate.migrate_claude_or(conn)
     profile = _resolve_profile(profile_name, agent)
     isolated = bool(profile.get("isolated")) if profile else False
     # An isolated profile forks the agent's identity: its own credential store
