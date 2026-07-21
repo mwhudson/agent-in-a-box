@@ -47,6 +47,7 @@ from . import agents
 from . import lxd
 from . import netproxy
 from . import netwatch
+from . import profiles
 from . import provision
 from . import release
 from . import state
@@ -1571,6 +1572,158 @@ def env_list(for_dir: str | None) -> None:
         print(f"  {label}:")
         for k, v in sorted(variables.items()):
             print(f"    {k}={v}")
+
+
+# --------------------------------------------------------------------------
+# profile
+# --------------------------------------------------------------------------
+
+
+def _print_profile(name: str, profile: profiles.Profile, builtin: bool) -> None:
+    """Print one profile as an indented block under its name."""
+    tag = " (built-in)" if builtin else ""
+    print(f"{name}{tag}")
+    if profile.get("description"):
+        print(f"  {profile['description']}")
+    scope = ", ".join(profile.get("agents") or []) or "any agent"
+    print(f"  agents:   {scope}")
+    print(f"  isolated: {'yes' if profile.get('isolated') else 'no'}")
+    if profile.get("allow"):
+        print(f"  allow:    {', '.join(profile['allow'])}")
+    for k, v in sorted(profile.get("env", {}).items()):
+        print(f"  env:      {k}={v}")
+
+
+@main.group(cls=click.Group)
+def profile() -> None:
+    """Manage named bundles of settings selected with `aiab run --profile`.
+
+    A profile carries environment variables, extra domains to allow in
+    restricted mode, and whether the session gets its own credential store. It
+    is chosen per run rather than recorded against a directory, so the same
+    directory can be used with and without one. Built-in profiles ship with
+    aiab and can't be edited or removed.
+    """
+
+
+def _parse_env_assignments(assignments: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeated NAME=VALUE options into a dict."""
+    env: dict[str, str] = {}
+    for item in assignments:
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            sys.exit(f"Error: --env expects NAME=VALUE, got '{item}'")
+        if name in _RESERVED_ENV:
+            sys.exit(f"Error: {name} is managed by aiab and can't be set here")
+        env[name] = value
+    return env
+
+
+@profile.command("add")
+@click.argument("name")
+@click.option(
+    "--agent",
+    "agent_scope",
+    type=AGENT_CHOICE,
+    multiple=True,
+    help="restrict the profile to this agent (repeatable; default: any agent)",
+)
+@click.option(
+    "--isolated/--no-isolated",
+    default=False,
+    help="give the profile its own credential store and session container",
+)
+@click.option(
+    "--env",
+    "env_assignments",
+    metavar="NAME=VALUE",
+    multiple=True,
+    help="environment variable to inject (repeatable)",
+)
+@click.option(
+    "--allow",
+    "allow_domains",
+    metavar="DOMAIN",
+    multiple=True,
+    help="domain to allow while in restricted mode (repeatable)",
+)
+@click.option("--description", default=None, help="one-line description")
+def profile_add(
+    name: str,
+    agent_scope: tuple[str, ...],
+    isolated: bool,
+    env_assignments: tuple[str, ...],
+    allow_domains: tuple[str, ...],
+    description: str | None,
+) -> None:
+    """Record a user profile called NAME, replacing any existing one."""
+    if not profiles.valid_name(name):
+        sys.exit(
+            f"Error: '{name}' isn't a usable profile name — profile names end "
+            "up in container names, so use lowercase letters, digits and "
+            "hyphens only"
+        )
+    if name in profiles.BUILTIN:
+        sys.exit(f"Error: '{name}' is a built-in profile and can't be replaced")
+    if name in agents.AGENT_NAMES:
+        sys.exit(
+            f"Error: '{name}' is an agent name; a profile sharing it would "
+            "make container names ambiguous"
+        )
+
+    new: profiles.Profile = {}
+    if description:
+        new["description"] = description
+    if agent_scope:
+        new["agents"] = list(agent_scope)
+    if isolated:
+        new["isolated"] = True
+    env = _parse_env_assignments(env_assignments)
+    if env:
+        new["env"] = env
+    if allow_domains:
+        new["allow"] = list(allow_domains)
+
+    state.set_profile(name, dict(new))
+    print(f"Recorded profile '{name}'.", file=sys.stderr)
+    _print_profile(name, new, builtin=False)
+
+
+@profile.command("remove")
+@click.argument("name")
+def profile_remove(name: str) -> None:
+    """Remove the user profile called NAME."""
+    if name in profiles.BUILTIN:
+        sys.exit(f"Error: '{name}' is a built-in profile and can't be removed")
+    if state.remove_profile(name):
+        print(f"Removed profile '{name}'.", file=sys.stderr)
+    else:
+        print(f"No profile '{name}' recorded.", file=sys.stderr)
+
+
+@profile.command("list")
+def profile_list() -> None:
+    """Show every profile, built-in and user-defined."""
+    known = profiles.names()
+    if not known:
+        print("No profiles.", file=sys.stderr)
+        return
+    for i, name in enumerate(known):
+        if i:
+            print()
+        entry = profiles.get(name)
+        assert entry is not None  # names() only yields resolvable names
+        _print_profile(name, entry, builtin=name in profiles.BUILTIN)
+
+
+@profile.command("show")
+@click.argument("name")
+def profile_show(name: str) -> None:
+    """Show one profile in detail."""
+    entry = profiles.get(name)
+    if entry is None:
+        sys.exit(f"Error: no profile '{name}' (see `aiab profile list`)")
+    _print_profile(name, entry, builtin=name in profiles.BUILTIN)
 
 
 # --------------------------------------------------------------------------
