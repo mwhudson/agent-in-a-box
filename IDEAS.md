@@ -136,29 +136,60 @@
     pulls toward the devcontainer world concepts.md positions against, and since
     LXD isn't Docker you'd need sshd + reachability and Remote-SSH (not "attach
     to running container").
-- **Let the agent reach a git remote, via a credential broker** — there's no
-  git-remote credential story today: the agent can commit locally but nothing
-  lets it push, and the obvious fix (mounting `~/.ssh` in) would hand a
-  wandering agent your whole identity. The shape to copy is the one Claude
-  Code on the web uses: the token stays *outside* the boundary and a proxy
-  issues scoped, short-lived credentials for use inside it. code-on-incus does
-  the same thing with a unix socket forwarded by an Incus proxy device, where
-  the host end never enters the container — and aiab already has exactly that
-  plumbing, since `netproxy.py` listens on an abstract unix socket reached
-  through an LXD proxy device. So a small host-side broker that mints a
-  short-lived, single-repo token on request fits the existing architecture
-  with no new mechanism.
-  Prefer that to the alternative,
+- **Let a container push to one fixed repo, with a per-directory PAT** —
+  there's no git-remote credential story today: the agent can commit locally
+  but nothing lets it push. The tempting designs are all too broad (mounting
+  `~/.ssh`, forwarding the agent, a general-purpose token in `aiab env`) or
+  too heavy (a host-side broker minting short-lived tokens on demand, as
+  Claude Code on the web does).
+  The heavy version isn't needed, and the reason is worth writing down: a
+  token scoped to *one repo* is nearly free, because the agent already has
+  read-write access to that same repo's working tree. The worst it can do with
+  the token is push bad code to a repo it can already write bad code into. The
+  real deltas are narrow — it can push without you reviewing first, and
+  depending on permissions touch other branches or rewrite history — and both
+  are bounded by one repo. On-demand minting only pays for itself when the
+  credential would otherwise be broad, which is exactly what scoping removes.
+  So: a GitHub fine-grained PAT scoped to one repo, stored per directory on
+  the host (same shape as the existing per-dir secrets, 0600), with the
+  directory's push target recorded alongside it. Details that decide the
+  implementation:
+  - *Don't inject it as an env var.* `aiab env` is the wrong vehicle —
+    environment is visible to every process in the container and trivially
+    exfiltrated. Mount it read-only and point `credential.helper store
+    --file=` at it, so it's reachable by git rather than ambient.
+  - *The URL rewrite is the bit that bites.* Remotes are usually ssh
+    (`git@github.com:…`) and a PAT only authenticates over HTTPS, so the
+    container needs `url."https://github.com/".insteadOf = "git@github.com:"`.
+    That has to live in the container's *global* git config, which aiab
+    provisions — it can't go in `.git/config`, which the git guard mounts
+    read-only. Good side effect: the rewrite exists only inside the container,
+    so the host's remote is untouched.
+  - *Egress.* `restrict` mode needs `github.com` allowed for the directory.
+    It's a CONNECT tunnel, so the proxy authorizes but can't inspect.
+  - *Expiry.* Fine-grained PATs expire, so this needs re-setting periodically.
+    That's the one thing a GitHub App broker would fix, at a cost that isn't
+    worth paying here. Org-owned repos may also require an owner to approve
+    the token before it works at all.
+  The alternative worth keeping in mind is **having the host do the push** —
+  the container asks over a socket, the host runs `git push` in the mounted
+  work dir (the commits are already there; nothing to transfer). No token
+  anywhere, works with ssh remotes and any forge, nothing to expire. With a
+  touch-required hardware key it also gets an unforgeable confirmation step
+  for free: the touch *is* the approval, with no prompt to build. It costs a
+  transport shim so the agent's `git push` doesn't just fail — either a `git`
+  wrapper intercepting one verb, or a proper `git-remote-aiab` helper (git's
+  documented extension point, which would make fetch work too, but means
+  implementing the remote-helper protocol). Prefer this if the PAT route is
+  blocked by org policy, or if unreviewed pushes turn out to be the thing
+  worth preventing.
+  Not doing:
   [sandbox-claude](https://github.com/pvillega/sandbox-claude)'s per-container
-  ed25519 deploy keys registered on one repo via `gh`: those put key material
-  inside the boundary, need admin on the repo, only work for GitHub, and need
-  a manual "add this pubkey yourself" fallback anyway. The broker beats it on
-  every axis — worth writing down because deploy keys are the more obvious
-  design and it'd be easy to reach for them first.
-  Either way this needs an egress hole: `restrict` mode masks the NIC and only
-  proxies HTTP(S), so `git push` over ssh has no path out. HTTPS remotes work
-  through the proxy, which suits token-based auth and is another point for the
-  broker.
+  ed25519 deploy keys registered via `gh`. Key material inside the boundary,
+  needs admin on the repo, GitHub-only, and needs a manual "add this pubkey"
+  fallback anyway — a scoped PAT is less machinery for a better result.
+  Noted because deploy keys are the more obvious design and it'd be easy to
+  reach for them first.
 - **A structured audit log of network decisions** — the proxy already sees and
   rules on every request and logs denials to stderr, which `aiab run`
   redirects to a per-container file under `PROXY_DIR`
