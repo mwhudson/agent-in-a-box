@@ -193,8 +193,8 @@ AGENTS: dict[str, Agent] = {
         wayland=True,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
         overlays=_overlays(
-            ("claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
-            ("claude/commands", f"{CONTAINER_HOME}/.claude/commands"),
+            ("agent-config/claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
+            ("agent-config/claude/commands", f"{CONTAINER_HOME}/.claude/commands"),
         ),
         # anthropic.com covers api./statsig./console.; claude.ai is used for
         # OAuth login; sentry.io for crash reporting.
@@ -260,11 +260,11 @@ AGENTS: dict[str, Agent] = {
         api_domains=["opencode.ai", "models.dev", "anthropic.com"],
         overlays=_overlays(
             (
-                "opencode/AGENTS.md",
+                "agent-config/opencode/AGENTS.md",
                 f"{CONTAINER_HOME}/.config/opencode/AGENTS.md",
             ),
             (
-                "opencode/commands",
+                "agent-config/opencode/commands",
                 f"{CONTAINER_HOME}/.config/opencode/commands",
             ),
         ),
@@ -305,11 +305,11 @@ AGENTS: dict[str, Agent] = {
         # command of the same name).
         overlays=_overlays(
             (
-                "copilot/copilot-instructions.md",
+                "agent-config/copilot/copilot-instructions.md",
                 f"{CONTAINER_HOME}/.copilot/copilot-instructions.md",
             ),
             (
-                "copilot/agents",
+                "agent-config/copilot/agents",
                 f"{CONTAINER_HOME}/.copilot/agents",
             ),
         ),

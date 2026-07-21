@@ -19,11 +19,11 @@ never part of the repo.
 
 ## Versioned Claude config (CLAUDE.md + slash commands)
 
-The `claude/` directory in this repo is the source of truth for the global
+The `agent-config/claude/` directory in this repo is the source of truth for the global
 config you want available in every Claude session:
 
 ```
-claude/
+agent-config/claude/
   CLAUDE.md        -> mounted at ~/.claude/CLAUDE.md  (global instructions)
   commands/        -> mounted at ~/.claude/commands/  (custom /slash commands)
 ```
@@ -48,16 +48,16 @@ Notes:
   `commands/` are overlaid from the repo.
 - This applies to the default (Claude API) `claude` agent only. The `claude-or`
   / OpenRouter agent does not get the overlay.
-- Missing entries are skipped, so it's fine to delete `claude/CLAUDE.md` or
-  leave `claude/commands/` empty.
+- Missing entries are skipped, so it's fine to delete `agent-config/claude/CLAUDE.md` or
+  leave `agent-config/claude/commands/` empty.
 
 ## Versioned opencode config (AGENTS.md + commands)
 
-The `opencode/` directory plays the same role for `aiab run opencode`,
+The `agent-config/opencode/` directory plays the same role for `aiab run opencode`,
 bind-mounted into the container's `~/.config/opencode`:
 
 ```
-opencode/
+agent-config/opencode/
   AGENTS.md       -> mounted at ~/.config/opencode/AGENTS.md       (global instructions)
   commands/       -> mounted at ~/.config/opencode/commands/       (custom commands)
 ```
@@ -88,11 +88,11 @@ there), use [`aiab opencode config`](commands.md#aiab-opencode) — see
 
 ## Versioned Copilot config (copilot-instructions.md + a custom agent)
 
-The `copilot/` directory plays the same role for `aiab run copilot`,
+The `agent-config/copilot/` directory plays the same role for `aiab run copilot`,
 bind-mounted into the container's `~/.copilot`:
 
 ```
-copilot/
+agent-config/copilot/
   copilot-instructions.md  -> mounted at ~/.copilot/copilot-instructions.md  (global instructions)
   agents/                   -> mounted at ~/.copilot/agents/                  (custom agents)
 ```
@@ -107,7 +107,7 @@ filename-to-command mapping, and custom agent files don't take arguments the
 way `$ARGUMENTS` does in the Claude/opencode commands. The closest equivalent
 it does have is a **custom agent**: a `*.agent.md` file in `~/.copilot/agents/`,
 selected interactively with `/agent` or via `copilot --agent <name>`. So
-`copilot/agents/setup-container.agent.md` carries the same instructions as
+`agent-config/copilot/agents/setup-container.agent.md` carries the same instructions as
 the Claude/opencode `/setup-container` command, but you reach it by picking
 "setup-container" from `/agent` rather than typing `/setup-container`.
 `repo-role` isn't ported at all — it exists to set per-repo latitude in

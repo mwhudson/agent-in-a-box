@@ -202,8 +202,8 @@
   because the decision point is already a single place (`evaluate()`).
   Prior art: code-on-incus ships a JSONL audit log and a `coi audit` stream.
 - **Tell the agent it's in a sandbox** — nothing currently explains the
-  confinement to the agent. The shipped `claude/CLAUDE.md` /
-  `opencode/AGENTS.md` overlays are static and say nothing about the network
+  confinement to the agent. The shipped `agent-config/claude/CLAUDE.md` /
+  `agent-config/opencode/AGENTS.md` overlays are static and say nothing about the network
   policy, so a denied request surfaces as an opaque 403 and the agent either
   flails or invents a reason. A generated per-session file — network mode and
   the current allow/deny lists, what's mounted and read-write vs read-only,
