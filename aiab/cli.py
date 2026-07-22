@@ -355,6 +355,28 @@ def _remove_worktree(
         )
 
 
+def _drop_stale_mounts(container: lxd.Container) -> None:
+    """Remove disk devices whose host source no longer exists.
+
+    A container with a bind mount to a since-moved/removed host directory
+    refuses to start under LXD. Since ``remove`` is about to delete the
+    container anyway, dropping those devices is safe and unblocks startup so
+    worktree pruning can still run. The root device and devices whose source
+    still exists are left alone.
+    """
+    for name, dev in list(container.devices().items()):
+        if dev.get("type") != "disk" or dev.get("path") == "/":
+            continue
+        source = dev.get("source")
+        if source and not Path(source).exists():
+            print(
+                f"Dropping stale mount '{name}' (source {source} no longer "
+                f"exists on host)",
+                file=sys.stderr,
+            )
+            container.remove_device(name)
+
+
 def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     """Prune stale worktree bookkeeping for a repo (e.g. after a crash)."""
     subprocess.run(
@@ -1073,15 +1095,31 @@ def remove(
     if not session.exists():
         print(f"No container '{session.name}' to remove.", file=sys.stderr)
         return
-    # Prune stale worktrees before deleting — only possible if the container is
-    # running (exec needs a live container). Start it temporarily if needed.
+    # Prune stale worktrees before deleting — only possible if the container
+    # is running (exec needs a live container) and the host working directory
+    # still exists. Start the container temporarily if needed, but first drop
+    # any bind mounts whose host source has disappeared: a missing source
+    # makes LXD refuse to start. If the working directory itself is gone, or
+    # the container still won't start after dropping stale mounts, skip prune
+    # and fall through to delete (which works on a stopped container).
+    can_prune = work_dir.is_dir()
     was_stopped = session.status() != "RUNNING"
-    if was_stopped:
-        session.start()
-    container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
-    _prune_worktrees(session, container_cwd, CONTAINER_USER)
-    if was_stopped:
-        session.stop(timeout=30)
+    if was_stopped and can_prune:
+        _drop_stale_mounts(session)
+        try:
+            session.start()
+        except subprocess.CalledProcessError:
+            print(
+                f"Container '{session.name}' would not start; skipping "
+                f"worktree prune and deleting directly.",
+                file=sys.stderr,
+            )
+            can_prune = False
+    if can_prune:
+        container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
+        _prune_worktrees(session, container_cwd, CONTAINER_USER)
+        if was_stopped:
+            session.stop(timeout=30)
     print(f"Removing container '{session.name}' ...", file=sys.stderr)
     session.delete()
     _stop_proxy(session.name)  # in case a crashed session left one behind
