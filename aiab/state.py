@@ -159,10 +159,6 @@ def _load_mounts() -> MountState:
     return _load_file(_MOUNTS_PATH)
 
 
-def _save_mounts(data: MountState) -> None:
-    _save_file(_MOUNTS_PATH, data)
-
-
 # Keys and sources are stored (and compared) as resolved path *strings*, so the
 # JSON stays human-readable and round-trips through json.load as plain str.
 def _key(path: StrPath) -> str:
