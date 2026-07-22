@@ -8,9 +8,12 @@ from typing import Any
 
 import pytest
 
+import click
+
 from aiab import CONTAINER_HOME
 from aiab import agents, profiles, state
 from aiab.cli import (
+    _agent_command,
     _guard_git_repo,
     _json_set,
     _json_unset,
@@ -263,7 +266,7 @@ def test_resolve_profile_returns_builtin():
 
 
 def test_resolve_profile_unknown_name_exits():
-    with pytest.raises(SystemExit) as e:
+    with pytest.raises(click.ClickException) as e:
         _resolve_profile("nosuch", "claude")
     assert "no profile 'nosuch'" in str(e.value)
 
@@ -271,7 +274,7 @@ def test_resolve_profile_unknown_name_exits():
 def test_resolve_profile_wrong_agent_exits():
     # A profile scoped to another agent is an error, not a silent no-op: the
     # run would otherwise look like it had been applied.
-    with pytest.raises(SystemExit) as e:
+    with pytest.raises(click.ClickException) as e:
         _resolve_profile("openrouter", "copilot")
     assert "applies to claude" in str(e.value)
 
@@ -310,3 +313,86 @@ def test_session_env_aiab_vars_beat_both(monkeypatch):
     # HOME/PATH are managed by aiab and can't be displaced by either source.
     env = _env_for(monkeypatch, {"HOME": "/nope"}, {"HOME": "/also-nope"})
     assert env["HOME"] == CONTAINER_HOME
+
+
+# ---------------------------------------------------------------------------
+# _agent_command
+# ---------------------------------------------------------------------------
+
+
+def test_agent_command_runs_the_agent_with_args():
+    cfg = agents.get("claude")
+    assert _agent_command(cfg, ("-c", "echo hi"), shell=False) == [
+        cfg.command,
+        *cfg.extra_args,
+        "-c",
+        "echo hi",
+    ]
+
+
+def test_agent_command_shell_with_no_args():
+    cfg = agents.get("claude")
+    assert _agent_command(cfg, (), shell=True) == ["bash", "-l"]
+
+
+def test_agent_command_shell_rejects_agent_args():
+    # --shell can't pass agent_args through to bash, so it errors instead of
+    # silently dropping them.
+    cfg = agents.get("claude")
+    with pytest.raises(click.UsageError):
+        _agent_command(cfg, ("-c", "echo hi"), shell=True)
+
+
+# ---------------------------------------------------------------------------
+# _agent_containers
+# ---------------------------------------------------------------------------
+
+
+def test_agent_containers_yields_isolated_profile_prefixes(monkeypatch, tmp_path):
+    # mount/unmount must reach isolated-profile session containers (e.g.
+    # claude-openrouter-<slug>), not just the plain agent ones — otherwise
+    # unmount can never remove a device it left on a profile container.
+    # Mirrors test_profiles.py's session_prefixes coverage, one level up.
+    from aiab import lxd
+    from aiab.cli import _agent_containers
+
+    class _FakeContainer:
+        def __init__(self, name):
+            self.name = name
+
+        def exists(self):
+            return True
+
+    requested_prefixes = []
+
+    def fake_container_for_dir(self, path, prefix):
+        requested_prefixes.append(prefix)
+        return _FakeContainer(f"{prefix}-slug")
+
+    monkeypatch.setattr(lxd.Lxd, "container_for_dir", fake_container_for_dir)
+
+    conn = lxd.Lxd("aiab")
+    result = list(_agent_containers(conn, tmp_path))
+
+    prefixes = [prefix for prefix, _ in result]
+    assert "claude" in prefixes
+    assert "claude-openrouter" in prefixes  # the built-in isolated profile
+    assert prefixes == requested_prefixes
+
+
+def test_agent_containers_skips_containers_that_dont_exist(monkeypatch, tmp_path):
+    from aiab import lxd
+    from aiab.cli import _agent_containers
+
+    class _MissingContainer:
+        name = "irrelevant"
+
+        def exists(self):
+            return False
+
+    monkeypatch.setattr(
+        lxd.Lxd, "container_for_dir", lambda self, path, prefix: _MissingContainer()
+    )
+
+    conn = lxd.Lxd("aiab")
+    assert list(_agent_containers(conn, tmp_path)) == []

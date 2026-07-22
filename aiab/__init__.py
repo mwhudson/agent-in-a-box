@@ -34,8 +34,11 @@ PROJECT: str = "aiab"
 # Conventions shared by every agent container. The working directory (and any
 # extra mounts) land under WORK_PREFIX; the container runs as CONTAINER_USER
 # with CONTAINER_HOME as its home, mapped to the host user via raw.idmap so
-# files created in mounts are owned by the host user.
+# files created in mounts are owned by the host user. CONTAINER_LOGIN is the
+# same account's login name — needed wherever a uid isn't accepted (e.g.
+# `runuser -u`) — kept as its own constant so the two can't silently diverge.
 CONTAINER_USER: int = 1000
+CONTAINER_LOGIN: str = "ubuntu"
 CONTAINER_HOME: str = "/home/ubuntu"
 WORK_PREFIX: str = "/work"
 

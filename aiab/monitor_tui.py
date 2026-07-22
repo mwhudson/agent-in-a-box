@@ -53,8 +53,8 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from textual import events
@@ -62,6 +62,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import Suggester
+from textual.widget import Widget
 from textual.widgets import Button, Input, RichLog, Static
 
 from . import PROJECT, WORK_PREFIX
@@ -70,7 +71,7 @@ from . import netproxy
 from . import netwatch
 from . import profiles
 from . import state
-from .lxd import Lxd
+from .lxd import Container, Lxd
 
 # Ports below this threshold are skipped when scanning the container's socket
 # table — they're nearly always system services (sshd, DNS, etc.) rather than
@@ -127,13 +128,33 @@ class PendingRow(Horizontal):
 
 
 class DecisionRow(Horizontal):
-    """One already-decided domain and the buttons to re-decide or drop it."""
+    """One already-decided domain and (if editable) the buttons to re-decide
+    or drop it.
 
-    def __init__(self, domain: str, kind: str, expires: float | None = None) -> None:
+    Covers three scopes (see aiab.state.NetworkPolicy / get_global_network):
+    this directory's all-agents rules (agent=None, editable), this
+    directory's per-agent overlay (agent=<name>, editable, tagged), and the
+    global policy shared by every directory (editable=False, tagged) — shown
+    read-only so a rule set globally (aiab net --global) isn't invisible
+    here, which would otherwise let a user conclude no rule exists and try to
+    add a contradictory local one.
+    """
+
+    def __init__(
+        self,
+        domain: str,
+        kind: str,
+        expires: float | None = None,
+        *,
+        agent: str | None = None,
+        editable: bool = True,
+    ) -> None:
         super().__init__()
         self.domain = domain
         self.kind = kind  # netwatch.ALLOW or netwatch.DENY
         self.expires = expires
+        self.agent = agent
+        self.editable = editable
 
     def compose(self) -> ComposeResult:
         if self.kind == netwatch.DENY:
@@ -144,6 +165,11 @@ class DecisionRow(Horizontal):
             badge, badge_class = "allowed", "badge-allow"
         yield Static(self.domain, classes="domain")
         yield Static(badge, classes=f"badge {badge_class}")
+        if self.agent:
+            yield Static(f"[{self.agent}]", classes="scope-tag")
+        if not self.editable:
+            yield Static("(global)", classes="scope-tag scope-global")
+            return
         yield Button("Allow", name=netwatch.ALLOW, classes=netwatch.ALLOW)
         yield Button("15m", name=netwatch.TEMP, classes=netwatch.TEMP)
         yield Button("Deny", name=netwatch.DENY, classes=netwatch.DENY)
@@ -198,11 +224,6 @@ class PortForwardRow(Horizontal):
     def compose(self) -> ComposeResult:
         yield Static(f"localhost:{self.port}", classes="port-label")
         yield Button("×", name="remove", classes="remove")
-
-
-_LIMIT_SIZE_RE = re.compile(
-    r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE
-)
 
 
 class LimitRow(Horizontal):
@@ -378,6 +399,14 @@ class MonitorApp(App[None]):
     DecisionRow .remove {
         min-width: 3;
         background: $error-darken-2;
+    }
+    DecisionRow .scope-tag {
+        width: auto;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    DecisionRow .scope-global {
+        text-style: italic;
     }
     #add-domain-row {
         height: 1;
@@ -681,20 +710,53 @@ class MonitorApp(App[None]):
 
     # -- domains view --
 
+    @staticmethod
+    def _decision_rows(
+        policy: state.NetworkPolicy, *, editable: bool
+    ) -> list[DecisionRow]:
+        """DecisionRows for one policy's all-agents and per-agent rules.
+
+        Allowed domains first, then denied; alphabetical within each group so
+        rows are easy to find and stay put when a flip moves a domain between
+        the groups (the policy lists themselves are in decision order).
+        """
+        rows = [
+            DecisionRow(a["domain"], netwatch.ALLOW, a["expires"], editable=editable)
+            for a in sorted(policy["allow"], key=lambda a: a["domain"])
+        ] + [
+            DecisionRow(d, netwatch.DENY, editable=editable)
+            for d in sorted(policy["deny"])
+        ]
+        for agent_name, bucket in sorted(policy.get("agents", {}).items()):
+            rows += [
+                DecisionRow(
+                    a["domain"],
+                    netwatch.ALLOW,
+                    a["expires"],
+                    agent=agent_name,
+                    editable=editable,
+                )
+                for a in sorted(bucket["allow"], key=lambda a: a["domain"])
+            ] + [
+                DecisionRow(d, netwatch.DENY, agent=agent_name, editable=editable)
+                for d in sorted(bucket["deny"])
+            ]
+        return rows
+
     def _refresh_domains(self) -> None:
         domain_list = self.query_one("#domain-list", VerticalScroll)
-        # Allowed domains first, then denied; alphabetical within each group so
-        # rows are easy to find and stay put when a flip moves a domain between
-        # the groups (the policy lists themselves are in decision order).
-        policy = state.get_network(self.work_dir)
-        rows = [
-            DecisionRow(a["domain"], netwatch.ALLOW, a["expires"])
-            for a in sorted(policy["allow"], key=lambda a: a["domain"])
-        ] + [DecisionRow(d, netwatch.DENY) for d in sorted(policy["deny"])]
+        # This directory's rules (editable here) first, then the global ones
+        # (aiab.net --global) — shown read-only, since editing them from a
+        # single directory's view would be surprising.
+        rows = self._decision_rows(
+            state.get_network(self.work_dir), editable=True
+        ) + self._decision_rows(state.get_global_network(), editable=False)
         self._replace_rows(domain_list, DecisionRow, rows)
 
     def _decide_domain(self, row: DecisionRow, action: str) -> None:
-        self._write_log(netwatch.apply_decision(self.work_dir, row.domain, action))
+        self._write_log(
+            netwatch.apply_decision(self.work_dir, row.domain, action, agent=row.agent)
+        )
         self._refresh_domains()
         self._refresh_policy()
 
@@ -709,9 +771,10 @@ class MonitorApp(App[None]):
     def _remove_domain(self, row: DecisionRow) -> None:
         # Allow and deny are disjoint, so the domain is in at most one list;
         # drop it from both so the host is parked and re-prompted next time.
-        state.remove_network_allow(self.work_dir, row.domain)
-        state.remove_network_deny(self.work_dir, row.domain)
-        self._write_log(f"removed {row.domain}")
+        state.remove_network_allow(self.work_dir, row.domain, agent=row.agent)
+        state.remove_network_deny(self.work_dir, row.domain, agent=row.agent)
+        tag = f" [{row.agent}]" if row.agent else ""
+        self._write_log(f"removed {row.domain}{tag}")
         self._refresh_domains()
         self._refresh_policy()
 
@@ -725,7 +788,7 @@ class MonitorApp(App[None]):
         ]
         self._replace_rows(mount_list, MountRow, rows)
 
-    def _containers(self) -> list:
+    def _containers(self) -> list[Container]:
         """The session containers a mounts edit should apply to, live.
 
         The named one when `aiab run` handed us a container, otherwise every
@@ -752,7 +815,9 @@ class MonitorApp(App[None]):
     def _write_log(self, message: str) -> None:
         self.query_one("#log", RichLog).write(message)
 
-    def _replace_rows(self, container, row_type, rows) -> None:
+    def _replace_rows(
+        self, container: Widget, row_type: type[Widget], rows: Sequence[Widget]
+    ) -> None:
         """Replace the row widgets in a list-like container."""
         for row in container.query(row_type):
             row.remove()
@@ -915,23 +980,15 @@ class MonitorApp(App[None]):
 
     def _apply_limit(self, field: str, value: str) -> None:
         limits = state.get_limits(self.work_dir)
-        if field == "cpu":
-            try:
-                cpu = int(value)
-                if cpu < 1:
-                    raise ValueError
-            except ValueError:
-                self._write_log(f"invalid cpu: {value!r} — must be a positive integer")
+        try:
+            if field == "cpu":
+                limits["cpu"] = state.parse_cpu(value)
+            elif field == "memory":
+                limits["memory"] = state.parse_memory(value)
+            else:
                 return
-            limits["cpu"] = cpu
-        elif field == "memory":
-            if not _LIMIT_SIZE_RE.match(value):
-                self._write_log(
-                    f"invalid memory: {value!r} — expected e.g. 8GiB or 512MiB"
-                )
-                return
-            limits["memory"] = value
-        else:
+        except ValueError as e:
+            self._write_log(str(e))
             return
         state.set_limits(self.work_dir, limits)
         self._apply_to_containers(

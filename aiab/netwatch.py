@@ -108,22 +108,28 @@ def attached(pdir: Path) -> Iterator[None]:
                 pid_file.unlink()
 
 
-def apply_decision(work_dir: Path, host: str, action: str) -> str:
+def apply_decision(
+    work_dir: Path, host: str, action: str, *, agent: str | None = None
+) -> str:
     """Record one watch decision; return a line describing what happened.
 
     Parked requests poll the policy themselves, so an ALLOW/DENY here is all
     it takes to release them; SKIP records nothing and leaves the request to
-    time out.
+    time out. agent scopes the rule to one agent (default: all agents), as
+    with the underlying state.add_network_allow/deny.
     """
+    suffix = f" [{agent}]" if agent else ""
     if action == ALLOW:
-        state.add_network_allow(work_dir, host, None)
-        return f"allowed {host}"
+        state.add_network_allow(work_dir, host, None, agent=agent)
+        return f"allowed {host}{suffix}"
     if action == TEMP:
-        state.add_network_allow(work_dir, host, time.time() + _TEMP_ALLOW_SECS)
-        return f"allowed {host} for 15m"
+        state.add_network_allow(
+            work_dir, host, time.time() + _TEMP_ALLOW_SECS, agent=agent
+        )
+        return f"allowed {host} for 15m{suffix}"
     if action == DENY:
-        state.add_network_deny(work_dir, host)
-        return f"denied {host}"
+        state.add_network_deny(work_dir, host, agent=agent)
+        return f"denied {host}{suffix}"
     return f"skipped {host} (request will time out)"
 
 

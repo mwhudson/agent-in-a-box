@@ -51,7 +51,7 @@ _aiab() {
 
     case "$sub" in
         run)
-            COMPREPLY=( $(compgen -W "$agents --for --add-mount --add-mount-rw --profile --shell" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$agents --for --add-mount --add-mount-rw --base --profile --worktree --worktree-keep --no-git-guard --shell --no-tmux" -- "$cur") )
             _aiab_dirs
             ;;
         remove)

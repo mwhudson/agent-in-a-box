@@ -58,6 +58,46 @@ def test_name_length_within_lxd_limit():
     assert len(name) <= 63
 
 
+@pytest.mark.parametrize("prefix", ["claude", "opencode", "copilot"])
+def test_name_length_within_lxd_limit_for_every_agent_prefix(prefix):
+    # Regression test: opencode-<slug> and copilot-<slug> are longer than
+    # claude-<slug> for the same basename, so the claude-only check above
+    # doesn't catch a cap sized only for the shortest prefix.
+    long_path = "/home/user/" + "a" * 200
+    name = container_name_for_dir(long_path, prefix)
+    assert len(name) <= 63
+
+
+def test_name_length_within_lxd_limit_for_isolated_profile_prefix():
+    # Isolated-profile prefixes are "<agent>-<profile>" (aiab.profiles.
+    # container_prefix), which can push the total well past a plain agent
+    # prefix's length.
+    long_path = "/home/user/" + "a" * 200
+    name = container_name_for_dir(long_path, "claude-openrouter")
+    assert len(name) <= 63
+
+
+def test_name_length_within_lxd_limit_for_max_length_profile_name():
+    # profiles.MAX_NAME_LEN is the longest a user profile name can be; even
+    # at that length, combined with the longest agent name, the container
+    # name must still fit.
+    from aiab import profiles
+
+    prefix = "opencode-" + "p" * profiles.MAX_NAME_LEN
+    long_path = "/home/user/" + "a" * 200
+    name = container_name_for_dir(long_path, prefix)
+    assert len(name) <= 63
+
+
+def test_name_keeps_hash_suffix_stable_when_truncated():
+    # Truncation must shorten only the basename part, never the trailing
+    # hash — is_source_device() and the dirstate correlation key off it.
+    long_path = "/home/user/" + "a" * 200
+    short_name = container_name_for_dir(long_path, "x")
+    long_name = container_name_for_dir(long_path, "claude-openrouter")
+    assert short_name.rsplit("-", 1)[-1] == long_name.rsplit("-", 1)[-1]
+
+
 # ---------------------------------------------------------------------------
 # dir_slug
 # ---------------------------------------------------------------------------
@@ -210,6 +250,64 @@ def test_set_config_writes_when_changed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Container.exec
+# ---------------------------------------------------------------------------
+
+
+def test_exec_default_argv_has_no_cwd_or_user(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    Container(Lxd("aiab"), "c1").exec(["true"])
+    assert seen["cmd"] == ["lxc", "--project", "aiab", "exec", "c1", "--", "true"]
+
+
+def test_exec_passes_cwd_and_user(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    Container(Lxd("aiab"), "c1").exec(["true"], cwd="/work/x", user=1000)
+    assert seen["cmd"] == [
+        "lxc",
+        "--project",
+        "aiab",
+        "exec",
+        "c1",
+        "--cwd=/work/x",
+        "--user=1000",
+        "--group=1000",
+        "--",
+        "true",
+    ]
+
+
+def test_exec_checked_by_default_raises_on_failure(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        Container(Lxd("aiab"), "c1").exec(["false"])
+
+
+def test_exec_unchecked_returns_failure_without_raising(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    r = Container(Lxd("aiab"), "c1").exec(["false"], check=False)
+    assert r.returncode == 1
+
+
+# ---------------------------------------------------------------------------
 # lazy project creation in run()
 # ---------------------------------------------------------------------------
 
@@ -265,6 +363,56 @@ def test_run_does_not_probe_for_non_project_commands(monkeypatch):
     with pytest.raises(subprocess.CalledProcessError):
         lxd.run(["lxc", "project", "list"])  # no --project; nothing to create
     assert seen == [["lxc", "project", "list"]]  # no project show/create probe
+
+
+# ---------------------------------------------------------------------------
+# ensure_project (eager create-on-demand, for aiab.cli's `lxc` passthrough)
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_project_creates_when_missing(monkeypatch):
+    lxd._ensured_projects.clear()
+    project = {"exists": False}
+    created: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["lxc", "project", "show"]:
+            return subprocess.CompletedProcess(cmd, 0 if project["exists"] else 1)
+        if cmd[:3] == ["lxc", "project", "create"]:
+            created.append(cmd[3])
+            project["exists"] = True
+            return subprocess.CompletedProcess(cmd, 0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    lxd.ensure_project("aiab")
+    assert created == ["aiab"]
+
+
+def test_ensure_project_noop_when_present(monkeypatch):
+    lxd._ensured_projects.clear()
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["lxc", "project", "show"]:
+            return subprocess.CompletedProcess(cmd, 0)  # exists
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    lxd.ensure_project("aiab")  # must not attempt to create
+
+
+def test_ensure_project_probes_at_most_once(monkeypatch):
+    lxd._ensured_projects.clear()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)  # exists
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    lxd.ensure_project("aiab")
+    lxd.ensure_project("aiab")
+    assert len(calls) == 1
 
 
 def test_apply_limits_unchanged_is_free(monkeypatch):

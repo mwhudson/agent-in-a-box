@@ -17,24 +17,22 @@
 #
 # A Click group with a command per verb (run, remove, mount, unmount, net,
 # upgrade-templates, list, lxc). The LXD engine (Lxd/Container) lives in
-# aiab.lxd, provisioning in aiab.provision, and the per-agent data in
-# aiab.agents; this module just parses arguments and orchestrates. The Lxd
-# connection is built once per invocation and passed to commands via ctx.obj.
+# aiab.lxd, provisioning in aiab.provision, the per-agent data in aiab.agents,
+# and the filtering-proxy/idle-stop plumbing in aiab.lifecycle; this module
+# just parses arguments and orchestrates. The Lxd connection is built once
+# per invocation and passed to commands via ctx.obj.
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import re
 import shlex
-import tempfile
 import shutil
-import signal
-import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -42,8 +40,16 @@ from typing import Any
 
 import click
 
-from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX, STATE_MOUNT
+from . import (
+    PROJECT,
+    CONTAINER_LOGIN,
+    CONTAINER_USER,
+    CONTAINER_HOME,
+    WORK_PREFIX,
+    STATE_MOUNT,
+)
 from . import agents
+from . import lifecycle
 from . import lxd
 from . import netproxy
 from . import netwatch
@@ -66,43 +72,17 @@ _CONTAINER_PATH: str = (
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
-# Per-container lock files live here. Each 'aiab run' holds a shared flock
-# for the duration of its session; when the last one exits, a detached helper
-# (aiab.stopper) stops the container after IDLE_STOP_DELAY unless a new
-# session has taken the lock again — so exiting doesn't block on the stop,
-# and back-to-back sessions reuse the still-running container.
-_LOCK_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "locks"
-
-# How long a container stays up after its last session exits (seconds).
-IDLE_STOP_DELAY: float = 5 * 60
-
-# The stopper helpers log here, named after the container.
-_STOPPER_DIR: Path = Path.home() / ".local" / "share" / "aiab" / "stopper"
-
-# Host-side filtering proxies (one per restricted session container, see
-# aiab.netproxy) keep their pidfile/log in netproxy.PROXY_DIR, named after the
-# container. The proxy itself listens on an abstract unix socket (no
-# filesystem presence): snap-confined LXD's forkproxy can't dial socket paths
-# under the user's home, but abstract sockets live in the (shared) network
-# namespace.
-_PROXY_DIR: Path = netproxy.PROXY_DIR
-
-
-def _proxy_socket_name(container_name: str) -> str:
-    """The abstract socket address for a container's proxy, with leading @.
-
-    Understood in this form by both aiab.netproxy (--socket) and LXD proxy
-    devices (connect=unix:@...). Includes the uid so concurrent aiab users on
-    one host can't collide in the abstract namespace.
-    """
-    return f"@aiab-{os.getuid()}-{container_name}"
-
 
 def _agent_command(
     cfg: agents.Agent, agent_args: tuple[str, ...], shell: bool
 ) -> list[str]:
     """Build the command run interactively inside the session container."""
     if shell:
+        # bash doesn't take the agent's arguments; silently dropping them
+        # would be confusing (`aiab run --shell claude -- -c 'echo hi'` would
+        # just open a shell with no explanation), so reject the combination.
+        if agent_args:
+            raise click.UsageError("--shell doesn't take agent arguments")
         return ["bash", "-l"]
     cmd_args = list(cfg.extra_args) + list(agent_args)
     return [cfg.command] + cmd_args
@@ -110,161 +90,6 @@ def _agent_command(
 
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
-
-
-def _helper_env() -> dict[str, str]:
-    """Env for detached helper processes (netproxy, stopper).
-
-    They run `python -m aiab.<module>`, so the aiab package must be
-    importable regardless of cwd.
-    """
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in [str(agents.REPO_ROOT), env.get("PYTHONPATH")] if p
-    )
-    return env
-
-
-# -- filtering proxy lifecycle --
-
-
-def _proxy_pid(container_name: str) -> int | None:
-    """Return the pid of a live proxy for a container, or None."""
-    try:
-        pid = int((_PROXY_DIR / f"{container_name}.pid").read_text())
-        os.kill(pid, 0)  # just probes for existence
-    except (OSError, ValueError):
-        return None
-    return pid
-
-
-def _proxy_socket_live(socket_name: str) -> bool:
-    """Return True if something accepts connections on an @abstract socket."""
-    s = socket.socket(socket.AF_UNIX)
-    try:
-        s.connect("\0" + socket_name[1:])
-    except OSError:
-        return False
-    finally:
-        s.close()
-    return True
-
-
-def _ensure_proxy(
-    session: lxd.Container, work_dir: Path, agent: str, profile: str | None = None
-) -> str:
-    """Start the filtering proxy for a session container (or reuse a live one).
-
-    Returns the abstract socket address (with leading @) the proxy listens
-    on. The proxy is shared by concurrent `aiab run`s for the same container
-    and stopped alongside the container by _auto_stop_on_exit.
-    """
-    _PROXY_DIR.mkdir(parents=True, exist_ok=True)
-    sock_name = _proxy_socket_name(session.name)
-    log = _PROXY_DIR / f"{session.name}.log"
-    if _proxy_pid(session.name) is not None and _proxy_socket_live(sock_name):
-        return sock_name
-
-    argv = [
-        sys.executable,
-        "-m",
-        "aiab.netproxy",
-        f"--socket={sock_name}",
-        f"--dir={work_dir}",
-        f"--agent={agent}",
-        f"--pending-dir={netwatch.pending_dir(work_dir)}",
-    ]
-    if profile:
-        argv.append(f"--profile={profile}")
-    with log.open("ab") as log_fd:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fd,
-            stderr=log_fd,
-            start_new_session=True,
-            env=_helper_env(),
-        )
-    (_PROXY_DIR / f"{session.name}.pid").write_text(f"{proc.pid}\n")
-
-    # Wait for the socket so the LXD proxy device has something to connect to.
-    for _ in range(50):
-        if _proxy_socket_live(sock_name):
-            break
-        if proc.poll() is not None:
-            raise click.ClickException(f"network proxy failed to start; see {log}")
-        time.sleep(0.1)
-    else:
-        raise click.ClickException(f"network proxy did not come up; see {log}")
-    print(f"Started filtering proxy (denials logged to {log})", file=sys.stderr)
-    return sock_name
-
-
-def _stop_proxy(container_name: str) -> None:
-    """Stop the proxy for a container, if one is running, and clean up.
-
-    The abstract socket disappears with the process; the .sock unlink only
-    cleans up files left by versions that used filesystem sockets.
-    """
-    pid = _proxy_pid(container_name)
-    if pid is not None:
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGTERM)
-    (_PROXY_DIR / f"{container_name}.pid").unlink(missing_ok=True)
-    (_PROXY_DIR / f"{container_name}.sock").unlink(missing_ok=True)
-
-
-def _spawn_stopper(container_name: str) -> None:
-    """Launch the detached helper that stops an idle container later."""
-    _STOPPER_DIR.mkdir(parents=True, exist_ok=True)
-    log = _STOPPER_DIR / f"{container_name}.log"
-    with log.open("ab") as log_fd:
-        subprocess.Popen(
-            [sys.executable, "-m", "aiab.stopper", container_name],
-            stdin=subprocess.DEVNULL,
-            stdout=log_fd,
-            stderr=log_fd,
-            start_new_session=True,
-            env=_helper_env(),
-        )
-
-
-@contextlib.contextmanager
-def _stop_when_idle(session: lxd.Container) -> Iterator[None]:
-    """Hold the session lock; on exit, schedule a stop if we were the last.
-
-    Each 'aiab run' holds a shared flock on a per-container lock file for the
-    duration of its session (agent or shell). The lock is taken *before* the
-    container is started, so a pending stopper can never shoot down a
-    container that a new run has just brought up. On exit we try to upgrade
-    to an exclusive lock (non-blocking): if that fails another aiab process
-    is still using the container; if it succeeds we are the last one out and
-    spawn aiab.stopper, which stops the container IDLE_STOP_DELAY seconds
-    later unless a new session has taken the lock by then. The proxy teardown
-    moves to the stopper too, so a quick follow-up session can reuse a live
-    proxy.
-
-    The OS releases flocks automatically on process death, so there are no
-    stale lock files to handle after a crash.
-    """
-    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    with (_LOCK_DIR / session.name).open("w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_SH)
-        try:
-            yield
-        finally:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                pass  # another aiab process is still using this container
-            else:
-                _spawn_stopper(session.name)
-                print(
-                    f"Container '{session.name}' stops in "
-                    f"{int(IDLE_STOP_DELAY // 60)} minutes unless a new "
-                    "session starts.",
-                    file=sys.stderr,
-                )
 
 
 # -- git worktree helpers --
@@ -281,24 +106,17 @@ def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
     <repo>/.git/aiab-worktrees/<session-id>/. A detached HEAD avoids
     creating throwaway branch refs that litter the reflog.
     """
-    session_id = str(int(time.time()))
+    # time_ns() rather than time.time(): two --worktree runs starting in the
+    # same second would otherwise collide on this path.
+    session_id = str(time.time_ns())
     worktree_path = f"{repo_cwd}/{_WORKTREE_DIR}/{session_id}"
 
     # Verify it's actually a git repo.
-    r = subprocess.run(
-        session._argv(
-            [
-                "exec",
-                session.name,
-                f"--cwd={repo_cwd}",
-                f"--user={user}",
-                f"--group={user}",
-                "--",
-                "git",
-                "rev-parse",
-                "--git-dir",
-            ]
-        ),
+    r = session.exec(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=repo_cwd,
+        user=user,
+        check=False,
         capture_output=True,
     )
     if r.returncode != 0:
@@ -311,7 +129,7 @@ def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
         [
             "runuser",
             "-u",
-            "ubuntu",
+            CONTAINER_LOGIN,
             "--",
             "git",
             "-C",
@@ -326,16 +144,14 @@ def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
     return worktree_path
 
 
-def _remove_worktree(
-    session: lxd.Container, repo_cwd: str, worktree_path: str, user: int
-) -> None:
+def _remove_worktree(session: lxd.Container, repo_cwd: str, worktree_path: str) -> None:
     """Remove a worktree created by _setup_worktree."""
     try:
         session.exec(
             [
                 "runuser",
                 "-u",
-                "ubuntu",
+                CONTAINER_LOGIN,
                 "--",
                 "git",
                 "-C",
@@ -378,20 +194,11 @@ def _drop_stale_mounts(container: lxd.Container) -> None:
 
 def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     """Prune stale worktree bookkeeping for a repo (e.g. after a crash)."""
-    subprocess.run(
-        session._argv(
-            [
-                "exec",
-                session.name,
-                f"--cwd={repo_cwd}",
-                f"--user={user}",
-                f"--group={user}",
-                "--",
-                "git",
-                "worktree",
-                "prune",
-            ]
-        ),
+    session.exec(
+        ["git", "worktree", "prune"],
+        cwd=repo_cwd,
+        user=user,
+        check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -736,7 +543,7 @@ def _apply_network_policy(
         return {}
 
     session.mask_profile_devices(nic_names)
-    sock_name = _ensure_proxy(session, work_dir, agent, profile)
+    sock_name = lifecycle.ensure_proxy(session, work_dir, agent, profile)
     session.add_proxy_device(
         "netproxy",
         listen=f"tcp:127.0.0.1:{netproxy.PROXY_PORT}",
@@ -806,10 +613,12 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     profile = profiles.get(name)
     if profile is None:
         known = ", ".join(profiles.names()) or "none"
-        sys.exit(f"Error: no profile '{name}' (known: {known})")
+        raise click.ClickException(f"no profile '{name}' (known: {known})")
     if not profiles.applies_to(profile, agent):
         scope = ", ".join(profile.get("agents") or [])
-        sys.exit(f"Error: profile '{name}' applies to {scope}, not '{agent}'")
+        raise click.ClickException(
+            f"profile '{name}' applies to {scope}, not '{agent}'"
+        )
     return profile
 
 
@@ -854,7 +663,7 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
 @click.option(
     "--worktree",
     is_flag=True,
-    help="run the agent in a fresh git worktree (branched from HEAD)",
+    help="run the agent in a fresh git worktree (detached at HEAD)",
 )
 @click.option(
     "--worktree-keep",
@@ -924,7 +733,7 @@ def run(
         try:
             state.set_base(work_dir, release.normalize(base_release))
         except ValueError as e:
-            sys.exit(f"Error: {e}")
+            raise click.ClickException(str(e))
     dir_base = state.get_base(work_dir)
 
     # Wrap sessions in tmux (see the tmux control plane section).
@@ -976,7 +785,7 @@ def run(
         )
     # The session lock is held from before the container starts, so a pending
     # stopper from an earlier session can't stop it out from under us mid-setup.
-    with _stop_when_idle(session):
+    with lifecycle.stop_when_idle(session):
         session.ensure_started(base)
         # Record the base this session was cloned from, so a later base change
         # for the directory is detected and triggers a rebuild (above).
@@ -1030,7 +839,7 @@ def run(
                 env=env,
             )
         if worktree and not worktree_keep:
-            _remove_worktree(session, container_cwd, agent_cwd, CONTAINER_USER)
+            _remove_worktree(session, container_cwd, agent_cwd)
     sys.exit(rc)
 
 
@@ -1046,11 +855,11 @@ def _destroy_session(session: lxd.Container) -> None:
     re-create the container, and the work dir lives on the host either way.
     """
     if session.status() == "RUNNING":
-        _stop_proxy(session.name)
+        lifecycle.stop_proxy(session.name)
         session.remove_device("netproxy")
         session.stop(timeout=30)
     session.delete()
-    _stop_proxy(session.name)
+    lifecycle.stop_proxy(session.name)
 
 
 @main.command()
@@ -1083,6 +892,12 @@ def remove(
     work_dir = _realdir(for_dir)
     profile = _resolve_profile(profile_name, agent)
     isolated = bool(profile.get("isolated")) if profile else False
+    if profile_name and not isolated:
+        print(
+            f"Note: profile '{profile_name}' is not isolated; removing the "
+            f"shared {agent} container.",
+            file=sys.stderr,
+        )
     session = conn.container_for_dir(
         work_dir, profiles.container_prefix(agent, profile_name, isolated)
     )
@@ -1116,7 +931,7 @@ def remove(
             session.stop(timeout=30)
     print(f"Removing container '{session.name}' ...", file=sys.stderr)
     session.delete()
-    _stop_proxy(session.name)  # in case a crashed session left one behind
+    lifecycle.stop_proxy(session.name)  # in case a crashed session left one behind
     print(f"Removed container '{session.name}'.", file=sys.stderr)
 
 
@@ -1128,11 +943,18 @@ def remove(
 def _agent_containers(
     conn: lxd.Lxd, for_dir: Path
 ) -> Iterator[tuple[str, lxd.Container]]:
-    """Yield (agent, Container) for every existing agent container of a dir."""
+    """Yield (prefix, Container) for every existing session container of a dir.
+
+    Covers isolated-profile containers as well as plain agent containers
+    (via profiles.session_prefixes) — otherwise mount/unmount would silently
+    skip a running `claude-openrouter` session, and unmount in particular
+    would leave a stale device on it since nothing else would ever remove it.
+    """
     for agent in agents.AGENT_NAMES:
-        container = conn.container_for_dir(for_dir, agent)
-        if container.exists():
-            yield agent, container
+        for prefix in profiles.session_prefixes(agent):
+            container = conn.container_for_dir(for_dir, prefix)
+            if container.exists():
+                yield prefix, container
 
 
 def _apply_recorded_mounts(
@@ -1190,9 +1012,9 @@ def mount(
         state.set_mount(target, path, readonly=readonly)
 
     found = False
-    for agent, container in _agent_containers(conn, target):
+    for prefix, container in _agent_containers(conn, target):
         found = True
-        print(f"=== {agent} ({container.name}) ===", file=sys.stderr)
+        print(f"=== {prefix} ({container.name}) ===", file=sys.stderr)
         if container.status() != "RUNNING":
             print(
                 "Note: container is not running; mounts apply when it next " "starts.",
@@ -1234,8 +1056,8 @@ def unmount(conn: lxd.Lxd, for_dir: str | None, dirs: tuple[str, ...]) -> None:
         if not state.remove_mount(target, path):
             print(f"Not recorded: {path}", file=sys.stderr)
 
-    for agent, container in _agent_containers(conn, target):
-        print(f"=== {agent} ({container.name}) ===", file=sys.stderr)
+    for prefix, container in _agent_containers(conn, target):
+        print(f"=== {prefix} ({container.name}) ===", file=sys.stderr)
         for path in paths:
             if container.remove_dir_device(path):
                 print(f"Unmounted {path}", file=sys.stderr)
@@ -1515,7 +1337,7 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
         try:
             canonical = release.normalize(release_arg)
         except ValueError as e:
-            sys.exit(f"Error: {e}")
+            raise click.ClickException(str(e))
     state.set_base(target, canonical)
     print(f"Base release for {target}: {canonical}", file=sys.stderr)
     print(
@@ -1528,16 +1350,6 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
 # --------------------------------------------------------------------------
 # limits
 # --------------------------------------------------------------------------
-
-_SIZE_RE = re.compile(r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE)
-
-
-def _validate_size(value: str, label: str) -> str:
-    if not _SIZE_RE.match(value.strip()):
-        raise click.BadParameter(
-            f"invalid {label} {value!r} — expected e.g. 8GiB or 512MiB"
-        )
-    return value.strip()
 
 
 @main.command(cls=click.Command)
@@ -1582,11 +1394,13 @@ def limits(
             print(f"defaults: cpu={defs['cpu']} memory={defs['memory']}")
         return
 
-    if cpu is not None and cpu < 1:
-        raise click.BadParameter("cpu must be at least 1")
-
-    if memory is not None:
-        memory = _validate_size(memory, "memory")
+    try:
+        if cpu is not None:
+            cpu = state.parse_cpu(cpu)
+        if memory is not None:
+            memory = state.parse_memory(memory)
+    except ValueError as e:
+        raise click.BadParameter(str(e))
 
     current = state.get_limits(target)
     if cpu is not None:
@@ -1653,7 +1467,7 @@ def _env_scope(agent: str | None) -> str:
 def env_set(for_dir: str | None, agent: str | None, name: str, value: str) -> None:
     """Set environment variable NAME to VALUE for a directory."""
     if name in _RESERVED_ENV:
-        sys.exit(f"Error: {name} is managed by aiab and can't be set here")
+        raise click.ClickException(f"{name} is managed by aiab and can't be set here")
     target = _realdir(for_dir)
     state.set_env(target, agent or state.ENV_ALL_AGENTS, name, value)
     print(f"Set {name} for {target} ({_env_scope(agent)})", file=sys.stderr)
@@ -1734,9 +1548,11 @@ def _parse_env_assignments(assignments: tuple[str, ...]) -> dict[str, str]:
     for item in assignments:
         name, sep, value = item.partition("=")
         if not sep or not name:
-            sys.exit(f"Error: --env expects NAME=VALUE, got '{item}'")
+            raise click.ClickException(f"--env expects NAME=VALUE, got '{item}'")
         if name in _RESERVED_ENV:
-            sys.exit(f"Error: {name} is managed by aiab and can't be set here")
+            raise click.ClickException(
+                f"{name} is managed by aiab and can't be set here"
+            )
         env[name] = value
     return env
 
@@ -1780,16 +1596,18 @@ def profile_add(
 ) -> None:
     """Record a user profile called NAME, replacing any existing one."""
     if not profiles.valid_name(name):
-        sys.exit(
-            f"Error: '{name}' isn't a usable profile name — profile names end "
+        raise click.ClickException(
+            f"'{name}' isn't a usable profile name — profile names end "
             "up in container names, so use lowercase letters, digits and "
-            "hyphens only"
+            f"hyphens only, up to {profiles.MAX_NAME_LEN} characters"
         )
     if name in profiles.BUILTIN:
-        sys.exit(f"Error: '{name}' is a built-in profile and can't be replaced")
+        raise click.ClickException(
+            f"'{name}' is a built-in profile and can't be replaced"
+        )
     if name in agents.AGENT_NAMES:
-        sys.exit(
-            f"Error: '{name}' is an agent name; a profile sharing it would "
+        raise click.ClickException(
+            f"'{name}' is an agent name; a profile sharing it would "
             "make container names ambiguous"
         )
 
@@ -1816,7 +1634,9 @@ def profile_add(
 def profile_remove(name: str) -> None:
     """Remove the user profile called NAME."""
     if name in profiles.BUILTIN:
-        sys.exit(f"Error: '{name}' is a built-in profile and can't be removed")
+        raise click.ClickException(
+            f"'{name}' is a built-in profile and can't be removed"
+        )
     if state.remove_profile(name):
         print(f"Removed profile '{name}'.", file=sys.stderr)
     else:
@@ -1844,7 +1664,7 @@ def profile_show(name: str) -> None:
     """Show one profile in detail."""
     entry = profiles.get(name)
     if entry is None:
-        sys.exit(f"Error: no profile '{name}' (see `aiab profile list`)")
+        raise click.ClickException(f"no profile '{name}' (see `aiab profile list`)")
     _print_profile(name, entry, builtin=name in profiles.BUILTIN)
 
 
@@ -1955,7 +1775,7 @@ def opencode_config(
 
     if path is None:
         if unset:
-            sys.exit("Error: --unset needs a PATH")
+            raise click.ClickException("--unset needs a PATH")
         data = _load()
         if not data:
             print(f"{target}: (no opencode overlay)")
@@ -1968,7 +1788,7 @@ def opencode_config(
 
     if unset:
         if value is not None:
-            sys.exit("Error: pass either VALUE or --unset, not both")
+            raise click.ClickException("pass either VALUE or --unset, not both")
         if not _json_unset(data, path):
             print(f"No {path} in opencode overlay for {target}", file=sys.stderr)
             return
@@ -1983,7 +1803,7 @@ def opencode_config(
         return
 
     if value is None:
-        sys.exit("Error: setting PATH needs a VALUE (or use --unset)")
+        raise click.ClickException("setting PATH needs a VALUE (or use --unset)")
 
     _json_set(data, path, _parse_config_value(value))
     _write_json(overlay_path, data)
@@ -2127,7 +1947,8 @@ def _fmt_network(policy: state.NetworkPolicy, masked: bool) -> str:
 
 
 def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
-    devices = conn.container(name).devices()
+    container = conn.container(name)
+    devices = container.devices()
     source = None
     extras = []
     # A 'none' device is the NIC mask restricted mode adds (see aiab net).
@@ -2141,6 +1962,11 @@ def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
             extras.append(dev)
 
     print(f"{name}  [{status}]")
+    # Set on isolated-profile sessions only (see the `run` command); read here
+    # so `aiab list` can say which profile a container belongs to.
+    profile_name = container.get_config("user.aiab_profile")
+    if profile_name:
+        print(f"  profile: {profile_name}")
     print(f"  source: {_fmt_mount(source)}" if source else "  source: (none)")
     for dev in extras:
         print(f"  mount:  {_fmt_mount(dev)}")
@@ -2191,6 +2017,17 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
 # gc
 # --------------------------------------------------------------------------
 
+# How each state.prune_stale() record kind reads in the "Pruned ... for DIR"
+# line below.
+_PRUNE_LABELS = {
+    "mounts": "mount record",
+    "network": "network record",
+    "base": "base record",
+    "state": "state dir",
+    "limits": "limits record",
+    "env": "env record",
+}
+
 
 @main.command()
 @click.pass_obj
@@ -2227,12 +2064,7 @@ def gc(conn: lxd.Lxd) -> None:
             f"Removing stale container '{name}' (source: {label}) ...",
             file=sys.stderr,
         )
-        if states[name] == "RUNNING":
-            _stop_proxy(name)
-            container.remove_device("netproxy")
-            container.stop(timeout=30)
-        container.delete()
-        _stop_proxy(name)
+        _destroy_session(container)
         removed += 1
         print(f"Removed '{name}'.", file=sys.stderr)
 
@@ -2246,26 +2078,9 @@ def gc(conn: lxd.Lxd) -> None:
             file=sys.stderr,
         )
 
-    (
-        pruned_mounts,
-        pruned_net,
-        pruned_base,
-        pruned_state,
-        pruned_limits,
-        pruned_env,
-    ) = state.prune_stale()
-    for d in pruned_mounts:
-        print(f"Pruned mount record for {d}", file=sys.stderr)
-    for d in pruned_net:
-        print(f"Pruned network record for {d}", file=sys.stderr)
-    for d in pruned_base:
-        print(f"Pruned base record for {d}", file=sys.stderr)
-    for d in pruned_state:
-        print(f"Pruned state dir for {d}", file=sys.stderr)
-    for d in pruned_limits:
-        print(f"Pruned limits record for {d}", file=sys.stderr)
-    for d in pruned_env:
-        print(f"Pruned env record for {d}", file=sys.stderr)
+    for kind, dirs in state.prune_stale().items():
+        for d in dirs:
+            print(f"Pruned {_PRUNE_LABELS[kind]} for {d}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -2281,6 +2096,7 @@ def gc(conn: lxd.Lxd) -> None:
 @click.pass_obj
 def lxc(conn: lxd.Lxd, rest: tuple[str, ...]) -> None:
     """Run lxc against the 'aiab' project (e.g. aiab lxc list)."""
+    lxd.ensure_project(conn.project)
     result = subprocess.run(conn.argv(list(rest)))
     sys.exit(result.returncode)
 

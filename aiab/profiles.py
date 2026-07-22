@@ -80,6 +80,14 @@ class Profile(TypedDict):
 # agent name: lowercase alphanumerics and hyphens.
 _NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
 
+# An isolated profile's container prefix is "<agent>-<profile>" (see
+# container_prefix). container_name_for_dir() truncates the directory-basename
+# part of the slug to keep the *total* name within LXD's 63-char limit, but it
+# can only shrink that part down to the bare hash (prefix-<6-char-hash>, 7
+# chars) — so the prefix itself still needs a sane ceiling. The longest agent
+# name plus a hyphen is under 10 chars; 40 leaves a wide margin.
+MAX_NAME_LEN = 40
+
 
 def _ensure_openrouter_key(home_dir: StrPath) -> None:
     """Prompt for an OpenRouter API key on first use and record it.
@@ -139,7 +147,7 @@ PREPARE: dict[str, Callable[[StrPath], None]] = {
 
 def valid_name(name: str) -> bool:
     """True if name is usable as a profile name (and in a container name)."""
-    return bool(_NAME_RE.fullmatch(name))
+    return len(name) <= MAX_NAME_LEN and bool(_NAME_RE.fullmatch(name))
 
 
 def get(name: str) -> Profile | None:

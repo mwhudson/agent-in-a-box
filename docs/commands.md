@@ -21,7 +21,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ## aiab run
 
 ```
-aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--profile NAME] [--no-git-guard] [--shell] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--base RELEASE] [--profile NAME] [--worktree] [--worktree-keep] [--no-git-guard] [--shell] [--no-tmux] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `opencode`, or `copilot`.
@@ -29,11 +29,19 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--pro
   is the container's working directory, mounted at `/work/<basename>`.
 - `--add-mount DIR` — mount `DIR` **read-only** into the container and record it for this directory (repeatable).
 - `--add-mount-rw DIR` — mount `DIR` read-write and record it (repeatable).
+- `--base RELEASE` — build/use Ubuntu `RELEASE` (e.g. `22.04` or `jammy`) and
+  record it for this directory.
 - `--profile NAME` — apply a named profile for this run (see
   [`aiab profile`](#aiab-profile)).
+- `--worktree` — run the agent in a fresh git worktree (detached at HEAD)
+  instead of the repo's working tree, so the agent's checkout and the host's
+  can diverge; `--worktree-keep` keeps the worktree after the agent exits
+  instead of removing it.
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).
 - `--shell` — open an interactive shell in the container instead of the agent.
+- `--no-tmux` — don't wrap the session in tmux with an `aiab monitor` control
+  pane (see [Launching it](#launching-it) under `aiab monitor`).
 - Anything after `--` is passed straight through to the agent.
 
 `--add-mount` / `--add-mount-rw` mounts are remembered for the directory (see [`aiab

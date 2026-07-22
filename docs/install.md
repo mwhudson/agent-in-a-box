@@ -14,7 +14,8 @@
   clickable `aiab monitor` UI (`pip install textual` — the
   `python3-textual` in the Ubuntu archive is a 0.1.x relic that predates the
   modern API). Without it the monitor falls back to a plain keystroke network
-  console (and the domains and mounts tabs are unavailable).
+  console, which offers only the network prompts — the domains, mounts,
+  ports, and limits tabs are unavailable.
 
 ## Install
 

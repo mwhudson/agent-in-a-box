@@ -75,6 +75,23 @@ def _project_of(cmd: list[str]) -> str | None:
     return cmd[2] if len(cmd) > 2 and cmd[:2] == ["lxc", "--project"] else None
 
 
+def ensure_project(project: str) -> None:
+    """Create `project` now if it doesn't exist yet (idempotent, cached).
+
+    run()'s create-on-demand is lazy on *failure* — fine for the checked `lxc`
+    commands every other caller makes, since a failure there is unambiguous.
+    aiab.cli's `lxc` passthrough runs arbitrary, unchecked `lxc` subcommands
+    (so it can't tell "project missing" apart from any other failure) and
+    streams output straight to the terminal instead of capturing it, so it
+    calls this eagerly instead of going through run().
+    """
+    if project in _ensured_projects:
+        return
+    _ensured_projects.add(project)
+    if not _project_exists(project):
+        _create_project(project)
+
+
 def run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     """Run a checked `lxc` command, creating its project on demand.
 
@@ -124,8 +141,24 @@ def dir_slug(path: StrPath) -> str:
 
 
 def container_name_for_dir(path: StrPath, prefix: str) -> str:
-    """Return a stable LXD container name for a directory: <prefix>-<slug>."""
-    return f"{prefix}-{dir_slug(path)}"
+    """Return a stable LXD container name for a directory: <prefix>-<slug>.
+
+    dir_slug() only bounds its own length (<=56 chars); with longer prefixes
+    (isolated-profile prefixes in particular, see profiles.container_prefix)
+    <prefix>-<slug> can exceed LXD's 63-char name limit. So this, not
+    dir_slug(), owns the total-length budget: it trims the basename portion
+    of the slug as needed and leaves the trailing hash — the bit that
+    disambiguates same-named directories and that is_source_device() and the
+    dirstate correlation (state.py's dir_slug reuse) key off — untouched.
+    """
+    slug = dir_slug(path)
+    basename, _, digest = slug.rpartition("-")
+    budget = 63 - len(prefix) - 1  # room left for the slug after "<prefix>-"
+    if len(slug) > budget:
+        max_basename_len = max(0, budget - len(digest) - 1)
+        basename = basename[:max_basename_len]
+        slug = f"{basename}-{digest}" if basename else digest
+    return f"{prefix}-{slug}"
 
 
 def _device_name(path: StrPath) -> str:
@@ -346,9 +379,35 @@ class Container:
 
     # -- exec --
 
-    def exec(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-        """Run a command in the container (checked, non-interactive)."""
-        return run(self._argv(["exec", self.name, "--"] + list(cmd)), **kwargs)
+    def exec(
+        self,
+        cmd: list[str],
+        *,
+        cwd: str | None = None,
+        user: int | None = None,
+        check: bool = True,
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess:
+        """Run a command in the container (non-interactive).
+
+        Checked by default, like every other call in this module; pass
+        check=False for a probe whose exit code the caller means to inspect
+        itself (e.g. "is this a git repo?") rather than treat as a hard
+        failure — without it callers had to reach past this method into
+        _argv() and call subprocess.run() directly. cwd/user default to the
+        container's own (root, image default dir) when omitted; user sets
+        both --user and --group, since LXD's `exec` wants both.
+        """
+        argv = ["exec", self.name]
+        if cwd is not None:
+            argv.append(f"--cwd={cwd}")
+        if user is not None:
+            argv.append(f"--user={user}")
+            argv.append(f"--group={user}")
+        argv += ["--", *cmd]
+        if check:
+            return run(self._argv(argv), **kwargs)
+        return subprocess.run(self._argv(argv), **kwargs)
 
     def run_interactive(
         self,

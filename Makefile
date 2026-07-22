@@ -2,7 +2,7 @@
 # to *run* aiab (that's just `bin/aiab`). See the README "Development" section.
 #
 # Tooling is all apt-installable on Ubuntu:
-#     sudo apt install python3-mypy black flake8
+#     sudo apt install python3-mypy black flake8 python3-pytest
 
 PYTHON := python3
 PY := aiab bin/aiab

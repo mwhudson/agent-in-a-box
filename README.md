@@ -25,6 +25,7 @@ aiab net ...                # restrict a dir's containers' network access
 aiab base ...               # pick the Ubuntu release a dir's containers use
 aiab limits ...             # set a dir's container CPU/memory limits
 aiab env ...                # inject environment variables per directory
+aiab profile ...            # named setting bundles for run --profile
 aiab opencode config ...    # per-directory opencode config (e.g. its key)
 aiab monitor                # interactive network + mounts control panel
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates

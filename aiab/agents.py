@@ -34,14 +34,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import CONTAINER_HOME
+from .provision import Step
 
 # Repo root (the directory containing this package), used to locate the
 # versioned config overlays that ship alongside the code.
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-
-# An install/upgrade step: a human-readable description and the argv to run
-# inside the container.
-Step = tuple[str, list[str]]
 
 
 def _claude_install() -> list[Step]:

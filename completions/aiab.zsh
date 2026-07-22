@@ -36,8 +36,13 @@ _aiab() {
                 '--for[run the agent for DIR]:directory:_files -/' \
                 '--add-mount[mount DIR read-only and record it]:directory:_files -/' \
                 '--add-mount-rw[mount DIR read-write and record it]:directory:_files -/' \
+                '--base[build/use Ubuntu RELEASE and record it]:release:' \
                 '--profile[apply the named profile for this run]:profile:' \
+                '--worktree[run the agent in a fresh git worktree]' \
+                '--worktree-keep[keep the worktree after the agent exits]' \
+                '--no-git-guard[don'\''t shadow .git/hooks and .git/config]' \
                 '--shell[open a shell instead of the agent]' \
+                '--no-tmux[don'\''t wrap the session in tmux]' \
                 "1:agent:(${agents})"
             ;;
         remove)
@@ -50,6 +55,7 @@ _aiab() {
             _arguments \
                 "--agent[restrict the profile to one agent]:agent:(${agents})" \
                 '--isolated[give it its own credential store and container]' \
+                '--no-isolated[don'\''t give it its own credential store]' \
                 '--env[environment variable to inject]:assignment:' \
                 '--allow[domain to allow in restricted mode]:domain:' \
                 '--description[one-line description]:text:' \

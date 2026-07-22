@@ -1,7 +1,7 @@
 # Tests for aiab.state — the per-directory mount, network-policy, base-release,
 # resource-limits, and state-dir records.
 #
-# All tests redirect _PATH, _NET_PATH, _BASE_PATH, _LIMITS_PATH and
+# All tests redirect _MOUNTS_PATH, _NET_PATH, _BASE_PATH, _LIMITS_PATH and
 # _DIRSTATE_DIR to a tmp dir so no real state is read or written.
 
 from concurrent.futures import ProcessPoolExecutor
@@ -16,12 +16,12 @@ import aiab.state as state
 def _set_mount_slow_load(root, project, source):
     import aiab.state as child_state
 
-    child_state._PATH = root / "mounts.json"
+    child_state._MOUNTS_PATH = root / "mounts.json"
     original_load_file = child_state._load_file
 
     def slow_load_file(path):
         data = original_load_file(path)
-        if path == child_state._PATH:
+        if path == child_state._MOUNTS_PATH:
             time.sleep(0.05)
         return data
 
@@ -48,7 +48,7 @@ def _add_network_allow_slow_load(root, project, domain):
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     """Redirect all state I/O to a temporary directory."""
-    monkeypatch.setattr(state, "_PATH", tmp_path / "mounts.json")
+    monkeypatch.setattr(state, "_MOUNTS_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
     monkeypatch.setattr(state, "_BASE_PATH", tmp_path / "base.json")
     monkeypatch.setattr(state, "_LIMITS_PATH", tmp_path / "limits.json")
@@ -110,7 +110,7 @@ def test_remove_mount_clears_key(tmp_path):
     src = tmp_path / "src"
     state.set_mount(tmp_path, src, readonly=True)
     state.remove_mount(tmp_path, src)
-    data = state._load()
+    data = state._load_mounts()
     assert str(tmp_path) not in data
 
 
@@ -382,10 +382,49 @@ def test_prune_stale_removes_deleted_base_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_base(gone, "22.04")
 
-    _, _, pruned_base, _, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert str(gone) in pruned_base
+    assert str(gone) in pruned["base"]
     assert state.get_base(gone) == release.DEFAULT_BASE
+
+
+# ---------------------------------------------------------------------------
+# _prune_json_file (the helper prune_stale() runs per JSON state file)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_json_file_removes_missing_dirs(tmp_path):
+    path = tmp_path / "some.json"
+    here = tmp_path / "here"
+    here.mkdir()
+    gone = tmp_path / "gone"
+    state._save_file_unlocked(path, {str(here): 1, str(gone): 2})
+
+    pruned = state._prune_json_file(path)
+
+    assert pruned == [str(gone)]
+    assert state._load_file(path) == {str(here): 1}
+
+
+def test_prune_json_file_skips_listed_keys(tmp_path):
+    path = tmp_path / "some.json"
+    state._save_file_unlocked(path, {"*": 1})
+
+    pruned = state._prune_json_file(path, skip=("*",))
+
+    assert pruned == []
+    assert state._load_file(path) == {"*": 1}
+
+
+def test_prune_json_file_noop_when_nothing_pruned_leaves_file_untouched(tmp_path):
+    path = tmp_path / "some.json"
+    here = tmp_path / "here"
+    here.mkdir()
+    state._save_file_unlocked(path, {str(here): 1})
+    before = path.stat().st_mtime_ns
+
+    assert state._prune_json_file(path) == []
+    assert path.stat().st_mtime_ns == before
 
 
 # ---------------------------------------------------------------------------
@@ -400,10 +439,10 @@ def test_prune_stale_removes_deleted_mount_dirs(tmp_path):
     state.set_mount(gone, tmp_path / "src", readonly=True)
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    pruned_mounts, _, _, _, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert str(gone) in pruned_mounts
-    assert str(here) not in pruned_mounts
+    assert str(gone) in pruned["mounts"]
+    assert str(here) not in pruned["mounts"]
     assert state.get_mounts(gone) == []
     assert len(state.get_mounts(here)) == 1
 
@@ -413,21 +452,31 @@ def test_prune_stale_removes_deleted_network_dirs(tmp_path):
     # An explicit open record is the non-default policy that persists.
     state.set_network_mode(gone, state.MODE_OPEN)
 
-    _, pruned_net, _, _, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert str(gone) in pruned_net
+    assert str(gone) in pruned["network"]
 
 
 def test_prune_stale_keeps_global_network(tmp_path):
     # The global policy belongs to no directory, so prune must never drop it.
     state.add_network_allow(None, "example.com", expires=None, global_=True)
 
-    _, pruned_net, _, _, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert state.GLOBAL_KEY not in pruned_net
+    assert state.GLOBAL_KEY not in pruned["network"]
     assert any(
         a["domain"] == "example.com" for a in state.get_global_network()["allow"]
     )
+
+
+_EMPTY_PRUNE: dict[str, list[str]] = {
+    "mounts": [],
+    "network": [],
+    "base": [],
+    "state": [],
+    "limits": [],
+    "env": [],
+}
 
 
 def test_prune_stale_no_op_when_clean(tmp_path):
@@ -435,12 +484,12 @@ def test_prune_stale_no_op_when_clean(tmp_path):
     here.mkdir()
     state.set_mount(here, tmp_path / "src", readonly=True)
 
-    assert state.prune_stale() == ([], [], [], [], [], [])
+    assert state.prune_stale() == _EMPTY_PRUNE
 
 
 def test_prune_stale_empty_files(tmp_path):
     # Should not raise when there's nothing in any file.
-    assert state.prune_stale() == ([], [], [], [], [], [])
+    assert state.prune_stale() == _EMPTY_PRUNE
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +535,9 @@ def test_prune_stale_removes_state_dir_for_deleted_dir(tmp_path):
     here_state = state.dir_state_dir(here)
     gone.rmdir()
 
-    _, _, _, pruned_state, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert pruned_state == [str(gone)]
+    assert pruned["state"] == [str(gone)]
     assert not gone_state.exists()
     assert here_state.is_dir()
 
@@ -497,9 +546,9 @@ def test_prune_stale_skips_state_dir_without_source(tmp_path):
     stray = state._DIRSTATE_DIR / "stray"
     stray.mkdir(parents=True)
 
-    _, _, _, pruned_state, _, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert pruned_state == []
+    assert pruned["state"] == []
     assert stray.is_dir()
 
 
@@ -675,9 +724,9 @@ def test_prune_stale_removes_deleted_limits_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_limits(gone, {"cpu": 8, "memory": "16GiB"})
 
-    _, _, _, _, pruned_limits, _ = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert str(gone) in pruned_limits
+    assert str(gone) in pruned["limits"]
     assert state.get_limits(gone) == state.DEFAULT_LIMITS
 
 
@@ -767,7 +816,7 @@ def test_prune_stale_removes_deleted_env_dirs(tmp_path):
     gone = tmp_path / "gone"
     state.set_env(gone, state.ENV_ALL_AGENTS, "K", "v")
 
-    *_, pruned_env = state.prune_stale()
+    pruned = state.prune_stale()
 
-    assert str(gone) in pruned_env
+    assert str(gone) in pruned["env"]
     assert state.get_env(gone, "opencode") == {}

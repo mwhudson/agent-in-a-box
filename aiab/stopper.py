@@ -30,12 +30,12 @@ import fcntl
 import time
 
 from . import PROJECT
+from . import lifecycle
 from . import lxd
-from .cli import IDLE_STOP_DELAY, _LOCK_DIR, _stop_proxy
 
 
 def _log(message: str) -> None:
-    # stdout is a per-container logfile (see cli._spawn_stopper).
+    # stdout is a per-container logfile (see lifecycle.spawn_stopper).
     print(f"{time.strftime('%F %T')} {message}", flush=True)
 
 
@@ -45,15 +45,15 @@ def main() -> None:
     parser.add_argument(
         "--delay",
         type=float,
-        default=IDLE_STOP_DELAY,
+        default=lifecycle.IDLE_STOP_DELAY,
         help="seconds to wait before stopping (default: %(default)s)",
     )
     args = parser.parse_args()
 
     time.sleep(args.delay)
 
-    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    with (_LOCK_DIR / args.container).open("w") as lock_fd:
+    lifecycle.LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    with (lifecycle.LOCK_DIR / args.container).open("w") as lock_fd:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -65,7 +65,7 @@ def main() -> None:
             return
         # Same teardown order as cli: kill the host-side proxy and detach its
         # device first, so neither can hold up a clean guest shutdown.
-        _stop_proxy(args.container)
+        lifecycle.stop_proxy(args.container)
         container.remove_device("netproxy")
         if container.status() == "RUNNING":
             _log(f"{args.container}: stopping idle container")

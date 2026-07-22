@@ -18,7 +18,7 @@ monitor_tui = pytest.importorskip("aiab.monitor_tui")
 def isolated_state(tmp_path, monkeypatch):
     """Redirect policy, mount, pending-queue and proxy-log I/O to a tmp dir."""
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
-    monkeypatch.setattr(state, "_PATH", tmp_path / "mounts.json")
+    monkeypatch.setattr(state, "_MOUNTS_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(netwatch, "_PENDING_BASE", tmp_path / "pending")
     monkeypatch.setattr(netproxy, "PROXY_DIR", tmp_path / "proxy")
 
@@ -295,6 +295,59 @@ def test_hovering_a_domain_row_highlights_it(work_dir):
             await pilot.pause()
             assert rows["pypi.org"].has_class("hovered")
             assert not rows["github.com"].has_class("hovered")
+
+    asyncio.run(scenario())
+
+
+def test_global_rules_shown_read_only_with_global_tag(work_dir):
+    state.add_network_allow(None, "shared.example", None, global_=True)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            rows = {row.domain: row for row in app.query(monitor_tui.DecisionRow)}
+            row = rows["shared.example"]
+            assert row.editable is False
+            # No decision buttons on a read-only (global) row.
+            assert not row.query(monitor_tui.Button)
+
+    asyncio.run(scenario())
+
+
+def test_removing_global_rule_from_directory_view_is_impossible(work_dir):
+    # The global row renders no buttons, so clicking within a directory's
+    # Domains tab can only ever affect that directory's own rules.
+    state.add_network_allow(None, "shared.example", None, global_=True)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            assert app.query("DecisionRow .remove").__len__() == 0
+
+    asyncio.run(scenario())
+
+
+def test_local_per_agent_rule_shown_with_agent_tag_and_editable(work_dir):
+    state.add_network_allow(work_dir, "claude-only.example", None, agent="claude")
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            rows = {row.domain: row for row in app.query(monitor_tui.DecisionRow)}
+            row = rows["claude-only.example"]
+            assert row.agent == "claude"
+            assert row.editable is True
+
+            await pilot.click("DecisionRow .remove")
+            await pilot.pause()
+            policy = state.get_network(work_dir)
+            assert "claude" not in (policy.get("agents") or {})
 
     asyncio.run(scenario())
 

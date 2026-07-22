@@ -83,6 +83,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from contextlib import contextmanager
@@ -96,7 +97,7 @@ from . import StrPath, release
 from .lxd import dir_slug
 
 _STATE_DIR = Path.home() / ".local" / "share" / "aiab"
-_PATH = _STATE_DIR / "mounts.json"
+_MOUNTS_PATH = _STATE_DIR / "mounts.json"
 _NET_PATH = _STATE_DIR / "network.json"
 _BASE_PATH = _STATE_DIR / "base.json"
 _LIMITS_PATH = _STATE_DIR / "limits.json"
@@ -117,7 +118,7 @@ class Mount(TypedDict):
 
 
 # The whole state file: project dir (resolved path string) -> its mounts.
-State = dict[str, list[Mount]]
+MountState = dict[str, list[Mount]]
 
 
 def _load_file(path: Path) -> dict:
@@ -154,12 +155,12 @@ def _save_file(path: Path, data: dict) -> None:
         _save_file_unlocked(path, data)
 
 
-def _load() -> State:
-    return _load_file(_PATH)
+def _load_mounts() -> MountState:
+    return _load_file(_MOUNTS_PATH)
 
 
-def _save(data: State) -> None:
-    _save_file(_PATH, data)
+def _save_mounts(data: MountState) -> None:
+    _save_file(_MOUNTS_PATH, data)
 
 
 # Keys and sources are stored (and compared) as resolved path *strings*, so the
@@ -170,15 +171,15 @@ def _key(path: StrPath) -> str:
 
 def get_mounts(directory: StrPath) -> list[Mount]:
     """Return the recorded mounts for a directory as [{source, readonly}]."""
-    return _load().get(_key(directory), [])
+    return _load_mounts().get(_key(directory), [])
 
 
 def set_mount(directory: StrPath, source: StrPath, readonly: bool) -> None:
     """Record a mount for a directory, or update its mode if already present."""
     key = _key(directory)
     source = _key(source)
-    with _locked_path(_PATH):
-        data = _load()
+    with _locked_path(_MOUNTS_PATH):
+        data = _load_mounts()
         mounts = data.get(key, [])
         for m in mounts:
             if m["source"] == source:
@@ -187,15 +188,15 @@ def set_mount(directory: StrPath, source: StrPath, readonly: bool) -> None:
         else:
             mounts.append({"source": source, "readonly": readonly})
         data[key] = mounts
-        _save_file_unlocked(_PATH, data)
+        _save_file_unlocked(_MOUNTS_PATH, data)
 
 
 def remove_mount(directory: StrPath, source: StrPath) -> bool:
     """Drop a recorded mount for a directory. Return True if it was present."""
     key = _key(directory)
     source = _key(source)
-    with _locked_path(_PATH):
-        data = _load()
+    with _locked_path(_MOUNTS_PATH):
+        data = _load_mounts()
         mounts = data.get(key, [])
         kept = [m for m in mounts if m["source"] != source]
         if len(kept) == len(mounts):
@@ -204,7 +205,7 @@ def remove_mount(directory: StrPath, source: StrPath) -> bool:
             data[key] = kept
         else:
             data.pop(key, None)
-        _save_file_unlocked(_PATH, data)
+        _save_file_unlocked(_MOUNTS_PATH, data)
     return True
 
 
@@ -513,6 +514,35 @@ class ResourceLimits(TypedDict):
 
 DEFAULT_LIMITS: ResourceLimits = {"cpu": 4, "memory": "8GiB"}
 
+# Matches LXD's limits.memory syntax (a number plus a byte-unit suffix).
+_MEMORY_RE = re.compile(r"^\d+(\.\d+)?\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)$", re.IGNORECASE)
+
+
+def parse_cpu(value: str | int) -> int:
+    """Parse/validate a --cpu value; raise ValueError if not a positive int.
+
+    Shared by aiab.cli (`aiab limits --cpu`) and aiab.monitor_tui (the Limits
+    tab) so the two front ends can't drift on what counts as valid.
+    """
+    try:
+        cpu = int(value)
+    except (TypeError, ValueError):
+        cpu = 0  # falls through to the same message as an out-of-range int
+    if cpu < 1:
+        raise ValueError(f"invalid cpu {value!r} — must be a positive integer")
+    return cpu
+
+
+def parse_memory(value: str) -> str:
+    """Parse/validate a --memory value (e.g. '8GiB'); return it stripped.
+
+    Shared by aiab.cli and aiab.monitor_tui's Limits tab; see parse_cpu.
+    """
+    stripped = value.strip()
+    if not _MEMORY_RE.match(stripped):
+        raise ValueError(f"invalid memory {value!r} — expected e.g. 8GiB or 512MiB")
+    return stripped
+
 
 def get_limits(directory: StrPath) -> ResourceLimits:
     """Return the resource limits for a directory (DEFAULT_LIMITS if unset)."""
@@ -685,70 +715,36 @@ def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
     return d
 
 
-def prune_stale() -> (
-    tuple[list[str], list[str], list[str], list[str], list[str], list[str]]
-):
+def _prune_json_file(path: Path, *, skip: tuple[str, ...] = ()) -> list[str]:
+    """Drop keys naming a directory that no longer exists from a state file.
+
+    ``skip`` holds keys that don't name a project directory at all (e.g.
+    GLOBAL_KEY in the network file) and so must never be pruned. Returns the
+    pruned keys (project-directory path strings).
+    """
+    pruned: list[str] = []
+    with _locked_path(path):
+        data = _load_file(path)
+        for key in list(data):
+            if key in skip:
+                continue
+            if not Path(key).is_dir():
+                del data[key]
+                pruned.append(key)
+        if pruned:
+            _save_file_unlocked(path, data)
+    return pruned
+
+
+def prune_stale() -> dict[str, list[str]]:
     """Remove records for directories that no longer exist from all state.
 
     Covers the mount, network, base, limits, and env JSON files and the
     per-directory state dirs (a state dir whose recorded .source path is gone
     is deleted, setup script and all; ones without a readable .source are left
-    alone). Returns (pruned_mount_dirs, pruned_network_dirs, pruned_base_dirs,
-    pruned_state_dirs, pruned_limit_dirs, pruned_env_dirs) as lists of
-    project-directory path strings.
+    alone). Returns the pruned project-directory path strings as a dict keyed
+    by record kind: 'mounts', 'network', 'base', 'state', 'limits', 'env'.
     """
-    pruned_mounts: list[str] = []
-    with _locked_path(_PATH):
-        mounts_data = _load()
-        for key in list(mounts_data):
-            if not Path(key).is_dir():
-                del mounts_data[key]
-                pruned_mounts.append(key)
-        if pruned_mounts:
-            _save_file_unlocked(_PATH, mounts_data)
-
-    pruned_net: list[str] = []
-    with _locked_path(_NET_PATH):
-        net_data = _load_file(_NET_PATH)
-        for key in list(net_data):
-            if key == GLOBAL_KEY:
-                continue  # the global policy belongs to no directory
-            if not Path(key).is_dir():
-                del net_data[key]
-                pruned_net.append(key)
-        if pruned_net:
-            _save_file_unlocked(_NET_PATH, net_data)
-
-    pruned_base: list[str] = []
-    with _locked_path(_BASE_PATH):
-        base_data = _load_file(_BASE_PATH)
-        for key in list(base_data):
-            if not Path(key).is_dir():
-                del base_data[key]
-                pruned_base.append(key)
-        if pruned_base:
-            _save_file_unlocked(_BASE_PATH, base_data)
-
-    pruned_limits: list[str] = []
-    with _locked_path(_LIMITS_PATH):
-        limits_data = _load_file(_LIMITS_PATH)
-        for key in list(limits_data):
-            if not Path(key).is_dir():
-                del limits_data[key]
-                pruned_limits.append(key)
-        if pruned_limits:
-            _save_file_unlocked(_LIMITS_PATH, limits_data)
-
-    pruned_env: list[str] = []
-    with _locked_path(_ENV_PATH):
-        env_data = _load_file(_ENV_PATH)
-        for key in list(env_data):
-            if not Path(key).is_dir():
-                del env_data[key]
-                pruned_env.append(key)
-        if pruned_env:
-            _save_file_unlocked(_ENV_PATH, env_data)
-
     pruned_state: list[str] = []
     with _locked_path(_DIRSTATE_DIR):
         if _DIRSTATE_DIR.is_dir():
@@ -761,11 +757,12 @@ def prune_stale() -> (
                     shutil.rmtree(d)
                     pruned_state.append(source)
 
-    return (
-        pruned_mounts,
-        pruned_net,
-        pruned_base,
-        pruned_state,
-        pruned_limits,
-        pruned_env,
-    )
+    return {
+        "mounts": _prune_json_file(_MOUNTS_PATH),
+        # The global policy belongs to no directory, so it's never pruned.
+        "network": _prune_json_file(_NET_PATH, skip=(GLOBAL_KEY,)),
+        "base": _prune_json_file(_BASE_PATH),
+        "state": pruned_state,
+        "limits": _prune_json_file(_LIMITS_PATH),
+        "env": _prune_json_file(_ENV_PATH),
+    }
