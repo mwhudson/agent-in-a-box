@@ -53,9 +53,8 @@ aiab run --profile openrouter claude
 ```
 
 On first use it prompts for your OpenRouter API key and writes it to
-`~/.local/share/aiab/claude@openrouter/home/.claude/settings.json`. This was
-previously a separate `claude-or` agent; if you used it, its credentials are
-moved across automatically on the next run. See [`aiab profile`](#aiab-profile).
+`~/.local/share/aiab/claude@openrouter/home/.claude/settings.json`. See
+[`aiab profile`](#aiab-profile).
 
 ## aiab remove
 

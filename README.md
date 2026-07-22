@@ -51,8 +51,8 @@ aiab run claude            # builds the container on first use, then launches
 ```
 
 Authenticate inside the container on first run; credentials are stored on the
-host and reused afterwards. Full requirements, shell completion, and migration
-notes are in [Installation](docs/install.md).
+host and reused afterwards. Full requirements and shell completion notes are
+in [Installation](docs/install.md).
 
 ## Documentation
 
@@ -61,8 +61,7 @@ notes are in [Installation](docs/install.md).
 - **[Configuration](docs/configuration.md)** — versioned config overlays and
   per-directory environment variables / opencode keys.
 - **[Command reference](docs/commands.md)** — every subcommand and its options.
-- **[Installation](docs/install.md)** — requirements, install, completion,
-  migration.
+- **[Installation](docs/install.md)** — requirements, install, completion.
 - **[Development](docs/development.md)** — linting, type checking, tests.
 
 ## License

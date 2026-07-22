@@ -45,7 +45,6 @@ import click
 from . import PROJECT, CONTAINER_USER, CONTAINER_HOME, WORK_PREFIX, STATE_MOUNT
 from . import agents
 from . import lxd
-from . import migrate
 from . import netproxy
 from . import netwatch
 from . import profiles
@@ -659,9 +658,8 @@ def _monitor_pane(work_dir: Path, container_name: str, enabled: bool) -> Iterato
 class _Command(click.Command):
     """A Command that prepares the LXD connection before invoking its body.
 
-    The 'aiab' project is created lazily on first use (see lxd.run), and
-    auto-migration from the old lxd-* layout is intentionally not wired in for
-    now — so this just builds the connection and stashes it on the context.
+    The 'aiab' project is created lazily on first use (see lxd.run), so this
+    just builds the connection and stashes it on the context.
     """
 
     def invoke(self, ctx: click.Context) -> Any:
@@ -907,10 +905,6 @@ def run(
     if worktree_keep:
         worktree = True
     cfg = agents.get(agent)
-    # claude-or used to be its own agent; carry its credentials over to the
-    # profile that replaced it. Keyed off the old store still existing, so
-    # this is one stat() on every run after the first.
-    migrate.migrate_claude_or(conn)
     profile = _resolve_profile(profile_name, agent)
     isolated = bool(profile.get("isolated")) if profile else False
     # An isolated profile forks the agent's identity: its own credential store
@@ -1298,7 +1292,7 @@ def _print_rules(policy: state.NetworkPolicy, indent: str = "  ") -> None:
 
 
 # A plain Group: the net commands only edit recorded state, so they skip the
-# _Command machinery (migration check + LXD connection) the other verbs need.
+# _Command machinery (the LXD connection) the other verbs need.
 @main.group(cls=click.Group)
 def net() -> None:
     """Manage a directory's network access policy.
@@ -2032,7 +2026,7 @@ _container_option = click.option(
 
 # A plain Command (like the net group): the monitor only reads/writes recorded
 # state and drives LXD lazily from the TUI, so it skips the _Command machinery
-# (migration check + eager project creation) the container verbs need.
+# (the LXD connection) the container verbs need.
 @main.command(cls=click.Command)
 @_for_dir_option
 @_container_option

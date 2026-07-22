@@ -15,9 +15,9 @@
 #
 # aiab - run coding agents in disposable per-directory LXD containers.
 #
-# This package holds the engine (lxd), the agent registry (agents), the
-# one-time migration from the old lxd-* tools (migrate), and the command-line
-# front end (cli). The `bin/aiab` launcher just imports cli.main().
+# This package holds the engine (lxd), the agent registry (agents), and the
+# command-line front end (cli). The `bin/aiab` launcher just imports
+# cli.main().
 #
 # Only plain constants (and a shared type alias) live here so that submodules
 # can import them without triggering a circular import through this __init__.

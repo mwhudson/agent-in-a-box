@@ -56,8 +56,7 @@ from typing import Callable, NotRequired, TypedDict
 
 from . import StrPath, state
 
-# Model the openrouter profile selects by default. Carried over unchanged from
-# the claude-or agent this profile replaces.
+# Model the openrouter profile selects by default.
 DEFAULT_OR_MODEL: str = "anthropic/claude-sonnet-4-6"
 
 

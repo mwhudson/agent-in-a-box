@@ -9,8 +9,7 @@
   [profile](commands.md#aiab-profile) instead.
 - **[Command reference](commands.md)** — every `aiab` subcommand and its
   options.
-- **[Installation](install.md)** — requirements, install, shell completion, and
-  migrating from the old `lxd-*` scripts.
+- **[Installation](install.md)** — requirements, install, and shell completion.
 - **[Development](development.md)** — linting, type checking, and tests.
 
 See the [top-level README](../README.md) for the overview and quick start.

@@ -3,7 +3,6 @@
 - [Requirements](#requirements)
 - [Install](#install)
 - [Shell completion](#shell-completion)
-- [Migrating from the old `lxd-*` scripts](#migrating-from-the-old-lxd--scripts)
 
 ## Requirements
 
@@ -43,14 +42,3 @@ source ~/src/agent-in-a-box/completions/aiab.bash
 ln -s ~/src/agent-in-a-box/completions/aiab.zsh \
       ~/.zsh/completions/_aiab        # a dir on your $fpath, before compinit
 ```
-
-## Migrating from the old `lxd-*` scripts
-
-Earlier versions shipped separate `lxd-claude` / `lxd-opencode` / … scripts that
-used an `lxd-ai` LXD project, `~/.local/share/lxd-<agent>/` config dirs, and
-`<agent>-<hash>-<basename>` container names. The first `aiab` command you run
-migrates that layout automatically — it renames the project to `aiab`, moves the
-config dirs under `~/.local/share/aiab/<agent>/`, and reorders container names to
-`<agent>-<basename>-<hash>`. It only fires once (when the old `lxd-ai` project
-exists and the new `aiab` one doesn't); after that it's a no-op. Your
-credentials are preserved, so you don't have to re-authenticate.

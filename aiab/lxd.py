@@ -42,10 +42,9 @@ from . import StrPath
 # lazy-create path in run() probes/creates each project at most once.
 _ensured_projects: set[str] = set()
 
-# Shared so ensure_project() and the lazy-create path build the project the
-# same way: sharing the default project's profiles and images so containers
-# get networking/storage from the existing 'default' profile and don't
-# re-download base images.
+# How the lazy-create path builds the project: sharing the default project's
+# profiles and images so containers get networking/storage from the existing
+# 'default' profile and don't re-download base images.
 _PROJECT_CREATE_OPTS = ["-c", "features.images=false", "-c", "features.profiles=false"]
 
 
@@ -153,8 +152,7 @@ class Lxd:
     Builds project-targeted `lxc` argv and manages the project itself; use
     container()/container_for_dir() to get Container handles. Holding the
     project on the instance (rather than in a module global) keeps it explicit
-    which project a command targets — and lets the migration drive the old and
-    new projects side by side.
+    which project a command targets.
     """
 
     def __init__(self, project: str) -> None:
@@ -167,25 +165,6 @@ class Lxd:
     def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         """Run an `lxc` command in this project (checked)."""
         return run(self.argv(args), **kwargs)
-
-    def project_exists(self) -> bool:
-        return _project_exists(self.project)
-
-    def ensure_project(self) -> None:
-        """Create the project if missing (eagerly).
-
-        Most callers no longer need this — run() creates the project lazily on
-        first use (see run()). It remains for code paths that must guarantee the
-        project exists up front, such as the migration.
-        """
-        if self.project in _ensured_projects or self.project_exists():
-            _ensured_projects.add(self.project)
-            return
-        _create_project(self.project)
-        _ensured_projects.add(self.project)
-
-    def delete_project(self) -> None:
-        run(["lxc", "project", "delete", self.project])
 
     def container(self, name: str) -> Container:
         return Container(self, name)

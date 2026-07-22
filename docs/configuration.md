@@ -48,8 +48,7 @@ Notes:
   `commands/` are overlaid from the repo.
 - Profile sessions get the overlay too: a profile changes an agent's
   configuration, not which agent it is, so `aiab run --profile openrouter
-  claude` is still `claude` as far as the overlay is concerned. (The old
-  `claude-or` agent this replaced did *not* get it.)
+  claude` is still `claude` as far as the overlay is concerned.
 - Missing entries are skipped, so it's fine to delete
   `agent-config/claude/CLAUDE.md` or leave `agent-config/claude/commands/`
   empty.
