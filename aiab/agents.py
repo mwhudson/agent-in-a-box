@@ -155,6 +155,14 @@ class Agent:
     # bind mount have to exist, so a path that isn't in the shared home yet is
     # created empty before mounting.
     shared_paths: list[str] = field(default_factory=list)
+    # Argv appended to `command` that prints the agent's *active* background
+    # sessions as a JSON array on stdout. Some agents can hand a running
+    # session off to a daemon that outlives the foreground process (Claude
+    # Code's /background); a non-empty array means the foreground exited into
+    # such a session and stopping the container would kill live work. Must not
+    # need a TTY. None if the agent has no such concept. See
+    # aiab.lifecycle.has_live_background_session.
+    background_ls: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.upgrade_cmds:
@@ -224,6 +232,10 @@ AGENTS: dict[str, Agent] = {
             ".claude/settings.json",
             ".claude/plugins/",
         ],
+        # `/background` hands the session to a daemon that keeps running after
+        # the foreground claude exits; `claude agents --json` lists the still-
+        # active ones (empty array when none), no TTY required.
+        background_ls=["agents", "--json"],
     ),
     "opencode": Agent(
         command=f"{CONTAINER_HOME}/.opencode/bin/opencode",

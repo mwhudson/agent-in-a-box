@@ -20,8 +20,10 @@
 # block for a few seconds, and back-to-back sessions would each pay a fresh
 # container start; instead this helper sleeps, then takes the per-container
 # lock exclusively. If that fails, a new session has started in the meantime
-# and the container stays up; if it succeeds, nothing is using the container
-# and it is torn down exactly as an immediate stop would have.
+# and the container stays up; if it succeeds, the container is torn down --
+# unless the agent left a session running in the background (e.g. Claude
+# Code's /background), in which case the helper releases the lock and
+# re-checks after another delay, keeping the container up until it finishes.
 
 from __future__ import annotations
 
@@ -43,6 +45,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("container", help="session container name")
     parser.add_argument(
+        "--agent",
+        required=True,
+        help="agent that ran in the container (for the background-session probe)",
+    )
+    parser.add_argument(
         "--delay",
         type=float,
         default=lifecycle.IDLE_STOP_DELAY,
@@ -50,28 +57,40 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    time.sleep(args.delay)
-
     lifecycle.LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    with (lifecycle.LOCK_DIR / args.container).open("w") as lock_fd:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            _log(f"{args.container}: in use again; leaving it running")
+    container = lxd.Lxd(PROJECT).container(args.container)
+
+    # Sleep, then check under the exclusive lock. If a session has taken the
+    # lock again we bow out; if the agent left a session running in the
+    # background (e.g. Claude Code's /background), stopping would kill it, so
+    # we release the lock and re-check after another delay rather than reap it.
+    # Otherwise nothing is using the container and we tear it down.
+    while True:
+        time.sleep(args.delay)
+        with (lifecycle.LOCK_DIR / args.container).open("w") as lock_fd:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                _log(f"{args.container}: in use again; leaving it running")
+                return
+            if not container.exists():
+                _log(f"{args.container}: already gone")
+                return
+            if lifecycle.has_live_background_session(container, args.agent):
+                _log(f"{args.container}: background session live; re-checking later")
+                # Drop the lock (leave the with-block) and loop: the container
+                # stays up, its proxy untouched, until the session finishes.
+                continue
+            # Same teardown order as cli: kill the host-side proxy and detach
+            # its device first, so neither can hold up a clean guest shutdown.
+            lifecycle.stop_proxy(args.container)
+            container.remove_device("netproxy")
+            if container.status() == "RUNNING":
+                _log(f"{args.container}: stopping idle container")
+                container.stop(timeout=30)
+            else:
+                _log(f"{args.container}: already stopped")
             return
-        container = lxd.Lxd(PROJECT).container(args.container)
-        if not container.exists():
-            _log(f"{args.container}: already gone")
-            return
-        # Same teardown order as cli: kill the host-side proxy and detach its
-        # device first, so neither can hold up a clean guest shutdown.
-        lifecycle.stop_proxy(args.container)
-        container.remove_device("netproxy")
-        if container.status() == "RUNNING":
-            _log(f"{args.container}: stopping idle container")
-            container.stop(timeout=30)
-        else:
-            _log(f"{args.container}: already stopped")
 
 
 if __name__ == "__main__":

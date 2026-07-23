@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import signal
 import socket
@@ -39,7 +40,7 @@ from pathlib import Path
 
 import click
 
-from . import agents, lxd, netproxy, netwatch
+from . import CONTAINER_USER, agents, lxd, netproxy, netwatch
 
 # Per-container lock files live here. Each 'aiab run' holds a shared flock
 # for the duration of its session; when the last one exits, a detached helper
@@ -167,13 +168,53 @@ def stop_proxy(container_name: str) -> None:
     (netproxy.PROXY_DIR / f"{container_name}.sock").unlink(missing_ok=True)
 
 
-def spawn_stopper(container_name: str) -> None:
+def has_live_background_session(session: lxd.Container, agent: str) -> bool:
+    """Whether the agent left a session running in the container after its
+    foreground process exited.
+
+    Some agents can hand a running session off to a daemon that outlives the
+    foreground process — Claude Code's `/background` is the motivating case: it
+    exits the foreground process (so `aiab run` returns and the idle-stopper
+    arms) while the conversation keeps running under a supervisor inside the
+    container. Stopping the container would kill it, so both `aiab run`'s exit
+    path and the stopper check this first (see aiab.cli, aiab.stopper).
+
+    Detection is delegated to the agent itself via its `background_ls` argv
+    (see aiab.agents); an agent with no such concept always returns False.
+    Best-effort: any probe failure is treated as "no live session" so a broken
+    or slow probe can never wedge a container into staying up forever.
+    """
+    cfg = agents.get(agent)
+    if cfg.background_ls is None:
+        return False
+    if session.status() != "RUNNING":
+        return False
+    try:
+        result = session.exec(
+            [cfg.command, *cfg.background_ls],
+            user=CONTAINER_USER,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        sessions = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return bool(sessions)
+
+
+def spawn_stopper(container_name: str, agent: str) -> None:
     """Launch the detached helper that stops an idle container later."""
     STOPPER_DIR.mkdir(parents=True, exist_ok=True)
     log = STOPPER_DIR / f"{container_name}.log"
     with log.open("ab") as log_fd:
         subprocess.Popen(
-            [sys.executable, "-m", "aiab.stopper", container_name],
+            [sys.executable, "-m", "aiab.stopper", container_name, f"--agent={agent}"],
             stdin=subprocess.DEVNULL,
             stdout=log_fd,
             stderr=log_fd,
@@ -212,7 +253,7 @@ def session_in_use(container_name: str) -> bool:
 
 
 @contextlib.contextmanager
-def stop_when_idle(session: lxd.Container) -> Iterator[None]:
+def stop_when_idle(session: lxd.Container, agent: str) -> Iterator[None]:
     """Hold the session lock; on exit, schedule a stop if we were the last.
 
     Each 'aiab run' holds a shared flock on a per-container lock file for the
@@ -240,7 +281,7 @@ def stop_when_idle(session: lxd.Container) -> Iterator[None]:
             except OSError:
                 pass  # another aiab process is still using this container
             else:
-                spawn_stopper(session.name)
+                spawn_stopper(session.name, agent)
                 print(
                     f"Container '{session.name}' stops in "
                     f"{int(IDLE_STOP_DELAY // 60)} minutes unless a new "

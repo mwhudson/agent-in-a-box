@@ -1213,7 +1213,7 @@ def run(
         )
     # The session lock is held from before the container starts, so a pending
     # stopper from an earlier session can't stop it out from under us mid-setup.
-    with lifecycle.stop_when_idle(session):
+    with lifecycle.stop_when_idle(session, agent):
         session.ensure_started(base)
         # Record the base this session was cloned from, so a later base change
         # for the directory is detected and triggers a rebuild (above).
