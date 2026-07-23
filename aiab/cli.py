@@ -515,6 +515,13 @@ def _guard_mount(
 # The monitor's presence is also what switches the proxy from fail-fast 403s
 # to parking unknown hosts for an interactive decision.
 
+# When run() re-execs under its own tmux session, it exports this env var
+# pointing at a temp file. If the agent exits into a background session (see
+# _notify_backgrounded), the inner process writes its notice there so the
+# outer process can reprint it in the *persistent* terminal after tmux closes
+# -- otherwise the notice would vanish with the tmux pane.
+_EXIT_NOTICE_ENV = "AIAB_EXIT_NOTICE_FILE"
+
 
 def _self_argv0() -> str:
     """An absolute path for re-invoking aiab (sys.argv[0] may be a bare name)."""
@@ -650,11 +657,15 @@ def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
     """
     inner = shlex.join([_self_argv0(), *sys.argv[1:]])
 
-    # Pre-create the log and rc files so we know the paths before launching.
+    # Pre-create the log, rc, and notice files so we know the paths before
+    # launching. The notice file carries a message (e.g. "backgrounded") from
+    # the inner process out to the persistent terminal (see _EXIT_NOTICE_ENV).
     log_fd, log_path = tempfile.mkstemp(prefix="aiab-stderr-", suffix=".log")
     os.close(log_fd)
     rc_fd, rc_path = tempfile.mkstemp(prefix="aiab-rc-", suffix=".txt")
     os.close(rc_fd)
+    notice_fd, notice_path = tempfile.mkstemp(prefix="aiab-notice-", suffix=".txt")
+    os.close(notice_fd)
 
     sessions = _tmux_sessions()
     member = _tmux_group_member(group, sessions)
@@ -681,6 +692,7 @@ def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
             script_fd,
             (
                 "#!/bin/bash\n"
+                f"export {_EXIT_NOTICE_ENV}={shlex.quote(notice_path)}\n"
                 f"{_CONCURRENT_DECISION}={decision} {inner} "
                 f"2> >(tee {shlex.quote(log_path)} >&2)\n"
                 f"echo $? > {shlex.quote(rc_path)}\n"
@@ -772,6 +784,15 @@ def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
             sys.stderr.write("---\n")
     finally:
         Path(log_path).unlink(missing_ok=True)
+
+    # Reprint the inner process's exit notice (if any) here, in the persistent
+    # terminal, so it survives the tmux pane closing.
+    try:
+        notice = Path(notice_path).read_text()
+        if notice.strip():
+            sys.stderr.write(notice)
+    finally:
+        Path(notice_path).unlink(missing_ok=True)
 
     sys.exit(inner_rc)
 
@@ -891,6 +912,45 @@ def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path
                 host_path.touch()
         mounts.append((host_path, f"{CONTAINER_HOME}/{rel}"))
     return mounts
+
+
+def _notify_backgrounded(
+    session: lxd.Container, agent: str, worktree_kept: bool
+) -> None:
+    """Tell the user their agent kept running in the background after it exited.
+
+    Claude Code's /background exits the foreground process while the session
+    keeps running under a daemon in the container, so `aiab run` returns as if
+    the session were over. Without this the user is dropped back to their shell
+    with no sign of what happened — and under aiab's own tmux, any message
+    /background printed vanished with the pane. The idle-stopper keeps the
+    container up while the session is live (see aiab.stopper); this makes that
+    visible and says how to get back in.
+
+    Printed to stderr (which persists in the no-tmux and user's-own-tmux
+    cases) and, when run() re-execs under its own tmux, also handed to the
+    outer process via _EXIT_NOTICE_ENV so it survives the pane closing.
+    """
+    lines = [
+        "",
+        f"{agent} is still running in the background inside container "
+        f"'{session.name}'.",
+        "The container will stay up until that session finishes.",
+        f"Re-attach from this directory with `aiab run --shell {agent}`, "
+        f"then `{agent} agents`.",
+    ]
+    if worktree_kept:
+        lines.append(
+            "Its git worktree was left in place because the session is still "
+            "using it."
+        )
+    notice = "\n".join(lines) + "\n"
+    print(notice, file=sys.stderr, end="")
+
+    notice_file = os.environ.get(_EXIT_NOTICE_ENV)
+    if notice_file:
+        with contextlib.suppress(OSError):
+            Path(notice_file).write_text(notice)
 
 
 def _apply_session_mounts(
@@ -1271,8 +1331,15 @@ def run(
                 group=CONTAINER_USER,
                 env=env,
             )
-        if worktree and not worktree_keep:
+        # The agent may have exited into a background session (Claude Code's
+        # /background) that's still using the container — and the worktree. If
+        # so, leave the worktree in place and tell the user; the idle-stopper
+        # keeps the container up until the session finishes (see aiab.stopper).
+        backgrounded = lifecycle.has_live_background_session(session, agent)
+        if worktree and not worktree_keep and not backgrounded:
             _remove_worktree(session, container_cwd, agent_cwd)
+        if backgrounded:
+            _notify_backgrounded(session, agent, worktree and not worktree_keep)
     sys.exit(rc)
 
 

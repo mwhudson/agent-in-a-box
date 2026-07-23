@@ -5,6 +5,14 @@
 
 import fcntl
 import os
+# The background-session probe also needs no live LXD. Its parsing of the
+# agent's output and conservative handling of failures are pinned below.
+#
+# It drives the idle-stopper's decision to keep a container up (see
+# aiab.stopper).
+
+from types import SimpleNamespace
+from typing import Any
 
 from aiab import lifecycle
 
@@ -56,3 +64,78 @@ def test_session_in_use_leaves_the_lock_takeable(monkeypatch, tmp_path):
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)  # raises if still held
     finally:
         os.close(fd)
+
+
+class FakeContainer:
+    """Stands in for lxd.Container: canned status and exec result."""
+
+    def __init__(self, status="RUNNING", exec_result=None, exec_error=None):
+        self._status = status
+        self._exec_result = exec_result
+        self._exec_error = exec_error
+        self.exec_calls = []
+
+    def status(self):
+        return self._status
+
+    def exec(self, cmd, **kwargs):
+        self.exec_calls.append((cmd, kwargs))
+        if self._exec_error is not None:
+            raise self._exec_error
+        return self._exec_result
+
+
+def _result(returncode=0, stdout=""):
+    return SimpleNamespace(returncode=returncode, stdout=stdout)
+
+
+def test_agent_without_background_concept_is_never_live():
+    # opencode has no background_ls; the probe must be skipped entirely.
+    container: Any = FakeContainer(exec_result=_result(0, '[{"id": "x"}]'))
+    assert lifecycle.has_live_background_session(container, "opencode") is False
+    assert container.exec_calls == []
+
+
+def test_stopped_container_is_never_live():
+    container: Any = FakeContainer(status="STOPPED")
+    assert lifecycle.has_live_background_session(container, "claude") is False
+    assert container.exec_calls == []
+
+
+def test_empty_session_list_is_not_live():
+    container: Any = FakeContainer(exec_result=_result(0, "[]\n"))
+    assert lifecycle.has_live_background_session(container, "claude") is False
+
+
+def test_nonempty_session_list_is_live():
+    container: Any = FakeContainer(exec_result=_result(0, '[{"id": "abc"}]'))
+    assert lifecycle.has_live_background_session(container, "claude") is True
+
+
+def test_probe_runs_the_agents_argv_as_the_container_user():
+    from aiab import CONTAINER_USER
+
+    cfg = lifecycle.agents.get("claude")
+    assert cfg.background_ls is not None
+    container: Any = FakeContainer(exec_result=_result(0, "[]"))
+    lifecycle.has_live_background_session(container, "claude")
+    assert len(container.exec_calls) == 1
+    cmd, kwargs = container.exec_calls[0]
+    assert cmd == [cfg.command, *cfg.background_ls]
+    assert kwargs["user"] == CONTAINER_USER
+    assert kwargs["check"] is False
+
+
+def test_nonzero_exit_is_treated_as_not_live():
+    container: Any = FakeContainer(exec_result=_result(1, "boom"))
+    assert lifecycle.has_live_background_session(container, "claude") is False
+
+
+def test_unparseable_output_is_treated_as_not_live():
+    container: Any = FakeContainer(exec_result=_result(0, "not json"))
+    assert lifecycle.has_live_background_session(container, "claude") is False
+
+
+def test_exec_error_is_treated_as_not_live():
+    container: Any = FakeContainer(exec_error=OSError("no such container"))
+    assert lifecycle.has_live_background_session(container, "claude") is False
