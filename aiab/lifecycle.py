@@ -183,6 +183,12 @@ def has_live_background_session(session: lxd.Container, agent: str) -> bool:
     (see aiab.agents); an agent with no such concept always returns False.
     Best-effort: any probe failure is treated as "no live session" so a broken
     or slow probe can never wedge a container into staying up forever.
+
+    The probe lists *all* active sessions, both interactive and background
+    (that's what `claude agents --json` returns), so we match on kind: only a
+    `background` session outlives the foreground process. An interactive entry
+    is a concurrent — or just-exited — foreground session and must not, on its
+    own, keep the container alive.
     """
     cfg = agents.get(agent)
     if cfg.background_ls is None:
@@ -205,7 +211,9 @@ def has_live_background_session(session: lxd.Container, agent: str) -> bool:
         sessions = json.loads(result.stdout or "[]")
     except json.JSONDecodeError:
         return False
-    return bool(sessions)
+    if not isinstance(sessions, list):
+        return False
+    return any(isinstance(s, dict) and s.get("kind") == "background" for s in sessions)
 
 
 def spawn_stopper(container_name: str, agent: str) -> None:

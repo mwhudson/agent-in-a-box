@@ -155,11 +155,11 @@ class Agent:
     # bind mount have to exist, so a path that isn't in the shared home yet is
     # created empty before mounting.
     shared_paths: list[str] = field(default_factory=list)
-    # Argv appended to `command` that prints the agent's *active* background
-    # sessions as a JSON array on stdout. Some agents can hand a running
-    # session off to a daemon that outlives the foreground process (Claude
-    # Code's /background); a non-empty array means the foreground exited into
-    # such a session and stopping the container would kill live work. Must not
+    # Argv appended to `command` that lists the agent's currently-active
+    # sessions as a JSON array on stdout, each an object with a `kind` field.
+    # A `kind == "background"` entry is a session that outlives the foreground
+    # process — Claude Code's /background hands off to a daemon like this — so
+    # its presence means stopping the container would kill live work. Must not
     # need a TTY. None if the agent has no such concept. See
     # aiab.lifecycle.has_live_background_session.
     background_ls: list[str] | None = None

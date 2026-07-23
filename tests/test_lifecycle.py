@@ -89,9 +89,15 @@ def _result(returncode=0, stdout=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout)
 
 
+# `claude agents --json` output shapes: interactive entries carry a pid and
+# kind "interactive"; background entries carry kind "background".
+_INTERACTIVE = '[{"pid": 42, "kind": "interactive", "status": "busy"}]'
+_BACKGROUND = '[{"id": "abc", "kind": "background", "name": "task"}]'
+
+
 def test_agent_without_background_concept_is_never_live():
     # opencode has no background_ls; the probe must be skipped entirely.
-    container: Any = FakeContainer(exec_result=_result(0, '[{"id": "x"}]'))
+    container: Any = FakeContainer(exec_result=_result(0, _BACKGROUND))
     assert lifecycle.has_live_background_session(container, "opencode") is False
     assert container.exec_calls == []
 
@@ -107,8 +113,21 @@ def test_empty_session_list_is_not_live():
     assert lifecycle.has_live_background_session(container, "claude") is False
 
 
-def test_nonempty_session_list_is_live():
-    container: Any = FakeContainer(exec_result=_result(0, '[{"id": "abc"}]'))
+def test_background_session_is_live():
+    container: Any = FakeContainer(exec_result=_result(0, _BACKGROUND))
+    assert lifecycle.has_live_background_session(container, "claude") is True
+
+
+def test_only_an_interactive_session_is_not_live():
+    # The foreground session that just exited (or a concurrent one) lingers in
+    # the list as kind "interactive"; it must not, alone, count as background.
+    container: Any = FakeContainer(exec_result=_result(0, _INTERACTIVE))
+    assert lifecycle.has_live_background_session(container, "claude") is False
+
+
+def test_background_alongside_interactive_is_live():
+    both = '[{"pid": 42, "kind": "interactive"}, {"id": "a", "kind": "background"}]'
+    container: Any = FakeContainer(exec_result=_result(0, both))
     assert lifecycle.has_live_background_session(container, "claude") is True
 
 
