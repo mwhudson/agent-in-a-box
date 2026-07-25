@@ -52,7 +52,6 @@ from . import agents
 from . import lifecycle
 from . import lxd
 from . import netproxy
-from . import netwatch
 from . import profiles
 from . import provision
 from . import release
@@ -1818,24 +1817,6 @@ def opencode_config(
         )
 
 
-def _launch_monitor(target: Path, container_name: str | None, plain: bool) -> None:
-    """Open the session control panel for a directory (never returns).
-
-    Prefers the textual UI (aiab.monitor_tui: clickable network decisions plus
-    a mounts view); falls back to the plain keystroke network console when
-    textual is missing or --plain is given. container_name names the session
-    container a mounts edit should touch live, when `aiab run` opened the pane.
-    """
-    if not plain:
-        try:
-            from . import monitor_tui
-        except ImportError:
-            pass  # textual missing or too old (e.g. Ubuntu's 0.1.x package)
-        else:
-            sys.exit(monitor_tui.monitor(target, container_name))
-    sys.exit(netwatch.watch(target))
-
-
 # --container is set by the `aiab run` tmux pane (see _monitor_pane); it names
 # the session container whose live mounts the mounts view should edit. Hidden
 # because it is plumbing, not something a user types by hand.
@@ -1850,12 +1831,7 @@ _container_option = click.option(
 @main.command(cls=click.Command)
 @_for_dir_option
 @_container_option
-@click.option(
-    "--plain",
-    is_flag=True,
-    help="use the plain keystroke console even when textual is available",
-)
-def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> None:
+def monitor(for_dir: str | None, container_name: str | None) -> None:
     """Open the interactive session control panel for a directory.
 
     Five tabs in one pane (switch with header buttons or hotkeys 1-5;
@@ -1874,12 +1850,15 @@ def monitor(for_dir: str | None, container_name: str | None, plain: bool) -> Non
       * Ports — shows recorded port forwarding rules for this directory;
       * Limits — shows recorded resource limits for this directory.
 
-    With textual installed each prompt is a row of clickable buttons; the
-    plain keystroke network console is the fallback, and --plain forces it.
-    `aiab run` opens this in a tmux pane automatically; it also works
-    standalone in any terminal.
+    Each prompt is a row of clickable buttons. `aiab run` opens this in a tmux
+    pane automatically; it also works standalone in any terminal.
     """
-    _launch_monitor(_realdir(for_dir), container_name, plain)
+    # Imported here rather than at module scope so that textual (and the rest
+    # of the UI) is only loaded by the one command that draws it, keeping
+    # every other `aiab` invocation's startup cheap.
+    from . import monitor_tui
+
+    sys.exit(monitor_tui.monitor(_realdir(for_dir), container_name))
 
 
 # --------------------------------------------------------------------------

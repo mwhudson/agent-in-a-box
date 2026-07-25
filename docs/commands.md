@@ -384,7 +384,7 @@ to [`aiab net allow`](#aiab-net) a new provider's API domain.
 ## aiab monitor
 
 ```
-aiab monitor [--for DIR] [--plain]
+aiab monitor [--for DIR]
 ```
 
 `aiab monitor` is the session control panel: a single pane with five tabs,
@@ -400,16 +400,10 @@ is running — the proxy **holds** requests for domains in neither list instead
 of refusing them: the console rings the terminal bell and prompts for a
 decision.
 
-With [textual](https://textual.textualize.io/) installed it is a small UI:
-the proxy logs scroll in the middle and each undecided host gets a row of
+The proxy logs scroll in the middle and each undecided host gets a row of
 **Allow / 15m / Deny / Skip** buttons you can click — the mouse works inside
 tmux too. The keyboard does the same job: `a`/`t`/`d`/`s` answer for the
-oldest prompt, `q` quits. Without textual (or with `--plain`) you get the
-line-based prompt with the same keys:
-
-```
-==> registry.npmjs.org ? [a/t/d/s]
-```
+oldest prompt, `q` quits.
 
 Allow is permanent, 15m lapses after 15 minutes, Deny records a refusal (so
 it won't ask again), Skip leaves the request to time out. The parked request

@@ -87,7 +87,7 @@ _aiab() {
             COMPREPLY=( $(compgen -W "config --for --unset" -- "$cur") )
             ;;
         monitor)
-            COMPREPLY=( $(compgen -W "--for --plain" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--for" -- "$cur") )
             _aiab_dirs
             ;;
         list)

@@ -1,7 +1,7 @@
-# Tests for aiab.monitor_tui — the textual front end for `aiab monitor`,
-# driven headless through textual's test pilot. Skipped entirely when textual
-# isn't installed (the CLI falls back to the plain console there, so there is
-# nothing to test).
+# Tests for aiab.monitor_tui — the front end for `aiab monitor`, driven
+# headless through textual's test pilot. textual is a runtime requirement,
+# but it isn't necessarily installed wherever the suite runs, so these skip
+# rather than error when the import fails.
 
 import asyncio
 

@@ -10,12 +10,11 @@
 - Python 3, with [Click](https://click.palletsprojects.com/) and PyYAML
   (on Debian/Ubuntu: `apt install python3-click python3-yaml`).
 - Network access from containers (to install the agents and reach their APIs).
-- Optionally, [textual](https://textual.textualize.io/) ≥ 0.32 for the
-  clickable `aiab monitor` UI (`pip install textual` — the
-  `python3-textual` in the Ubuntu archive is a 0.1.x relic that predates the
-  modern API). Without it the monitor falls back to a plain keystroke network
-  console, which offers only the network prompts — the domains, mounts,
-  ports, and limits tabs are unavailable.
+- [textual](https://textual.textualize.io/) ≥ 0.32, for `aiab monitor`
+  (`pip install textual` — the `python3-textual` in the Ubuntu archive is a
+  0.1.x relic that predates the modern API). Only `aiab monitor` imports it,
+  so the other subcommands still work without it, but the interactive
+  allow/deny prompts that restricted mode relies on do not.
 
 ## Install
 

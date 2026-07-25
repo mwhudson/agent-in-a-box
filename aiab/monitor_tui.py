@@ -15,10 +15,10 @@
 #
 # aiab.monitor_tui - the textual front end for `aiab monitor`.
 #
-# The richer of the two control consoles (the shared network plumbing and the
-# plain keystroke fallback live in aiab.netwatch). It is a general session
-# control panel with five tabs, selected from the buttons in the header (or
-# the 1/2/3/4/5 hotkeys):
+# The `aiab monitor` control console (its shared network plumbing — the
+# pending queue, the proxy-log tails and the decision recording — lives in
+# aiab.netwatch). It is a general session control panel with five tabs,
+# selected from the buttons in the header (or the 1/2/3/4/5 hotkeys):
 #
 #   * Network (default): proxy logs scroll in the middle, and every parked host
 #     gets a row of Allow / 15m / Deny / Skip buttons above the footer, so a
@@ -44,9 +44,10 @@
 # up (which also turns the tmux `mouse` option on in the sessions it creates,
 # so a click lands here even while the agent pane has focus).
 #
-# aiab.cli imports this module lazily and falls back to the plain console when
-# the import fails — because textual isn't installed, or is too old to have
-# RichLog (Ubuntu's python3-textual 0.1.x predates the modern API).
+# textual is a hard requirement (>= 0.32, for RichLog and the modern app API —
+# Ubuntu's python3-textual 0.1.x is too old; see docs/install.md). aiab.cli
+# still imports this module lazily, so that only `aiab monitor` pays the cost
+# of loading it.
 
 from __future__ import annotations
 

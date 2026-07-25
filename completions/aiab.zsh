@@ -113,9 +113,7 @@ _aiab() {
                 '*::args:'
             ;;
         monitor)
-            _arguments \
-                '--for[target DIR]:directory:_files -/' \
-                '--plain[use the plain keystroke console]'
+            _arguments '--for[target DIR]:directory:_files -/'
             ;;
         list)
             _arguments '--for[show only the containers for DIR]:directory:_files -/'
