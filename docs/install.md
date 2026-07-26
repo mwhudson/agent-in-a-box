@@ -31,14 +31,30 @@ ln -s ~/src/agent-in-a-box/bin/aiab ~/.local/bin/aiab
 
 ## Shell completion
 
-Optionally enable shell completion for subcommands, agent names, and
-directories:
+Completion for subcommands, options, agent names and directories comes from
+Click, which generates it from `aiab`'s own command definitions. Enable it by
+adding one line to your shell's startup file:
 
 ```sh
 # bash — add to ~/.bashrc:
-source ~/src/agent-in-a-box/completions/aiab.bash
+eval "$(_AIAB_COMPLETE=bash_source aiab)"
 
-# zsh — put the completion on your fpath, e.g.:
-ln -s ~/src/agent-in-a-box/completions/aiab.zsh \
-      ~/.zsh/completions/_aiab        # a dir on your $fpath, before compinit
+# zsh — add to ~/.zshrc:
+eval "$(_AIAB_COMPLETE=zsh_source aiab)"
+
+# fish — add to ~/.config/fish/completions/aiab.fish:
+_AIAB_COMPLETE=fish_source aiab | source
 ```
+
+That runs `aiab` once per shell start. To avoid it, write the script out once
+and source the file instead — just remember to regenerate it after a `git pull`
+that adds or renames a subcommand:
+
+```sh
+_AIAB_COMPLETE=bash_source aiab > ~/.local/share/aiab-completion.bash
+# then in ~/.bashrc:
+source ~/.local/share/aiab-completion.bash
+```
+
+The completion runs `aiab` to answer each request, so it needs `aiab` on your
+`PATH` (the symlink above).

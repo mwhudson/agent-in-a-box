@@ -71,6 +71,16 @@ _CONTAINER_PATH: str = (
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
+# The type for every directory-valued parameter. Its only real job is shell
+# completion: click derives the completion script from the command tree, and
+# this is what makes a DIR parameter offer directories (see docs/install.md).
+# Deliberately no exists=True — `aiab remove --for` and `aiab unmount` are
+# expected to work on a directory that has already been deleted, to clean up
+# the container and records it left behind. A path that exists but is a file
+# is still rejected, which is what the old hand-written completions could only
+# hint at.
+_DIR = click.Path(file_okay=False)
+
 
 def _agent_command(
     cfg: agents.Agent, agent_args: tuple[str, ...], shell: bool
@@ -627,6 +637,7 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="run the agent for DIR (default: current directory)",
 )
@@ -634,6 +645,7 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     "--add-mount",
     "add_mount",
     metavar="DIR",
+    type=_DIR,
     multiple=True,
     help="mount DIR read-only and record it for this directory (repeatable)",
 )
@@ -641,6 +653,7 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     "--add-mount-rw",
     "add_mount_rw",
     metavar="DIR",
+    type=_DIR,
     multiple=True,
     help="mount DIR read-write and record it for this directory (repeatable)",
 )
@@ -867,6 +880,7 @@ def _destroy_session(session: lxd.Container) -> None:
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="target the container for DIR (default: current directory)",
 )
@@ -987,6 +1001,7 @@ def _apply_recorded_mounts(
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="target the containers for DIR (default: current directory)",
 )
@@ -996,7 +1011,7 @@ def _apply_recorded_mounts(
     default=True,
     help="mount read-only (the default) or read-write",
 )
-@click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
+@click.argument("dirs", nargs=-1, required=True, metavar="DIR...", type=_DIR)
 @click.pass_obj
 def mount(
     conn: lxd.Lxd, for_dir: str | None, readonly: bool, dirs: tuple[str, ...]
@@ -1040,10 +1055,11 @@ def mount(
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="target the containers for DIR (default: current directory)",
 )
-@click.argument("dirs", nargs=-1, required=True, metavar="DIR...")
+@click.argument("dirs", nargs=-1, required=True, metavar="DIR...", type=_DIR)
 @click.pass_obj
 def unmount(conn: lxd.Lxd, for_dir: str | None, dirs: tuple[str, ...]) -> None:
     """Remove extra directory mounts from a directory's containers."""
@@ -1133,6 +1149,7 @@ _for_dir_option = click.option(
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="target DIR (default: current directory)",
 )
@@ -1959,6 +1976,7 @@ def _print_container(conn: lxd.Lxd, name: str, status: str) -> None:
     "--for",
     "for_dir",
     metavar="DIR",
+    type=_DIR,
     default=None,
     help="show only the containers for DIR",
 )
