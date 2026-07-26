@@ -25,11 +25,6 @@ warn_unused_ignores = true
 warn_unreachable = true
 check_untyped_defs = true
 
-# PyYAML ships no type stubs in this environment; we only use safe_load.
-[[tool.mypy.overrides]]
-module = ["yaml"]
-ignore_missing_imports = true
-
 # Textual is a runtime requirement (`aiab monitor`), but it isn't necessarily
 # present wherever the linters run, so keep type checking working without it.
 # Where it is installed, its real types are used and this is a no-op.

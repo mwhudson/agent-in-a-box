@@ -226,6 +226,65 @@ def test_status_empty_when_absent(monkeypatch):
     assert c.devices() == {}
 
 
+# ---------------------------------------------------------------------------
+# profile_nic_names / init_pid (the other two `lxc query` readers)
+# ---------------------------------------------------------------------------
+
+
+def _fake_query(monkeypatch, payload, returncode=0):
+    """Patch subprocess.run to answer any `lxc query` with payload; record URLs."""
+    urls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        urls.append(cmd[-1])
+        body = json.dumps(payload) if payload is not None else ""
+        return subprocess.CompletedProcess(cmd, returncode, body, "")
+
+    monkeypatch.setattr(lxd.subprocess, "run", fake_run)
+    return urls
+
+
+PROFILE = {
+    "name": "default",
+    "devices": {
+        "eth0": {"type": "nic", "network": "lxdbr0"},
+        "eth1": {"type": "nic", "network": "lxdbr1"},
+        "root": {"type": "disk", "path": "/"},
+    },
+}
+
+
+def test_profile_nic_names_reads_nics_only(monkeypatch):
+    urls = _fake_query(monkeypatch, PROFILE)
+    assert Lxd("aiab").profile_nic_names() == ["eth0", "eth1"]  # 'root' is a disk
+    assert urls == ["/1.0/profiles/default?project=aiab"]
+
+
+def test_profile_nic_names_raises_rather_than_reading_as_no_nics(monkeypatch):
+    # An unreadable profile must not come back as [], which would leave a
+    # restricted container's NIC unmasked and its network wide open.
+    _fake_query(monkeypatch, None, returncode=1)
+    with pytest.raises(subprocess.CalledProcessError):
+        Lxd("aiab").profile_nic_names()
+
+
+def test_init_pid_read_from_state_endpoint(monkeypatch):
+    urls = _fake_query(monkeypatch, {"status": "Running", "pid": 4242})
+    assert Container(Lxd("aiab"), "c1").init_pid() == 4242
+    assert urls == ["/1.0/instances/c1/state?project=aiab"]
+
+
+def test_init_pid_none_when_stopped(monkeypatch):
+    # A stopped instance reports pid 0, which is not a process to look at.
+    _fake_query(monkeypatch, {"status": "Stopped", "pid": 0})
+    assert Container(Lxd("aiab"), "c1").init_pid() is None
+
+
+def test_init_pid_none_when_query_fails(monkeypatch):
+    _fake_query(monkeypatch, None, returncode=1)
+    assert Container(Lxd("aiab"), "c1").init_pid() is None
+
+
 def test_mutation_invalidates_cache(monkeypatch):
     c, calls = _container(monkeypatch, SNAP)
     c.devices()  # query #1

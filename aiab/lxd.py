@@ -34,8 +34,6 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import yaml
-
 from . import StrPath
 
 # Projects we've already created or confirmed exist this process. The
@@ -199,6 +197,30 @@ class Lxd:
         """Run an `lxc` command in this project (checked)."""
         return run(self.argv(args), **kwargs)
 
+    def query(self, path: str, *, check: bool = False) -> Any:
+        """GET a LXD API path in this project and return the parsed JSON.
+
+        `lxc query` ignores the global --project flag (so this doesn't build
+        its argv with argv()); the project rides in the URL as a query
+        parameter instead. What comes back is the response metadata, already
+        unwrapped from the API envelope.
+
+        Returns None when the request fails, since for the main caller
+        (Container.snapshot) "no such instance" is an ordinary answer rather
+        than an error. Pass check=True where a failure must not be mistaken
+        for an empty result — see profile_nic_names.
+        """
+        sep = "&" if "?" in path else "?"
+        argv = ["lxc", "query", f"{path}{sep}project={self.project}"]
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode != 0 or not r.stdout.strip():
+            if check:
+                raise subprocess.CalledProcessError(
+                    r.returncode or 1, argv, r.stdout, r.stderr
+                )
+            return None
+        return json.loads(r.stdout)
+
     def container(self, name: str) -> Container:
         return Container(self, name)
 
@@ -209,11 +231,15 @@ class Lxd:
         """Return the names of the NIC devices a profile provides.
 
         Containers in the aiab project inherit their network from the shared
-        'default' profile (the project is created with features.profiles=false);
-        these are the device names to mask when cutting off direct egress.
+        'default' profile (the project is created with features.profiles=false,
+        so the project's URL resolves to the default project's profile); these
+        are the device names to mask when cutting off direct egress.
+
+        Queried with check=True because an empty list here means "no NICs to
+        mask", which would leave a restricted container's network wide open.
+        A failure to read the profile must surface, not read as nothing to do.
         """
-        result = self.run(["profile", "show", profile], capture_output=True, text=True)
-        devices = yaml.safe_load(result.stdout).get("devices", {})
+        devices = self.query(f"/1.0/profiles/{profile}", check=True).get("devices", {})
         return [n for n, d in devices.items() if d.get("type") == "nic"]
 
     def instances(self) -> dict[str, str]:
@@ -260,18 +286,7 @@ class Container:
         """
         if self._snapshot_loaded and not refresh:
             return self._snapshot
-        # `lxc query` ignores the global --project flag (so don't use _argv);
-        # the project must be passed as a URL query parameter instead.
-        path = f"/1.0/instances/{self.name}?project={self.lxd.project}"
-        r = subprocess.run(
-            ["lxc", "query", path],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            self._snapshot = json.loads(r.stdout)
-        else:
-            self._snapshot = None
+        self._snapshot = self.lxd.query(f"/1.0/instances/{self.name}")
         self._snapshot_loaded = True
         return self._snapshot
 
@@ -593,17 +608,17 @@ class Container:
                 print(f"Unmasked network device '{name}'", file=sys.stderr)
 
     def init_pid(self) -> int | None:
-        """Return the container's init PID, or None if stopped or not found."""
+        """Return the container's init PID, or None if stopped or not found.
+
+        The instance *state* endpoint carries the pid; the plain instance
+        object snapshot() caches does not, so this is its own request. A
+        stopped container reports pid 0, which reads as None here.
+        """
         try:
-            result = run(
-                self._argv(["info", self.name]),
-                capture_output=True,
-                text=True,
-            )
-            data = yaml.safe_load(result.stdout)
-            pid = data.get("PID")
+            state = self.lxd.query(f"/1.0/instances/{self.name}/state") or {}
+            pid = state.get("pid")
             return int(pid) if pid else None
-        except (subprocess.CalledProcessError, ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError):
             return None
 
     def add_proxy_device(

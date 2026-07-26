@@ -7,8 +7,8 @@
 ## Requirements
 
 - LXD, installed and initialised (`lxd init`), with your user able to run `lxc`.
-- Python 3, with [Click](https://click.palletsprojects.com/) and PyYAML
-  (on Debian/Ubuntu: `apt install python3-click python3-yaml`).
+- Python 3, with [Click](https://click.palletsprojects.com/)
+  (on Debian/Ubuntu: `apt install python3-click`).
 - Network access from containers (to install the agents and reach their APIs).
 - [textual](https://textual.textualize.io/) ≥ 0.32, for `aiab monitor`
   (`pip install textual` — the `python3-textual` in the Ubuntu archive is a
