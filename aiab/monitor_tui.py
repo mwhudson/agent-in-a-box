@@ -62,6 +62,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.suggester import Suggester
 from textual.widget import Widget
 from textual.widgets import Button, Input, RichLog, Static
@@ -623,7 +624,18 @@ class MonitorApp(App[None]):
         )
 
     def _poll(self) -> None:
-        log = self.query_one("#log", RichLog)
+        # Driven by a repeating timer, whose life is not exactly the DOM's: a
+        # tick can already be queued when the app starts tearing down, and it
+        # then runs against widgets that have been removed. Skip such a tick
+        # rather than raise out of the timer — there is nothing left to update,
+        # and the app is going away regardless. Everything below is synchronous,
+        # so having found these two the rest of the tree is there too.
+        try:
+            log = self.query_one("#log", RichLog)
+            pending = self.query_one("#pending", VerticalScroll)
+        except NoMatches:
+            return
+
         for tail in self.tails:
             for line in tail.read_new():
                 log.write(line)
@@ -634,7 +646,6 @@ class MonitorApp(App[None]):
         # skipped or timed-out host prompts again.
         present = netwatch.pending_hosts(self.pdir)
         self._handled &= present
-        pending = self.query_one("#pending", VerticalScroll)
         rows = {row.host: row for row in pending.query(PendingRow)}
         removed = [h for h, row in rows.items() if h not in present]
         for host in removed:
@@ -703,11 +714,15 @@ class MonitorApp(App[None]):
 
     def _flash_tab(self) -> None:
         """Blink the Network tab while a host is parked and another tab shows."""
+        try:
+            tab = self.query_one("#tab-network", Button)
+        except NoMatches:
+            return  # a timer tick during teardown; see _poll
         if self._pending_count > 0 and self._view != "network":
             self._flash_on = not self._flash_on
         else:
             self._flash_on = False
-        self.query_one("#tab-network", Button).set_class(self._flash_on, "flash")
+        tab.set_class(self._flash_on, "flash")
 
     # -- domains view --
 
