@@ -17,7 +17,8 @@
 #
 # A "base" is an Ubuntu release written as its version ("24.04") — the
 # canonical form aiab stores (see aiab.state) and names containers after.
-# Codenames ("noble") are accepted on input and normalised to the version.
+# Codenames ("noble") and "devel" are accepted on input and normalised to the
+# version, using the host's distro-info-data where it's available.
 #
 # One agent can have a template per release. The default release's template
 # keeps the bare agent name (e.g. "claude"), so existing templates aren't
@@ -29,15 +30,24 @@
 
 from __future__ import annotations
 
+import csv
+import datetime
 import re
 from collections.abc import Collection
+from pathlib import Path
 
 # The release used when a directory has recorded no base of its own.
 DEFAULT_BASE = "24.04"
 
-# Codename -> version for the releases we know about. Extend freely; any NN.NN
-# version is accepted even when it's not listed here, so this table only needs
-# to carry the codenames we want to resolve.
+# The release table every Ubuntu host already has: distro-info-data is
+# Priority: important and a dependency of python3-apt, and Debian ships the
+# same file. Reading the csv directly keeps the codename list current (and
+# lets 'devel' resolve) without depending on python3-distro-info.
+DISTRO_INFO_CSV = Path("/usr/share/distro-info/ubuntu.csv")
+
+# Codename -> version, used when distro-info-data is absent or too old to know
+# the release being asked for. Any NN.NN version is accepted whether or not
+# either source lists it, so this only needs to cover the common cases.
 CODENAMES: dict[str, str] = {
     "focal": "20.04",
     "jammy": "22.04",
@@ -46,27 +56,100 @@ CODENAMES: dict[str, str] = {
     "plucky": "25.04",
     "questing": "25.10",
     "resolute": "26.04",
+    "stonking": "26.10",
 }
 
 # A version is YY.MM — always two digits, a dot, two digits.
 _VERSION_RE = re.compile(r"\d{2}\.\d{2}")
 
 
+def _date(value: str) -> datetime.date | None:
+    try:
+        return datetime.date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _distro_info_rows() -> (
+    list[tuple[str, str, datetime.date | None, datetime.date | None]]
+):
+    """(series, version, created, released) from distro-info-data, in file order.
+
+    Empty when the data file is missing or unreadable — every caller falls
+    back to CODENAMES, so a host without distro-info-data still works. Rows
+    whose version isn't a plain YY.MM (the pre-6.06 releases) are dropped:
+    there are no container images for those anyway.
+    """
+    try:
+        text = DISTRO_INFO_CSV.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows = []
+    for row in csv.DictReader(text.splitlines()):
+        series = (row.get("series") or "").strip()
+        # The csv marks LTS releases in the version: "26.04 LTS" -> "26.04".
+        version = (row.get("version") or "").strip().split(" ")[0]
+        if series and _VERSION_RE.fullmatch(version):
+            rows.append(
+                (
+                    series,
+                    version,
+                    _date(row.get("created") or ""),
+                    _date(row.get("release") or ""),
+                )
+            )
+    return rows
+
+
+def devel_version(today: datetime.date | None = None) -> str | None:
+    """The version of the in-development release, or None if not known.
+
+    "In development" is the last release distro-info-data lists that has been
+    opened but hasn't reached its release date — the rule python3-distro-info
+    applies, without the dependency.
+    """
+    if today is None:
+        today = datetime.date.today()
+    unreleased = [
+        version
+        for _series, version, created, released in _distro_info_rows()
+        if created is not None
+        and created <= today
+        and (released is None or released > today)
+    ]
+    return unreleased[-1] if unreleased else None
+
+
 def normalize(value: str) -> str:
     """Return the canonical version ("24.04") for a release name or version.
 
-    Accepts a codename ("noble") or a version ("24.04"); raises ValueError
-    with a helpful message for anything else.
+    Accepts a codename ("noble"), a version ("24.04"), or "devel" for the
+    release currently in development; raises ValueError with a helpful
+    message for anything else.
+
+    "devel" is resolved to a version here, at the point of input, so what
+    gets stored (and named after, and compared against) is a fixed release
+    rather than an alias that would silently mean the next one in six months.
     """
     v = value.strip().lower()
+    if v == "devel":
+        devel = devel_version()
+        if devel is None:
+            raise ValueError(
+                "cannot resolve 'devel': no in-development release found in "
+                f"{DISTRO_INFO_CSV} (is distro-info-data installed and current?)"
+            )
+        return devel
+    for series, version, _created, _released in _distro_info_rows():
+        if series == v:
+            return version
     if v in CODENAMES:
         return CODENAMES[v]
     if _VERSION_RE.fullmatch(v):
         return v
-    known = ", ".join(sorted(CODENAMES))
     raise ValueError(
-        f"unknown release {value!r}; use a version like 24.04 "
-        f"or a codename ({known})"
+        f"unknown release {value!r}; use a version like 24.04, a codename "
+        f"like noble, or devel"
     )
 
 

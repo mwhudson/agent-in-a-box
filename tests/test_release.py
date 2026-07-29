@@ -1,8 +1,37 @@
 # Tests for aiab.release — release normalisation and template-container naming.
 
+import datetime
+
 import pytest
 
 from aiab import release
+
+
+# A stand-in for /usr/share/distro-info/ubuntu.csv: same columns, a released
+# LTS (version carrying the " LTS" suffix the real file uses), an unreleased
+# series, and a not-yet-opened one after it.
+CSV = """\
+version,codename,series,created,release,eol,eol-server,eol-esm
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+40.04 LTS,Fictional Ferret,fictional,2039-10-17,2040-04-25,2045-04-25
+40.10,Notional Numbat,notional,2040-04-26,2040-10-15,2041-07-15
+41.04,Unopened Urchin,unopened,2040-10-16,2041-04-22,2042-01-22
+"""
+
+
+@pytest.fixture
+def distro_info(tmp_path, monkeypatch):
+    """Point release at the fixture csv above."""
+    path = tmp_path / "ubuntu.csv"
+    path.write_text(CSV)
+    monkeypatch.setattr(release, "DISTRO_INFO_CSV", path)
+    return path
+
+
+@pytest.fixture
+def no_distro_info(tmp_path, monkeypatch):
+    """Point release at a csv that isn't there, as on a host without it."""
+    monkeypatch.setattr(release, "DISTRO_INFO_CSV", tmp_path / "absent.csv")
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +61,58 @@ def test_normalize_unknown_version_still_accepted():
 def test_normalize_rejects_garbage():
     with pytest.raises(ValueError):
         release.normalize("bananas")
+
+
+def test_normalize_uses_distro_info_codenames(distro_info):
+    # A codename the built-in table has never heard of, resolved from the csv
+    # — and the " LTS" the version column carries is stripped.
+    assert release.normalize("fictional") == "40.04"
+
+
+def test_normalize_falls_back_to_table_without_distro_info(no_distro_info):
+    # No csv: the built-in table still answers, so aiab works on a host
+    # without distro-info-data.
+    assert release.normalize("jammy") == "22.04"
+    with pytest.raises(ValueError):
+        release.normalize("fictional")
+
+
+def test_normalize_devel(distro_info, monkeypatch):
+    # 'devel' resolves to a fixed version, so what's stored can't drift when
+    # that release ships.
+    monkeypatch.setattr(release, "devel_version", lambda: "40.10")
+    assert release.normalize("devel") == "40.10"
+
+
+def test_normalize_devel_unresolvable_explains(no_distro_info):
+    with pytest.raises(ValueError, match="distro-info-data"):
+        release.normalize("devel")
+
+
+# ---------------------------------------------------------------------------
+# devel_version
+# ---------------------------------------------------------------------------
+
+
+def test_devel_is_the_opened_but_unreleased_series(distro_info):
+    # Between notional's opening and its release, notional is devel: the
+    # released LTS before it is out, and unopened hasn't started.
+    assert release.devel_version(datetime.date(2040, 7, 1)) == "40.10"
+
+
+def test_devel_moves_on_at_release(distro_info):
+    # The day after notional releases, unopened is open and devel.
+    assert release.devel_version(datetime.date(2040, 10, 17)) == "41.04"
+
+
+def test_devel_none_without_distro_info(no_distro_info):
+    assert release.devel_version(datetime.date(2040, 7, 1)) is None
+
+
+def test_distro_info_rows_skip_pre_version_scheme_releases(distro_info):
+    # 4.10 isn't YY.MM; dropping it keeps the version regex the single
+    # definition of what a base looks like.
+    assert "warty" not in {series for series, _v, _c, _r in release._distro_info_rows()}
 
 
 # ---------------------------------------------------------------------------

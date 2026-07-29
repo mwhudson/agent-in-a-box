@@ -662,8 +662,8 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     "base_release",
     metavar="RELEASE",
     default=None,
-    help="build/use Ubuntu RELEASE (e.g. 22.04 or jammy) and record it for "
-    "this directory",
+    help="build/use Ubuntu RELEASE (e.g. 22.04, jammy or devel) and record it "
+    "for this directory",
 )
 @click.option(
     "--profile",
@@ -1328,8 +1328,9 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
     """Show or set the Ubuntu release a directory's containers are built on.
 
     With no argument, prints the directory's base release and the default.
-    Given a RELEASE (a version like 22.04 or a codename like jammy), records it
-    for the directory; 'default' clears it back to the built-in default. A
+    Given a RELEASE (a version like 22.04, a codename like jammy, or 'devel'
+    for the release in development), records it for the directory; 'default'
+    clears it back to the built-in default. A
     change takes effect the next time an agent starts here — its container is
     rebuilt from the new base then.
     """
@@ -1344,7 +1345,12 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
             f"{v} ({c})"
             for c, v in sorted(release.CODENAMES.items(), key=lambda kv: kv[1])
         )
+        # A sample, not the limit: any codename the host's distro-info-data
+        # knows works too, as does any version and 'devel'.
         print(f"known releases: {known}")
+        devel = release.devel_version()
+        if devel is not None:
+            print(f"devel: {devel}")
         return
 
     if release_arg.strip().lower() == "default":

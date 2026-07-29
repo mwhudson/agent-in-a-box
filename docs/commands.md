@@ -200,15 +200,23 @@ Caveats:
 
 ```
 aiab base [--for DIR]                 # show the directory's base release
-aiab base [--for DIR] RELEASE         # set it (e.g. 22.04 or jammy)
+aiab base [--for DIR] RELEASE         # set it (e.g. 22.04, jammy or devel)
 aiab base [--for DIR] default         # clear back to the default (24.04)
 ```
 
 By default a directory's containers are built on Ubuntu 24.04. `aiab base
 RELEASE` overrides that for one project directory; `RELEASE` is a version
-(`22.04`) or a codename (`jammy`), and `default` clears the override. Like
-`aiab net` and `aiab mount`, the choice is persisted per directory (keyed by
-the resolved path) and only edits recorded state — no LXD connection needed.
+(`22.04`), a codename (`jammy`), or `devel` for the release currently in
+development, and `default` clears the override. Like `aiab net` and `aiab
+mount`, the choice is persisted per directory (keyed by the resolved path) and
+only edits recorded state — no LXD connection needed.
+
+Codenames and `devel` are resolved from the host's `distro-info-data`
+(`/usr/share/distro-info/ubuntu.csv`), which every Ubuntu and Debian system
+has, so new releases work without an aiab update; a small built-in table
+covers hosts that lack it. `devel` is resolved when you set it, so what's
+recorded is a fixed version (`aiab base devel` today records `26.10`) rather
+than an alias that would quietly mean the next release in six months.
 
 Templates are built from the `ubuntu-daily:` remote, whose images are rebuilt
 continuously — so a new template has fewer updates to install, and the
