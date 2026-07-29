@@ -40,7 +40,7 @@ def test_normalize_rejects_garbage():
 
 
 def test_image_for():
-    assert release.image_for("24.04") == "ubuntu:24.04"
+    assert release.image_for("24.04") == "ubuntu-daily:24.04"
 
 
 # ---------------------------------------------------------------------------

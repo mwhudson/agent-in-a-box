@@ -71,8 +71,14 @@ def normalize(value: str) -> str:
 
 
 def image_for(base: str) -> str:
-    """The LXD image alias for a canonical base, e.g. 'ubuntu:24.04'."""
-    return f"ubuntu:{base}"
+    """The LXD image alias for a canonical base, e.g. 'ubuntu-daily:24.04'.
+
+    The daily remote rather than the release remote: its images are rebuilt
+    continuously, so a fresh template has far less to pull in when it updates
+    itself, and the in-development release is available there before it's
+    published to the 'ubuntu:' remote.
+    """
+    return f"ubuntu-daily:{base}"
 
 
 def _token(base: str) -> str:

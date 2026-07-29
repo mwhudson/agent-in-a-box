@@ -210,6 +210,11 @@ RELEASE` overrides that for one project directory; `RELEASE` is a version
 `aiab net` and `aiab mount`, the choice is persisted per directory (keyed by
 the resolved path) and only edits recorded state — no LXD connection needed.
 
+Templates are built from the `ubuntu-daily:` remote, whose images are rebuilt
+continuously — so a new template has fewer updates to install, and the
+in-development release works as a base before it is published to the release
+(`ubuntu:`) remote.
+
 Each agent gets its own template **per release**. The default release keeps the
 plain template name (`claude`); other releases get a separate template
 (`claude-base-2204`), built lazily the first time you run an agent for a
