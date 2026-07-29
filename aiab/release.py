@@ -34,6 +34,7 @@ import csv
 import datetime
 import re
 from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
 
 # The release used when a directory has recorded no base of its own.
@@ -70,10 +71,34 @@ def _date(value: str) -> datetime.date | None:
         return None
 
 
-def _distro_info_rows() -> (
-    list[tuple[str, str, datetime.date | None, datetime.date | None]]
-):
-    """(series, version, created, released) from distro-info-data, in file order.
+@dataclass(frozen=True)
+class _Row:
+    """One release from distro-info-data. Dates are None when absent."""
+
+    series: str
+    version: str
+    created: datetime.date | None
+    released: datetime.date | None
+    eol: datetime.date | None
+
+    def exists(self, today: datetime.date) -> bool:
+        """True once the release has been opened for development."""
+        return self.created is not None and self.created <= today
+
+    def in_devel(self, today: datetime.date) -> bool:
+        return self.exists(today) and (self.released is None or self.released > today)
+
+    def supported(self, today: datetime.date) -> bool:
+        """True while in standard support — the csv's 'eol' column.
+
+        Deliberately not eol-esm: ESM covers security updates for a paid
+        subscription, which isn't what you want a fresh dev container on.
+        """
+        return self.exists(today) and (self.eol is None or self.eol >= today)
+
+
+def _distro_info_rows() -> list[_Row]:
+    """The releases distro-info-data lists, in file order.
 
     Empty when the data file is missing or unreadable — every caller falls
     back to CODENAMES, so a host without distro-info-data still works. Rows
@@ -91,11 +116,12 @@ def _distro_info_rows() -> (
         version = (row.get("version") or "").strip().split(" ")[0]
         if series and _VERSION_RE.fullmatch(version):
             rows.append(
-                (
-                    series,
-                    version,
-                    _date(row.get("created") or ""),
-                    _date(row.get("release") or ""),
+                _Row(
+                    series=series,
+                    version=version,
+                    created=_date(row.get("created") or ""),
+                    released=_date(row.get("release") or ""),
+                    eol=_date(row.get("eol") or ""),
                 )
             )
     return rows
@@ -110,14 +136,24 @@ def devel_version(today: datetime.date | None = None) -> str | None:
     """
     if today is None:
         today = datetime.date.today()
-    unreleased = [
-        version
-        for _series, version, created, released in _distro_info_rows()
-        if created is not None
-        and created <= today
-        and (released is None or released > today)
-    ]
+    unreleased = [row.version for row in _distro_info_rows() if row.in_devel(today)]
     return unreleased[-1] if unreleased else None
+
+
+def supported(today: datetime.date | None = None) -> list[tuple[str, str]]:
+    """(version, codename) for the releases still in standard support.
+
+    For `aiab base`'s listing, so it names what you'd actually want to build
+    on rather than every Ubuntu ever. Falls back to the whole built-in table
+    when distro-info-data isn't there to date-filter with — that table is
+    short and hand-maintained, so it's already roughly this list.
+    """
+    if today is None:
+        today = datetime.date.today()
+    rows = [row for row in _distro_info_rows() if row.supported(today)]
+    if rows:
+        return [(row.version, row.series) for row in rows]
+    return sorted((v, c) for c, v in CODENAMES.items())
 
 
 def normalize(value: str) -> str:
@@ -140,9 +176,9 @@ def normalize(value: str) -> str:
                 f"{DISTRO_INFO_CSV} (is distro-info-data installed and current?)"
             )
         return devel
-    for series, version, _created, _released in _distro_info_rows():
-        if series == v:
-            return version
+    for row in _distro_info_rows():
+        if row.series == v:
+            return row.version
     if v in CODENAMES:
         return CODENAMES[v]
     if _VERSION_RE.fullmatch(v):

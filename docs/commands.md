@@ -214,7 +214,10 @@ only edits recorded state — no LXD connection needed.
 Codenames and `devel` are resolved from the host's `distro-info-data`
 (`/usr/share/distro-info/ubuntu.csv`), which every Ubuntu and Debian system
 has, so new releases work without an aiab update; a small built-in table
-covers hosts that lack it. `devel` is resolved when you set it, so what's
+covers hosts that lack it. With no argument the command lists the releases
+still in standard support (plus the devel one) from that same data — a
+suggestion, not a limit: any release with an `ubuntu-daily:` image can be
+used, including ones past EOL. `devel` is resolved when you set it, so what's
 recorded is a fixed version (`aiab base devel` today records `26.10`) rather
 than an alias that would quietly mean the next release in six months.
 

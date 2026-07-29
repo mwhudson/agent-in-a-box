@@ -7,12 +7,13 @@ import pytest
 from aiab import release
 
 
-# A stand-in for /usr/share/distro-info/ubuntu.csv: same columns, a released
-# LTS (version carrying the " LTS" suffix the real file uses), an unreleased
-# series, and a not-yet-opened one after it.
+# A stand-in for /usr/share/distro-info/ubuntu.csv: same columns, an EOL
+# release, a supported LTS (version carrying the " LTS" suffix the real file
+# uses), an unreleased series, and a not-yet-opened one after it.
 CSV = """\
 version,codename,series,created,release,eol,eol-server,eol-esm
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+39.10,Expired Emu,expired,2039-04-26,2039-10-13,2040-07-10
 40.04 LTS,Fictional Ferret,fictional,2039-10-17,2040-04-25,2045-04-25
 40.10,Notional Numbat,notional,2040-04-26,2040-10-15,2041-07-15
 41.04,Unopened Urchin,unopened,2040-10-16,2041-04-22,2042-01-22
@@ -112,7 +113,35 @@ def test_devel_none_without_distro_info(no_distro_info):
 def test_distro_info_rows_skip_pre_version_scheme_releases(distro_info):
     # 4.10 isn't YY.MM; dropping it keeps the version regex the single
     # definition of what a base looks like.
-    assert "warty" not in {series for series, _v, _c, _r in release._distro_info_rows()}
+    assert "warty" not in {row.series for row in release._distro_info_rows()}
+
+
+# ---------------------------------------------------------------------------
+# supported
+# ---------------------------------------------------------------------------
+
+
+def test_supported_drops_eol_and_unopened(distro_info):
+    # On this date expired is past its eol and unopened hasn't been created,
+    # leaving the two releases you'd actually build a container on.
+    assert release.supported(datetime.date(2040, 7, 15)) == [
+        ("40.04", "fictional"),
+        ("40.10", "notional"),
+    ]
+
+
+def test_supported_includes_devel(distro_info):
+    # The in-development release has no eol yet in any practical sense, and
+    # is a legitimate base — 'aiab base devel' names it.
+    assert ("41.04", "unopened") in release.supported(datetime.date(2040, 10, 20))
+
+
+def test_supported_falls_back_to_table(no_distro_info):
+    # Without the csv there are no dates to filter on, so the whole built-in
+    # table is offered rather than nothing.
+    assert release.supported(datetime.date(2040, 7, 15)) == sorted(
+        (v, c) for c, v in release.CODENAMES.items()
+    )
 
 
 # ---------------------------------------------------------------------------

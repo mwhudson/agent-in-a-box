@@ -1341,13 +1341,10 @@ def base(for_dir: str | None, release_arg: str | None) -> None:
         print(f"{target}: {current}")
         if current != release.DEFAULT_BASE:
             print(f"default: {release.DEFAULT_BASE}")
-        known = ", ".join(
-            f"{v} ({c})"
-            for c, v in sorted(release.CODENAMES.items(), key=lambda kv: kv[1])
-        )
-        # A sample, not the limit: any codename the host's distro-info-data
-        # knows works too, as does any version and 'devel'.
-        print(f"known releases: {known}")
+        # The releases still in support, which is what you'd want to build on
+        # — but not the limit: any version aiab can find an image for works.
+        supported = ", ".join(f"{v} ({c})" for v, c in release.supported())
+        print(f"supported releases: {supported}")
         devel = release.devel_version()
         if devel is not None:
             print(f"devel: {devel}")
