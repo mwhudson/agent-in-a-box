@@ -17,8 +17,8 @@
 #
 # Locates the filtering-proxy logs for a directory's session containers (one
 # log per agent, under aiab.netproxy.PROXY_DIR) and manages the directory's
-# pending queue. While a watch session runs it keeps a watcher.pid file in
-# the pending dir; that file is what tells the proxy it may *park* a request
+# pending queue. While a watch session runs it holds a lock file in the
+# pending dir; that lock is what tells the proxy it may *park* a request
 # to an unknown host instead of refusing it outright. Each parked host shows
 # up as a pending file here; the user's decision turns into a plain
 # aiab.state mutation, which every parked handler notices on its next poll —
@@ -35,7 +35,7 @@
 from __future__ import annotations
 
 import contextlib
-import os
+import fcntl
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -49,11 +49,13 @@ from .lxd import container_name_for_dir, dir_slug
 
 # Per-directory queues of parked hosts, keyed like the other per-directory
 # state (see aiab.state). Each file is one undecided host, written by the
-# proxy and removed by it when the request resolves; watcher.pid marks an
-# attached watch session.
+# proxy and removed by it when the request resolves.
 _PENDING_BASE: Path = Path.home() / ".local" / "share" / "aiab" / "pending"
 
-_WATCHER_PID = "watcher.pid"
+# Entries in a pending dir that are bookkeeping rather than parked hosts: the
+# lock an attached monitor holds, and the pid file older versions used for the
+# same job (still filtered so a leftover one never shows up as a host).
+_NON_HOST_ENTRIES = frozenset({netproxy.WATCHER_LOCK, "watcher.pid"})
 
 # How long a [t]emporary allow lasts.
 _TEMP_ALLOW_SECS = 15 * 60
@@ -77,7 +79,7 @@ def pending_dir(directory: StrPath) -> Path:
 def pending_hosts(pdir: Path) -> set[str]:
     """The hosts currently parked in a pending dir."""
     try:
-        return {p.name for p in pdir.iterdir()} - {_WATCHER_PID}
+        return {p.name for p in pdir.iterdir()} - _NON_HOST_ENTRIES
     except OSError:
         return set()
 
@@ -86,20 +88,22 @@ def pending_hosts(pdir: Path) -> set[str]:
 def attached(pdir: Path) -> Iterator[None]:
     """Mark a watch session as attached to a pending dir, for the duration.
 
-    The watcher.pid file written here is what switches the proxy from
-    fail-fast 403s to parking unknown hosts (see aiab.netproxy).
+    Holding this is what switches the proxy from fail-fast 403s to parking
+    unknown hosts (see aiab.netproxy.watcher_attached). The lock is taken
+    *shared*, so every monitor of a directory holds it at once — one per
+    concurrent `aiab run` there — and the marker only clears when the last of
+    them exits.
+
+    That sharing is the point. The pid file this replaces held one writer, so
+    two monitors overwrote each other and whichever left first cleared the
+    marker, dropping the survivors back to fail-fast 403s with no sign that
+    parking had stopped working. The OS also releases the lock on process
+    death, so a crashed monitor needs no cleanup.
     """
     pdir.mkdir(parents=True, exist_ok=True)
-    pid_file = pdir / _WATCHER_PID
-    pid_file.write_text(f"{os.getpid()}\n")
-    try:
+    with (pdir / netproxy.WATCHER_LOCK).open("w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_SH)
         yield
-    finally:
-        # Only remove the marker if it is still ours — a second watch session
-        # may have taken over the queue.
-        with contextlib.suppress(OSError, ValueError):
-            if int(pid_file.read_text()) == os.getpid():
-                pid_file.unlink()
 
 
 def apply_decision(

@@ -32,12 +32,12 @@
 # Denied requests get a 403 naming the host, and are logged to stderr (which
 # `aiab run` redirects to a per-container log file).
 #
-# A host in neither list is normally refused too — but when an `aiab net
-# watch` session is attached (it keeps a watcher.pid file in --pending-dir),
-# the request is instead *parked*: the proxy drops a pending file for the
-# watcher to prompt the user about, and polls the policy until the decision
-# lands or the wait times out. Concurrent requests for the same host all
-# poll the same policy, so one answer releases them all.
+# A host in neither list is normally refused too — but while an `aiab monitor`
+# session is attached (it holds a lock file in --pending-dir, see
+# watcher_attached), the request is instead *parked*: the proxy drops a pending
+# file for the monitor to prompt the user about, and polls the policy until the
+# decision lands or the wait times out. Concurrent requests for the same host
+# all poll the same policy, so one answer releases them all.
 #
 # Run as:
 #   python3 -m aiab.netproxy --socket PATH --dir DIR --agent NAME
@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import os
 import re
 import signal
@@ -140,14 +141,38 @@ def evaluate(
     return verdict
 
 
-def _watcher_alive(pending_dir: Path) -> bool:
-    """Return True if an `aiab monitor` session is attached to pending_dir."""
+# The marker an `aiab monitor` holds while attached to a pending dir. Its name
+# lives here because this module is its only reader; aiab.netwatch.attached()
+# writes it and imports the name from here (netwatch imports netproxy, not the
+# other way round).
+WATCHER_LOCK = "watcher.lock"
+
+
+def watcher_attached(pending_dir: Path) -> bool:
+    """Return True if any `aiab monitor` session is attached to pending_dir.
+
+    Probes the lock netwatch.attached() holds *shared*, so a non-blocking
+    exclusive attempt fails while at least one monitor has it. Several monitors
+    can be attached at once — one per concurrent `aiab run` in the directory —
+    and parking stays on until the last of them exits.
+
+    A lock rather than the pid file this replaces: that was single-holder, so
+    whichever monitor happened to exit first removed the marker and silently
+    dropped the others back to fail-fast 403s. A lock is also self-healing,
+    since the OS releases it when a process dies, so there is no liveness probe
+    and nothing stale to clean up after a crash.
+    """
     try:
-        pid = int((pending_dir / "watcher.pid").read_text())
-        os.kill(pid, 0)  # just probes for existence
-    except (OSError, ValueError):
-        return False
-    return True
+        fd = os.open(pending_dir / WATCHER_LOCK, os.O_RDWR)
+    except OSError:
+        return False  # no lock file, so nothing has ever attached
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
 
 
 def _log(message: str) -> None:
@@ -301,7 +326,7 @@ class _Handler(socketserver.StreamRequestHandler):
         if (
             pending_dir is None
             or not _SAFE_HOST_RE.fullmatch(host)
-            or not _watcher_alive(pending_dir)
+            or not watcher_attached(pending_dir)
         ):
             return DENY
         pending = pending_dir / host
@@ -317,7 +342,7 @@ class _Handler(socketserver.StreamRequestHandler):
                 verdict = self.server.decide(host)
                 if verdict != ASK:
                     return verdict
-                if not _watcher_alive(pending_dir):
+                if not watcher_attached(pending_dir):
                     return DENY
             return DENY
         finally:
