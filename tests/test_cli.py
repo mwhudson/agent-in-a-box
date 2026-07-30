@@ -23,10 +23,14 @@ from aiab.cli import (
     _resolve_profile,
     _resolve_shared_tree,
     _session_env,
+    _setup_worktree,
     _tmux_group,
     _tmux_group_member,
     _tmux_joined_nothing,
     _tmux_session_name,
+    _tmux_window_name,
+    _worktree_add_args,
+    worktree_path_for,
 )
 
 
@@ -584,3 +588,179 @@ def test_resolve_shared_tree_offers_only_two_answers_without_a_repo(
     monkeypatch.setattr(click, "confirm", lambda *a, **k: False)
     with pytest.raises(click.Abort):
         _resolve_shared_tree("c", tmp_path, worktree=False)
+
+
+# ---------------------------------------------------------------------------
+# worktrees
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_path_is_named_for_the_branch():
+    # The branch is the useful label, and '/' in it just nests the path.
+    assert (
+        worktree_path_for("/work/proj", "feature/x")
+        == "/work/proj/.git/aiab-worktrees/feature/x"
+    )
+
+
+def test_worktree_path_without_a_branch_is_unique_per_run():
+    # Nothing to name it after, so two runs must still not collide.
+    first = worktree_path_for("/work/proj", None)
+    second = worktree_path_for("/work/proj", None)
+    assert first != second
+    assert first.startswith("/work/proj/.git/aiab-worktrees/")
+
+
+def test_worktree_add_args_detached_without_a_branch():
+    assert _worktree_add_args("/w/p", None, branch_exists=False) == [
+        "worktree",
+        "add",
+        "--detach",
+        "/w/p",
+    ]
+
+
+def test_worktree_add_args_creates_a_new_branch_with_dash_b():
+    assert _worktree_add_args("/w/p", "topic", branch_exists=False) == [
+        "worktree",
+        "add",
+        "-b",
+        "topic",
+        "/w/p",
+    ]
+
+
+def test_worktree_add_args_checks_out_an_existing_branch_without_dash_b():
+    # -b on a branch that exists fails outright rather than reusing it.
+    assert _worktree_add_args("/w/p", "topic", branch_exists=True) == [
+        "worktree",
+        "add",
+        "/w/p",
+        "topic",
+    ]
+
+
+def test_tmux_window_name_includes_the_branch():
+    # ':' would collide with tmux's session:window target syntax.
+    assert _tmux_window_name("claude", "feature/x") == "claude@feature/x"
+    assert _tmux_window_name("claude", None) == "claude"
+
+
+class LocalGitContainer:
+    """Runs the container's git commands on the host against a real repo.
+
+    _setup_worktree's logic is all in *which* git commands it chooses and how it
+    reads their results, so pointing them at a real repo tests the thing that
+    matters. Strips the `runuser -u <login> --` prefix aiab uses to drop out of
+    root inside the container.
+    """
+
+    def exec(self, cmd, *, cwd=None, user=None, check=True, **kwargs):
+        import subprocess as sp
+
+        if cmd[:2] == ["runuser", "-u"]:
+            cmd = cmd[4:]
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return sp.run(cmd, cwd=cwd, check=check, **kwargs)
+
+
+def _local_git() -> Any:
+    """LocalGitContainer, typed loose like the other fakes here."""
+    return LocalGitContainer()
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    import subprocess as sp
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    env = {"GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"), "HOME": str(tmp_path)}
+    sp.run(["git", "init", "-q", "-b", "main", "."], cwd=repo, check=True, env=env)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "f").write_text("x\n")
+    sp.run(["git", "add", "f"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+    return repo
+
+
+def _head_of(path):
+    import subprocess as sp
+
+    return sp.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_setup_worktree_creates_a_branch_and_checks_it_out(git_repo):
+    path = _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+    assert path == f"{git_repo}/.git/aiab-worktrees/topic"
+    assert _head_of(path) == "topic"
+
+
+def test_setup_worktree_detaches_without_a_branch(git_repo):
+    path = _setup_worktree(_local_git(), str(git_repo), 1000)
+    assert _head_of(path) == "HEAD"  # detached
+
+
+def test_setup_worktree_reenters_an_existing_branch(git_repo):
+    # -b would fail here; the run should resume the branch instead. Uses a
+    # second path so this is the "branch exists, directory doesn't" case.
+    import subprocess as sp
+
+    sp.run(["git", "branch", "topic"], cwd=git_repo, check=True)
+    path = _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+    assert _head_of(path) == "topic"
+
+
+def test_setup_worktree_reuses_its_own_leftover_directory(git_repo):
+    # What --worktree-keep (or a crash) leaves behind: same branch, same path.
+    first = _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+    (Path(first) / "scratch").write_text("agent's work\n")
+    second = _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+    assert second == first
+    assert (Path(second) / "scratch").read_text() == "agent's work\n"
+
+
+def test_setup_worktree_refuses_a_directory_holding_another_branch(git_repo):
+    # Never silently clobber something already in the way.
+    import subprocess as sp
+
+    other = git_repo / ".git" / "aiab-worktrees" / "topic"
+    sp.run(
+        ["git", "worktree", "add", "-b", "different", str(other)],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(click.ClickException, match="different"):
+        _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+
+
+def test_setup_worktree_surfaces_gits_error_for_a_branch_in_use(git_repo):
+    # Another run already has this branch checked out; git's message says so.
+    import subprocess as sp
+
+    sp.run(
+        ["git", "worktree", "add", "-b", "topic", str(git_repo / "elsewhere")],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(click.ClickException, match="already used by worktree"):
+        _setup_worktree(_local_git(), str(git_repo), 1000, "topic")
+
+
+def test_setup_worktree_surfaces_gits_error_for_a_bad_branch_name(git_repo):
+    with pytest.raises(click.ClickException):
+        _setup_worktree(_local_git(), str(git_repo), 1000, "bad name")
+
+
+def test_setup_worktree_rejects_a_non_repo(tmp_path):
+    with pytest.raises(click.ClickException, match="requires a git repository"):
+        _setup_worktree(_local_git(), str(tmp_path), 1000, "topic")

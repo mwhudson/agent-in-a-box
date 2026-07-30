@@ -21,7 +21,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ## aiab run
 
 ```
-aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--base RELEASE] [--profile NAME] [--worktree] [--worktree-keep] [--no-git-guard] [--shell] [--no-tmux] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--base RELEASE] [--profile NAME] [--worktree] [--worktree-keep] [--worktree-branch BRANCH] [--no-git-guard] [--shell] [--no-tmux] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `opencode`, or `copilot`.
@@ -37,6 +37,9 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--bas
   instead of the repo's working tree, so the agent's checkout and the host's
   can diverge; `--worktree-keep` keeps the worktree after the agent exits
   instead of removing it.
+- `--worktree-branch BRANCH` — run in a worktree checked out on `BRANCH`,
+  creating the branch if it doesn't exist (implies `--worktree`). See
+  [Worktrees and branches](#worktrees-and-branches) below.
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).
 - `--shell` — open an interactive shell in the container instead of the agent.
@@ -71,6 +74,34 @@ the worktree is removed when the agent exits unless you asked for
 `--worktree-keep`. If the directory isn't a git repository there is nothing to
 branch from, so the choice is just whether to continue. Non-interactive runs
 can't be asked, so they get the warning on stderr and proceed.
+
+### Worktrees and branches
+
+Worktrees live under `<repo>/.git/aiab-worktrees/`, so they need no extra
+mounts and don't show up in ordinary directory listings. `--worktree` alone
+checks out a detached HEAD in a directory named after the moment it started;
+`--worktree-branch BRANCH` checks out `BRANCH` in a directory named after it:
+
+```sh
+aiab run --worktree-branch refactor-api claude     # in one terminal
+aiab run --worktree-branch fix-tests claude        # in another
+```
+
+Both share the session container but work in separate checkouts on separate
+branches, and each terminal's tmux window is labelled `claude@<branch>` so the
+window list says who is working on what.
+
+The branch is what makes the result keepable. `git worktree remove` drops the
+checkout but never the branch, so **committed work survives the session even
+without `--worktree-keep`** — afterwards the branch is just there in the repo,
+ready to `git switch` to or merge. A plain `--worktree` has no ref keeping its
+commits reachable, so removing it discards them. Uncommitted changes go either
+way, so tell the agent to commit.
+
+Naming a branch that already exists checks it out rather than failing, so a
+session can be picked up again later. git refuses if that branch is already
+checked out in another worktree, which is what stops two runs colliding on one
+branch.
 
 To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
 API, use the built-in `openrouter` profile:

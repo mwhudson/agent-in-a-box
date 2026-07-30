@@ -115,17 +115,69 @@ def _realdir(path: str | None) -> Path:
 _WORKTREE_DIR = ".git/aiab-worktrees"
 
 
-def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
-    """Create a git worktree inside the container; return its path.
+def worktree_path_for(repo_cwd: str, branch: str | None) -> str:
+    """Where a run's worktree lives: named for its branch, or for the instant.
 
-    The worktree is a detached HEAD at the current commit, stored under
-    <repo>/.git/aiab-worktrees/<session-id>/. A detached HEAD avoids
-    creating throwaway branch refs that litter the reflog.
+    A branch name is the useful label — it is how you tell parallel sessions
+    apart and how you find the result afterwards — so it names the directory
+    too. Branch names may contain '/', which just nests the path; git's own
+    D/F rule (no 'foo' alongside 'foo/bar') is what stops that colliding.
+
+    Without a branch there is nothing to name it after, so fall back to the
+    clock. time_ns() rather than time(): two --worktree runs starting in the
+    same second would otherwise collide.
     """
-    # time_ns() rather than time.time(): two --worktree runs starting in the
-    # same second would otherwise collide on this path.
-    session_id = str(time.time_ns())
-    worktree_path = f"{repo_cwd}/{_WORKTREE_DIR}/{session_id}"
+    leaf = branch if branch else str(time.time_ns())
+    return f"{repo_cwd}/{_WORKTREE_DIR}/{leaf}"
+
+
+def _git(
+    session: lxd.Container, repo_cwd: str, *args: str
+) -> subprocess.CompletedProcess:
+    """Run git in the container as the login user, without checking the result."""
+    return session.exec(
+        ["runuser", "-u", CONTAINER_LOGIN, "--", "git", "-C", repo_cwd, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _worktree_add_args(
+    worktree_path: str, branch: str | None, branch_exists: bool
+) -> list[str]:
+    """The `git worktree add` arguments for a run.
+
+    Three shapes, because git spells them differently: no branch is a detached
+    checkout; a new branch needs -b; an existing branch must *not* get -b, which
+    fails outright rather than reusing it.
+    """
+    if branch is None:
+        return ["worktree", "add", "--detach", worktree_path]
+    if branch_exists:
+        return ["worktree", "add", worktree_path, branch]
+    return ["worktree", "add", "-b", branch, worktree_path]
+
+
+def _setup_worktree(
+    session: lxd.Container, repo_cwd: str, user: int, branch: str | None = None
+) -> str:
+    """Create (or re-enter) a git worktree inside the container; return its path.
+
+    Stored under <repo>/.git/aiab-worktrees/. With a branch the worktree is
+    checked out on it; without one it is a detached HEAD at the current commit,
+    which avoids leaving throwaway branch refs behind.
+
+    A branch is also what makes the result survive: `git worktree remove` drops
+    the checkout but never the branch, so committed work outlives the session
+    even without --worktree-keep. A detached worktree has no ref keeping its
+    commits reachable, so removing it discards them.
+
+    Naming a branch that already exists re-enters it rather than failing, so a
+    session can be resumed. git refuses if it is checked out in another
+    worktree, which is exactly the "another run already has this branch" case.
+    """
+    worktree_path = worktree_path_for(repo_cwd, branch)
 
     # Verify it's actually a git repo.
     r = session.exec(
@@ -140,22 +192,38 @@ def _setup_worktree(session: lxd.Container, repo_cwd: str, user: int) -> str:
             f"--worktree requires a git repository, but {repo_cwd} is not one"
         )
 
-    # Create the worktree (detached HEAD at current commit).
-    session.exec(
-        [
-            "runuser",
-            "-u",
-            CONTAINER_LOGIN,
-            "--",
-            "git",
-            "-C",
-            repo_cwd,
-            "worktree",
-            "add",
-            "--detach",
-            worktree_path,
-        ]
+    # A leftover directory (--worktree-keep, or a crash before cleanup) is
+    # reusable when it really is this branch's worktree; anything else in the
+    # way is something we must not silently clobber.
+    if (
+        branch
+        and _git(session, worktree_path, "rev-parse", "--git-dir").returncode == 0
+    ):
+        head = _git(session, worktree_path, "rev-parse", "--abbrev-ref", "HEAD")
+        if head.stdout.strip() == branch:
+            print(f"Reusing worktree at container:{worktree_path}", file=sys.stderr)
+            return worktree_path
+        raise click.ClickException(
+            f"{worktree_path} already exists and is not a worktree for "
+            f"'{branch}' (it is on '{head.stdout.strip()}'); remove it or pick "
+            "another branch name"
+        )
+
+    branch_exists = branch is not None and (
+        _git(
+            session, repo_cwd, "rev-parse", "--verify", f"refs/heads/{branch}"
+        ).returncode
+        == 0
     )
+    add_args = _worktree_add_args(worktree_path, branch, branch_exists)
+
+    r = _git(session, repo_cwd, *add_args)
+    if r.returncode != 0:
+        # git's own message is the useful one here — an invalid branch name, or
+        # a branch another worktree already holds.
+        raise click.ClickException(
+            (r.stderr or r.stdout).strip() or f"git {' '.join(add_args)} failed"
+        )
     print(f"Created worktree at container:{worktree_path}", file=sys.stderr)
     return worktree_path
 
@@ -436,6 +504,16 @@ def _tmux_group(container_name: str) -> str:
     own.
     """
     return f"aiab-{container_name}"
+
+
+def _tmux_window_name(agent: str, branch: str | None) -> str:
+    """Label for a run's tmux window: the agent, and its branch if it has one.
+
+    This is what makes the windows of parallel runs tellable apart in the window
+    list. '@' rather than ':' as the separator, since ':' is what splits session
+    from window in a tmux target string.
+    """
+    return f"{agent}@{branch}" if branch else agent
 
 
 def _tmux_sessions() -> list[tuple[str, str]]:
@@ -936,6 +1014,14 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     help="keep the worktree after the agent exits (implies --worktree)",
 )
 @click.option(
+    "--worktree-branch",
+    "worktree_branch",
+    metavar="BRANCH",
+    default=None,
+    help="run in a worktree on BRANCH, creating it if needed (implies "
+    "--worktree); the branch outlives the session even without --worktree-keep",
+)
+@click.option(
     "--no-git-guard",
     "no_git_guard",
     is_flag=True,
@@ -964,6 +1050,7 @@ def run(
     profile_name: str | None,
     worktree: bool,
     worktree_keep: bool,
+    worktree_branch: str | None,
     no_git_guard: bool,
     shell: bool,
     no_tmux: bool,
@@ -975,8 +1062,8 @@ def run(
     is available, the session runs under tmux with an `aiab monitor` control
     pane below the agent; --no-tmux opts out.
     """
-    # --worktree-keep implies --worktree.
-    if worktree_keep:
+    # --worktree-keep and --worktree-branch both imply --worktree.
+    if worktree_keep or worktree_branch:
         worktree = True
     cfg = agents.get(agent)
     profile = _resolve_profile(profile_name, agent)
@@ -1014,7 +1101,11 @@ def run(
     use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
     if use_tmux and "TMUX" not in os.environ:
         # does not return
-        _reexec_under_tmux(_tmux_group(session_name), agent, worktree)
+        _reexec_under_tmux(
+            _tmux_group(session_name),
+            _tmux_window_name(agent, worktree_branch),
+            worktree,
+        )
 
     # One-time prepare hooks (opencode's permissive config; a built-in
     # profile's credential setup, e.g. the OpenRouter key prompt). Both run
@@ -1082,7 +1173,9 @@ def run(
         # as the agent's working directory instead of the repo root.
         agent_cwd = container_cwd
         if worktree:
-            agent_cwd = _setup_worktree(session, container_cwd, CONTAINER_USER)
+            agent_cwd = _setup_worktree(
+                session, container_cwd, CONTAINER_USER, worktree_branch
+            )
 
         # Shadow the repo's .git/hooks and .git/config so the agent can't plant
         # code there that would run on the *host*. Done after the worktree

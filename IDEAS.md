@@ -86,11 +86,21 @@
   persisted to state. Port detection and interactive forwarding already work in
   the monitor's Ports tab, but there's no CLI flag and forwarding isn't
   persisted across sessions.
-- **Worktree follow-through** — `--worktree-keep` leaves a detached worktree
-  buried in `.git/aiab-worktrees/<timestamp>`, but there's no command to list
-  those worktrees, diff them, or pull the result out into a branch. Something
-  like `aiab worktrees list`/`adopt` would close the loop, especially when
-  running parallel sessions.
+- **Worktree follow-through** — mostly closed by `--worktree-branch`: the
+  branch ref *is* the handle, so there's nothing to "adopt" any more (the work
+  is already on a branch in the repo, and survives the worktree being removed),
+  and `git worktree list` already lists them. What's left is narrower:
+  - *The detached case still buries things.* Plain `--worktree` puts a detached
+    HEAD in `.git/aiab-worktrees/<timestamp>`, and with `--worktree-keep` those
+    accumulate with nothing naming them and nothing keeping their commits
+    reachable. Either point people at `--worktree-branch` and leave it, or have
+    `--worktree-keep` imply a generated branch name so the result is always
+    findable.
+  - *Nothing prunes kept worktrees.* `aiab gc` removes containers whose
+    directory is gone; the equivalent for worktrees left behind by
+    `--worktree-keep` doesn't exist. Cheap, since `git worktree list
+    --porcelain` reports them and the ones under `.git/aiab-worktrees/` are
+    unambiguously ours.
 - **Bypass a split-tunnel VPN for container egress** — when the host is on a
   non-full-tunnel VPN, the host proxy's outbound `create_connection`
   (`aiab/netproxy.py`) follows the host routing table, so the container can
