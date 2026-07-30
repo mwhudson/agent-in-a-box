@@ -105,6 +105,62 @@ session can be picked up again later. git refuses if that branch is already
 checked out in another worktree, which is what stops two runs colliding on one
 branch.
 
+#### Using a worktree from the host
+
+A worktree records where its repository is as an absolute path, and the
+container's view of the repo is `/work/<name>`, which doesn't exist on the
+host. So a worktree the agent created is not usable from outside the container:
+git there fails with `fatal: not a git repository: /work/...`, and `git
+worktree list` reports it as `prunable` — which is why a host-side `git
+worktree prune`, or the one `git gc` runs for you, can quietly deregister it.
+
+git can link worktrees with relative paths instead, which fixes both. Since
+aiab's worktrees live *inside* the repo, every link becomes internal to the
+tree and no longer names either view of it, so the same worktree works from the
+container and the host. It's off by default in git, and aiab doesn't turn it on
+for you (see below), so enable it per repository on the host:
+
+```sh
+git config worktree.useRelativePaths true
+```
+
+That is enough for worktrees the container creates afterwards: `.git/config` is
+inside the mounted repo, so the container's git reads the same setting.
+
+Worktrees made before you set it need converting once, from the repo root:
+
+```sh
+find .git/aiab-worktrees -name .git -type f -printf '%h\0' \
+  | xargs -0 -r git worktree repair --relative-paths
+```
+
+This works even though the container path they currently point at doesn't
+exist on the host. The `find` picks out directories holding a `.git` file,
+which is what a worktree is; a plain `.git/aiab-worktrees/*` glob also works
+but complains about the intermediate directory of a nested branch name like
+`feature/x`. Plain `git worktree repair` with no path argument doesn't work
+here — it can't read the broken worktrees to find them.
+
+Two things to know before turning it on:
+
+- **It needs git 2.48 or newer in the container**, not just on the host, since
+  that's where the worktree is created. Older git doesn't recognise the config
+  key, ignores it silently, and makes an absolute worktree as before — no
+  error, just no effect. Relative paths arrived in git 2.48, which is newer
+  than the git in some of the releases aiab can run, including the 24.04
+  default; check the base with [`aiab base`](#aiab-base) and the git in a
+  running container with `aiab lxc exec <container> -- git --version`
+  (`aiab list` gives the name), and raise the base if it's too old.
+- **It's effectively one-way for that repo.** Creating the first relative
+  worktree sets `extensions.relativeWorktrees` and bumps the repository format
+  version, and any git older than 2.48 then refuses the repository outright —
+  not just its worktrees. That includes a 24.04 container if you later move the
+  base back down.
+
+That second point is why this is yours to enable rather than something aiab
+does when it notices both sides are new enough: it changes the shared repo in a
+way that reaches well beyond aiab.
+
 To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
 API, use the built-in `openrouter` profile:
 
