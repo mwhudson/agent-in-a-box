@@ -38,7 +38,9 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--bas
   can diverge; `--worktree-keep` keeps the worktree after the agent exits
   instead of removing it.
 - `--worktree-branch BRANCH` — run in a worktree checked out on `BRANCH`,
-  creating the branch if it doesn't exist (implies `--worktree`). See
+  creating the branch if it doesn't exist (implies `--worktree`). Tab-completes
+  the repository's branches, resumable ones first (see
+  [Shell completion](install.md#shell-completion)). See
   [Worktrees and branches](#worktrees-and-branches) below.
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).

@@ -12,7 +12,10 @@ import click
 
 from aiab import CONTAINER_HOME
 from aiab import agents, profiles, state, worktrees
+import subprocess as cli_subprocess
+
 from aiab.cli import (
+    _complete_branch,
     _agent_command,
     _guard_git_repo,
     _json_set,
@@ -763,3 +766,101 @@ def test_setup_worktree_surfaces_gits_error_for_a_bad_branch_name(git_repo):
 def test_setup_worktree_rejects_a_non_repo(tmp_path):
     with pytest.raises(click.ClickException, match="requires a git repository"):
         _setup_worktree(_local_git(), str(tmp_path), 1000, "topic")
+
+
+# ---------------------------------------------------------------------------
+# _complete_branch
+# ---------------------------------------------------------------------------
+
+
+class _CompletionContext:
+    """Just the part of click.Context the completer reads."""
+
+    def __init__(self, for_dir=None):
+        self.params = {"for_dir": str(for_dir)} if for_dir else {}
+
+
+def _complete(incomplete, for_dir=None, monkeypatch=None, cwd=None):
+    if cwd is not None:
+        monkeypatch.chdir(cwd)
+    ctx: Any = _CompletionContext(for_dir)
+    param: Any = None  # the completer doesn't look at it
+    return [
+        (item.value, item.help) for item in _complete_branch(ctx, param, incomplete)
+    ]
+
+
+def test_complete_branch_lists_the_repos_branches(git_repo, monkeypatch):
+    import subprocess as sp
+
+    sp.run(["git", "branch", "topic"], cwd=git_repo, check=True)
+    values = [v for v, _ in _complete("", monkeypatch=monkeypatch, cwd=git_repo)]
+    assert values == ["main", "topic"]
+
+
+def test_complete_branch_filters_by_what_is_typed(git_repo, monkeypatch):
+    import subprocess as sp
+
+    for name in ("feature/spike", "fix-tests", "zebra"):
+        sp.run(["git", "branch", name], cwd=git_repo, check=True)
+    values = [v for v, _ in _complete("f", monkeypatch=monkeypatch, cwd=git_repo)]
+    assert values == ["feature/spike", "fix-tests"]
+
+
+def test_complete_branch_puts_resumable_worktrees_first(git_repo, monkeypatch):
+    # A branch whose worktree is still on disk is a session to pick up, not a
+    # new branch to start — worth surfacing above the rest, and labelled.
+    import subprocess as sp
+
+    for name in ("aaa-first-alphabetically", "resumable"):
+        sp.run(["git", "branch", name], cwd=git_repo, check=True)
+    sp.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            worktrees.path_for(".", "resumable"),
+            "resumable",
+        ],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+    completions = _complete("", monkeypatch=monkeypatch, cwd=git_repo)
+    assert completions[0] == ("resumable", "worktree waiting")
+    assert [v for v, _ in completions[1:]] == ["aaa-first-alphabetically", "main"]
+
+
+def test_complete_branch_honours_for_dir(git_repo, monkeypatch, tmp_path):
+    # Completing `aiab run --for OTHER --worktree-branch <TAB>` must offer the
+    # branches of OTHER, not of wherever the shell happens to be.
+    import subprocess as sp
+
+    sp.run(["git", "branch", "elsewhere"], cwd=git_repo, check=True)
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    values = [
+        v
+        for v, _ in _complete(
+            "", for_dir=git_repo, monkeypatch=monkeypatch, cwd=unrelated
+        )
+    ]
+    assert values == ["elsewhere", "main"]
+
+
+def test_complete_branch_is_quiet_outside_a_repository(tmp_path, monkeypatch):
+    # Every Tab runs this, so a directory with no repo must yield nothing
+    # rather than an error.
+    assert _complete("", monkeypatch=monkeypatch, cwd=tmp_path) == []
+
+
+def test_complete_branch_is_quiet_without_git(git_repo, monkeypatch):
+    import subprocess as sp
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(sp, "run", no_git)
+    monkeypatch.setattr(cli_subprocess, "run", no_git)
+    assert _complete("", monkeypatch=monkeypatch, cwd=git_repo) == []

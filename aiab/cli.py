@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+from click.shell_completion import CompletionItem
 
 from . import (
     PROJECT,
@@ -88,6 +89,51 @@ _DECISION_CONTINUE: str = "continue"
 # is still rejected, which is what the old hand-written completions could only
 # hint at.
 _DIR = click.Path(file_okay=False)
+
+
+def _complete_branch(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> list[CompletionItem]:
+    """Complete --worktree-branch with the repo's existing branches.
+
+    Branches that already have an aiab worktree on disk come first and say so:
+    those are sessions to resume rather than new branches to start, and which
+    one you are asking for is worth seeing before you press enter.
+
+    Completion runs in the user's shell, on the host, on every Tab — so this
+    stays quick and never fails loudly. No git, not a repository, or a git that
+    takes too long all just mean no suggestions.
+    """
+    work_dir = _realdir(ctx.params.get("for_dir"))
+    try:
+        r = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(work_dir),
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    resumable = set(worktrees.existing(work_dir))
+    names = [b for b in r.stdout.splitlines() if b.startswith(incomplete)]
+    return [
+        (
+            CompletionItem(name, help="worktree waiting")
+            if name in resumable
+            else CompletionItem(name)
+        )
+        # Resumable first, alphabetical within each group.
+        for name in sorted(names, key=lambda b: (b not in resumable, b))
+    ]
 
 
 def _agent_command(
@@ -1001,6 +1047,7 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     "worktree_branch",
     metavar="BRANCH",
     default=None,
+    shell_complete=_complete_branch,
     help="run in a worktree on BRANCH, creating it if needed (implies "
     "--worktree); the branch outlives the session even without --worktree-keep",
 )
