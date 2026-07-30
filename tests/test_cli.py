@@ -22,6 +22,10 @@ from aiab.cli import (
     _reseed_tree,
     _resolve_profile,
     _session_env,
+    _tmux_group,
+    _tmux_group_member,
+    _tmux_joined_nothing,
+    _tmux_session_name,
 )
 
 
@@ -396,3 +400,76 @@ def test_agent_containers_skips_containers_that_dont_exist(monkeypatch, tmp_path
 
     conn = lxd.Lxd("aiab")
     assert list(_agent_containers(conn, tmp_path)) == []
+
+
+# ---------------------------------------------------------------------------
+# tmux session naming
+# ---------------------------------------------------------------------------
+
+
+def test_tmux_group_is_named_for_the_container():
+    # The container is the thing two runs share, so it keys the group; a
+    # different agent or isolated profile is a different container, and so a
+    # different group.
+    assert _tmux_group("claude-proj-abc123") == "aiab-claude-proj-abc123"
+    assert _tmux_group("claude-openrouter-proj-abc123") != _tmux_group(
+        "claude-proj-abc123"
+    )
+
+
+def test_tmux_group_member_finds_the_lone_first_session():
+    # The first run's session carries the group name but reports no group of
+    # its own until a second session joins it.
+    sessions = [("aiab-claude-proj", ""), ("unrelated", "")]
+    assert _tmux_group_member("aiab-claude-proj", sessions) == "aiab-claude-proj"
+
+
+def test_tmux_group_member_finds_a_generated_member():
+    # The run that started the group may be gone; any surviving member is a
+    # valid join target, and joining via it preserves the group name.
+    sessions = [("aiab-claude-proj-3", "aiab-claude-proj")]
+    assert _tmux_group_member("aiab-claude-proj", sessions) == "aiab-claude-proj-3"
+
+
+def test_tmux_group_member_ignores_other_groups():
+    sessions = [("aiab-opencode-proj", "aiab-opencode-proj"), ("mine", "")]
+    assert _tmux_group_member("aiab-claude-proj", sessions) is None
+
+
+def test_tmux_group_member_ignores_a_same_named_group_field_only_match():
+    # A session whose *name* matches but which belongs to another group must
+    # not be offered: joining it would put us in that group.
+    sessions = [("aiab-claude-proj", "somebody-elses-group")]
+    assert _tmux_group_member("aiab-claude-proj", sessions) is None
+
+
+def test_tmux_session_name_uses_the_group_when_free():
+    assert _tmux_session_name("aiab-claude-proj", set()) == "aiab-claude-proj"
+
+
+def test_tmux_session_name_skips_taken_names():
+    taken = {"aiab-claude-proj", "aiab-claude-proj-2", "aiab-claude-proj-3"}
+    assert _tmux_session_name("aiab-claude-proj", taken) == "aiab-claude-proj-4"
+
+
+def test_tmux_joined_nothing_when_every_window_is_tmuxs_own():
+    # `new-session -t` does not fail on a target that has already exited: tmux
+    # makes a fresh group with a default shell window, which reports no start
+    # command. That is the signal there was nothing to join.
+    assert _tmux_joined_nothing([""]) is True
+
+
+def test_tmux_joined_nothing_false_when_a_real_window_was_shared():
+    # An inherited window runs another run's wrapper script. This must stay
+    # False even when that run then exits, leaving us holding its live agent
+    # window — killing the session then would kill the agent.
+    assert _tmux_joined_nothing(["/tmp/aiab-run-xyz.sh"]) is False
+    assert _tmux_joined_nothing(["/tmp/aiab-run-xyz.sh", ""]) is False
+
+
+def test_tmux_joined_nothing_false_when_the_window_list_is_unreadable():
+    # Unknown is not "nothing to join": discarding a session we cannot see into
+    # could throw away one that is sharing windows. None is a failed query; an
+    # empty list means the same, since a session always has one window.
+    assert _tmux_joined_nothing(None) is False
+    assert _tmux_joined_nothing([]) is False

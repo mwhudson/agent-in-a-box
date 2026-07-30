@@ -53,6 +53,13 @@ The base container is created automatically on first use. Authenticate inside
 the container on first run; credentials are stored under
 `~/.local/share/aiab/<agent>/home` and reused afterwards.
 
+You can run several agents for one directory at once — they share the session
+container, its network policy and its filtering proxy, and the container stays
+up until the last one exits. Without `--worktree` they also share the *one
+working tree*, so two agents edit the same files with nothing keeping them
+apart; `aiab run` warns when it spots a session already running for the
+directory. Pass `--worktree` to give each run its own checkout.
+
 To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
 API, use the built-in `openrouter` profile:
 
@@ -477,6 +484,14 @@ pane focuses it); in your own tmux sessions aiab leaves the option alone,
 so there you may need to focus the monitor pane first. Pass `--no-tmux` to
 run bare, and run `aiab monitor` standalone in any terminal if you prefer
 your own layout.
+
+The session it creates is named `aiab-<container>`, so a second `aiab run` for
+the same directory finds the first instead of starting an unrelated session. It
+joins as a tmux **session group**: one shared window list with a window per
+agent, but each terminal keeps its own current window. So both terminals can
+see every agent running for the directory and switch between them (`C-b w`)
+without moving the other terminal's view. When your agent exits, only your
+session goes away — the other terminals and their agents carry on.
 
 ## aiab upgrade-templates
 

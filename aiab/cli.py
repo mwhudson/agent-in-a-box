@@ -71,6 +71,11 @@ _CONTAINER_PATH: str = (
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
+# Set on the inner invocation by _reexec_under_tmux, so the shared-tree warning
+# is printed once (by the outer process, into the real terminal) rather than
+# again inside the tmux pane.
+_CONCURRENT_WARNED: str = "AIAB_CONCURRENT_WARNED"
+
 # The type for every directory-valued parameter. Its only real job is shell
 # completion: click derives the completion script from the command tree, and
 # this is what makes a DIR parameter offer directories (see docs/install.md).
@@ -213,6 +218,31 @@ def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     )
 
 
+def _warn_shared_tree(container_name: str, work_dir: Path, worktree: bool) -> None:
+    """Warn when this run would share a live session's working tree.
+
+    Concurrent runs for one directory are supported by design — they share the
+    session container, its lock and its proxy (see aiab.lifecycle) — but
+    without --worktree they also share one checkout, so two agents edit the
+    same files with nothing keeping them apart. That is a footgun rather than a
+    feature, so say so; --worktree is how to run them in parallel.
+
+    Checked before stop_when_idle() takes this run's own lock, or the probe
+    would find us. Printed by the outer process only (see _CONCURRENT_WARNED):
+    the inner one runs inside the tmux pane the agent is about to redraw.
+    """
+    if worktree or os.environ.get(_CONCURRENT_WARNED):
+        return
+    if not lifecycle.session_in_use(container_name):
+        return
+    print(
+        f"Warning: another agent session is already running for {work_dir}.\n"
+        "         Both will share the one working tree, editing the same files.\n"
+        "         Use --worktree to give this run its own checkout instead.",
+        file=sys.stderr,
+    )
+
+
 # -- git guard --
 #
 # Git hooks and several .git/config keys (core.hooksPath, aliases, core.pager,
@@ -328,6 +358,13 @@ def _guard_mount(
 #    _monitor_pane() splits off the monitor pane for the duration of the
 #    agent session and kills it afterwards.
 #
+# The session is named after the container (_tmux_group), so a second run for
+# the same directory can find the first instead of starting an unrelated
+# session. It joins as a tmux *session group*: one shared window list, one
+# window per agent, but a per-session current-window pointer, so each terminal
+# sees every agent for the directory and can look at whichever it likes
+# without dragging anyone else's view along.
+#
 # The monitor's presence is also what switches the proxy from fail-fast 403s
 # to parking unknown hosts for an interactive decision.
 
@@ -340,18 +377,119 @@ def _self_argv0() -> str:
     return shutil.which(argv0) or argv0
 
 
-def _reexec_under_tmux() -> None:
-    """Run this aiab invocation inside a new tmux session, then return.
+def _tmux_group(container_name: str) -> str:
+    """The tmux session-group name for a session container.
+
+    Keyed by the container, which is exactly the granularity that shares a
+    working tree: two runs that land in the same container belong in one group,
+    and a different agent or isolated profile (a different container) gets its
+    own.
+    """
+    return f"aiab-{container_name}"
+
+
+def _tmux_sessions() -> list[tuple[str, str]]:
+    """Every live tmux session as (name, group); empty if there is no server.
+
+    A lone session reports an empty group, so a group's members are the
+    sessions whose group matches *or* the session named after the group
+    itself — see _tmux_group_member.
+    """
+    r = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_group}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return []  # no server running yet, so no sessions
+    out = []
+    for line in r.stdout.splitlines():
+        name, _, group = line.partition("\t")
+        if name:
+            out.append((name, group))
+    return out
+
+
+def _tmux_group_member(group: str, sessions: list[tuple[str, str]]) -> str | None:
+    """Name a live session of `group` to attach a new one to, or None.
+
+    Any member will do: joining via a member's name puts the new session in
+    that member's group, so the group outlives the session that started it
+    (the first run can exit while later ones keep the group alive under
+    generated names).
+    """
+    for name, member_group in sessions:
+        if member_group == group or (not member_group and name == group):
+            return name
+    return None
+
+
+def _tmux_session_name(group: str, taken: set[str]) -> str:
+    """The group name itself if free, else the first free '<group>-N'."""
+    if group not in taken:
+        return group
+    n = 2
+    while f"{group}-{n}" in taken:
+        n += 1
+    return f"{group}-{n}"
+
+
+def _tmux_window_commands(session: str) -> list[str] | None:
+    """The start command of every window in `session`, or None if unknown.
+
+    Used to tell whether a `new-session -t` actually joined anything: tmux
+    does *not* fail when the target has exited since we looked it up. It
+    quietly creates a fresh group with a default shell window instead, which
+    reports an empty start command — every window aiab makes runs an explicit
+    wrapper script, so "no start command" means tmux invented it.
+
+    Deliberately not decided by "our session has no group siblings": the member
+    we joined can exit a moment later, which looks identical from the group's
+    side but leaves us legitimately holding *its* agent window. Testing the
+    window itself can't confuse the two, and never risks killing a live agent.
+    """
+    r = subprocess.run(
+        ["tmux", "list-windows", "-t", session, "-F", "#{pane_start_command}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return None
+    return r.stdout.splitlines()
+
+
+def _tmux_joined_nothing(commands: list[str] | None) -> bool:
+    """True when a `new-session -t` shared no windows with anyone.
+
+    `commands` is _tmux_window_commands() for the session just created: all
+    empty means every window in it is one tmux made for us, so the target was
+    already gone. Neither None (the query failed) nor an empty list (a session
+    always has at least one window, so this means we cannot see it) is that
+    case — leave the session alone rather than discard one we can't read.
+    """
+    if not commands:
+        return False
+    return not any(commands)
+
+
+def _reexec_under_tmux(group: str, window: str) -> None:
+    """Run this aiab invocation inside a tmux session named for its container.
+
+    The first run for a container creates the session; a concurrent one joins
+    it as a *grouped* session, which shares the window list but keeps its own
+    current-window pointer — so each terminal sees every agent running for the
+    directory and can look at whichever it likes without moving anyone else's
+    view.
 
     Stderr from the inner process is teed to a temp file while still showing
     live in the pane.  After tmux closes, if the inner exit code was non-zero
     and the log has content, the log is printed to the outer terminal so that
     errors do not disappear with the pane.
 
-    The trailing set-option turns mouse mode on for this session only (no -g,
-    so a user's own tmux sessions and config are untouched): clicks then
-    switch pane focus, and reach the watch pane's allow/deny buttons even
-    while the agent pane has focus.
+    Mouse mode is set on our session only (no -g, so a user's own tmux
+    sessions and config are untouched): clicks then switch pane focus, and
+    reach the watch pane's allow/deny buttons even while the agent pane has
+    focus.
     """
     inner = shlex.join([_self_argv0(), *sys.argv[1:]])
 
@@ -361,45 +499,107 @@ def _reexec_under_tmux() -> None:
     rc_fd, rc_path = tempfile.mkstemp(prefix="aiab-rc-", suffix=".txt")
     os.close(rc_fd)
 
+    sessions = _tmux_sessions()
+    member = _tmux_group_member(group, sessions)
+    name = _tmux_session_name(group, {s for s, _ in sessions})
+
     # Write a bash wrapper that tees stderr and records the exit code, both to
     # files the outer process can read after tmux exits.
+    #
+    # The trailing kill-session is what returns the terminal. A lone session
+    # dies with its only window, but a grouped one shares the *other* runs'
+    # windows, so when our agent exits tmux would simply show somebody else's
+    # agent and leave this terminal attached. Killing our own session detaches
+    # just us; the other members and their agents are untouched. It runs after
+    # the exit code is recorded, since it takes this script's pane with it.
+    #
+    # _CONCURRENT_WARNED stops the inner process repeating the shared-tree
+    # warning the outer one has already printed (see _warn_shared_tree).
     script_fd, script_path = tempfile.mkstemp(prefix="aiab-run-", suffix=".sh")
     try:
         os.write(
             script_fd,
             (
                 "#!/bin/bash\n"
-                f"{inner} 2> >(tee {shlex.quote(log_path)} >&2)\n"
+                f"{_CONCURRENT_WARNED}=1 {inner} "
+                f"2> >(tee {shlex.quote(log_path)} >&2)\n"
                 f"echo $? > {shlex.quote(rc_path)}\n"
+                f"tmux kill-session -t {shlex.quote(name)} 2>/dev/null\n"
             ).encode(),
         )
     finally:
         os.close(script_fd)
     os.chmod(script_path, 0o700)
 
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-c",
-            os.getcwd(),
-            script_path,
-            ";",
-            "set-option",
-            "mouse",
-            "on",
-        ]
-    )
-    os.unlink(script_path)
+    if member is not None:
+        # Detached first, so our window exists before this terminal attaches and
+        # there is no flicker through somebody else's agent.
+        subprocess.run(["tmux", "new-session", "-d", "-t", member, "-s", name])
+        if _tmux_joined_nothing(_tmux_window_commands(name)):
+            # The member exited between the lookup above and this join, so tmux
+            # gave us a fresh group with a default window rather than sharing
+            # anything (see _tmux_window_commands). There is nothing to join:
+            # discard it and start the group cleanly, which also gets the group
+            # name right for the runs after us. Safe to kill — the only window
+            # is tmux's own, and ours does not exist yet.
+            subprocess.run(
+                ["tmux", "kill-session", "-t", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            member = None
 
+    if member is None:
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-s",
+                name,
+                "-n",
+                window,
+                "-c",
+                os.getcwd(),
+                script_path,
+                ";",
+                "set-option",
+                "mouse",
+                "on",
+            ]
+        )
+    else:
+        subprocess.run(["tmux", "set-option", "-t", name, "mouse", "on"])
+        subprocess.run(
+            [
+                "tmux",
+                "new-window",
+                "-t",
+                name,
+                "-n",
+                window,
+                "-c",
+                os.getcwd(),
+                script_path,
+            ]
+        )
+        subprocess.run(["tmux", "attach-session", "-t", name])
     # Read the inner process's exit code (tmux does not propagate it).
     inner_rc = 1
+    finished = False
     try:
         inner_rc = int(Path(rc_path).read_text().strip())
+        finished = True
     except (OSError, ValueError):
         pass
     finally:
         Path(rc_path).unlink(missing_ok=True)
+
+    # Only remove the wrapper once it has actually finished. tmux also returns
+    # here when the client *detaches* (C-b d) with the agent still running, and
+    # bash may not have read the whole script yet — deleting it then can break
+    # a live session. Leaks a small file in that case, which beats that.
+    if finished:
+        os.unlink(script_path)
 
     # Display any captured stderr in the outer terminal on unclean exit.
     try:
@@ -748,12 +948,19 @@ def run(
             raise click.ClickException(str(e))
     dir_base = state.get_base(work_dir)
 
+    # The session container's name is a pure function of the directory and the
+    # prefix, so it is known before any LXD call — which both of the next two
+    # steps need, and neither should pay an LXD round-trip for.
+    session_name = lxd.container_name_for_dir(work_dir, container_prefix)
+
+    _warn_shared_tree(session_name, work_dir, worktree)
+
     # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
     use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
     if use_tmux and "TMUX" not in os.environ:
-        _reexec_under_tmux()  # does not return
+        _reexec_under_tmux(_tmux_group(session_name), agent)  # does not return
 
     # One-time prepare hooks (opencode's permissive config; a built-in
     # profile's credential setup, e.g. the OpenRouter key prompt). Both run
