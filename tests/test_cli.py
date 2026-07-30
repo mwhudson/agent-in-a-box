@@ -21,6 +21,7 @@ from aiab.cli import (
     _reseed_file,
     _reseed_tree,
     _resolve_profile,
+    _resolve_shared_tree,
     _session_env,
     _tmux_group,
     _tmux_group_member,
@@ -473,3 +474,113 @@ def test_tmux_joined_nothing_false_when_the_window_list_is_unreadable():
     # empty list means the same, since a session always has one window.
     assert _tmux_joined_nothing(None) is False
     assert _tmux_joined_nothing([]) is False
+
+
+# ---------------------------------------------------------------------------
+# _resolve_shared_tree
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shared_tree(monkeypatch, tmp_path):
+    """A repo dir, a stubbed lock probe, and a tty by default."""
+    from aiab import cli, lifecycle
+
+    (tmp_path / ".git").mkdir()
+    monkeypatch.delenv("AIAB_CONCURRENT_DECISION", raising=False)
+    monkeypatch.setattr(lifecycle, "session_in_use", lambda name: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    return tmp_path
+
+
+def test_resolve_shared_tree_passes_through_when_nothing_else_runs(
+    monkeypatch, shared_tree
+):
+    from aiab import lifecycle
+
+    monkeypatch.setattr(lifecycle, "session_in_use", lambda name: False)
+    assert _resolve_shared_tree("c", shared_tree, worktree=False) is False
+
+
+def test_resolve_shared_tree_does_not_probe_when_worktree_already_asked_for(
+    monkeypatch, shared_tree
+):
+    # --worktree already avoids the shared tree, so there is nothing to ask.
+    from aiab import lifecycle
+
+    def boom(name):
+        raise AssertionError("should not probe when --worktree was given")
+
+    monkeypatch.setattr(lifecycle, "session_in_use", boom)
+    assert _resolve_shared_tree("c", shared_tree, worktree=True) is True
+
+
+def test_resolve_shared_tree_obeys_the_inherited_decision(monkeypatch, shared_tree):
+    # The inner process must not ask again; it reads the outer one's answer.
+    def boom(*a, **k):
+        raise AssertionError("the inner process must not prompt")
+
+    monkeypatch.setattr(click, "prompt", boom)
+    monkeypatch.setenv("AIAB_CONCURRENT_DECISION", "worktree")
+    assert _resolve_shared_tree("c", shared_tree, worktree=False) is True
+    monkeypatch.setenv("AIAB_CONCURRENT_DECISION", "continue")
+    assert _resolve_shared_tree("c", shared_tree, worktree=False) is False
+
+
+def test_resolve_shared_tree_keeps_an_explicit_worktree_across_the_reexec(
+    monkeypatch, shared_tree
+):
+    # 'continue' is what the outer process records when --worktree was passed
+    # but no session clashed; it must not cancel the flag.
+    monkeypatch.setenv("AIAB_CONCURRENT_DECISION", "continue")
+    assert _resolve_shared_tree("c", shared_tree, worktree=True) is True
+
+
+@pytest.mark.parametrize(
+    "choice,expected", [("worktree", True), ("continue", False)]
+)
+def test_resolve_shared_tree_applies_the_answer(
+    monkeypatch, shared_tree, choice, expected
+):
+    monkeypatch.setattr(click, "prompt", lambda *a, **k: choice)
+    assert _resolve_shared_tree("c", shared_tree, worktree=False) is expected
+
+
+def test_resolve_shared_tree_exit_aborts(monkeypatch, shared_tree):
+    monkeypatch.setattr(click, "prompt", lambda *a, **k: "exit")
+    with pytest.raises(click.Abort):
+        _resolve_shared_tree("c", shared_tree, worktree=False)
+
+
+def test_resolve_shared_tree_warns_without_asking_when_not_a_tty(
+    monkeypatch, shared_tree, capsys
+):
+    # Non-interactive callers must not block on a prompt they cannot answer.
+    from aiab import cli
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(
+        click, "prompt", lambda *a, **k: pytest.fail("must not prompt")
+    )
+    assert _resolve_shared_tree("c", shared_tree, worktree=False) is False
+    assert "already running" in capsys.readouterr().err
+
+
+def test_resolve_shared_tree_offers_only_two_answers_without_a_repo(
+    monkeypatch, tmp_path
+):
+    # No .git, so `git worktree add` would fail: confirm instead of offering it.
+    from aiab import cli, lifecycle
+
+    monkeypatch.delenv("AIAB_CONCURRENT_DECISION", raising=False)
+    monkeypatch.setattr(lifecycle, "session_in_use", lambda name: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        click, "prompt", lambda *a, **k: pytest.fail("must not offer a worktree")
+    )
+    monkeypatch.setattr(click, "confirm", lambda *a, **k: True)
+    assert _resolve_shared_tree("c", tmp_path, worktree=False) is False
+
+    monkeypatch.setattr(click, "confirm", lambda *a, **k: False)
+    with pytest.raises(click.Abort):
+        _resolve_shared_tree("c", tmp_path, worktree=False)

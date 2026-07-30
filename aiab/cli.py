@@ -71,10 +71,12 @@ _CONTAINER_PATH: str = (
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
-# Set on the inner invocation by _reexec_under_tmux, so the shared-tree warning
-# is printed once (by the outer process, into the real terminal) rather than
-# again inside the tmux pane.
-_CONCURRENT_WARNED: str = "AIAB_CONCURRENT_WARNED"
+# Carries the shared-tree answer (see _resolve_shared_tree) from the outer
+# process to the inner one _reexec_under_tmux starts, so the question is asked
+# once, on a real terminal, rather than again inside the tmux pane.
+_CONCURRENT_DECISION: str = "AIAB_CONCURRENT_DECISION"
+_DECISION_WORKTREE: str = "worktree"
+_DECISION_CONTINUE: str = "continue"
 
 # The type for every directory-valued parameter. Its only real job is shell
 # completion: click derives the completion script from the command tree, and
@@ -218,29 +220,77 @@ def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
     )
 
 
-def _warn_shared_tree(container_name: str, work_dir: Path, worktree: bool) -> None:
-    """Warn when this run would share a live session's working tree.
+def _resolve_shared_tree(container_name: str, work_dir: Path, worktree: bool) -> bool:
+    """Return whether to use a worktree, asking about a shared tree if need be.
 
     Concurrent runs for one directory are supported by design — they share the
     session container, its lock and its proxy (see aiab.lifecycle) — but
     without --worktree they also share one checkout, so two agents edit the
     same files with nothing keeping them apart. That is a footgun rather than a
-    feature, so say so; --worktree is how to run them in parallel.
+    feature, and too easy to miss as a printed warning: this runs moments before
+    the agent takes over the screen and redraws it. So ask instead, and offer
+    the fix as one of the answers rather than as advice to go and re-run.
 
-    Checked before stop_when_idle() takes this run's own lock, or the probe
-    would find us. Printed by the outer process only (see _CONCURRENT_WARNED):
-    the inner one runs inside the tmux pane the agent is about to redraw.
+    Called before stop_when_idle() takes this run's own lock, or the probe would
+    find us. Asked by the outer process only — the answer reaches the inner one
+    through the environment (see _CONCURRENT_DECISION), which is also how a
+    worktree chosen here survives the re-exec, since the flag is not in argv.
     """
-    if worktree or os.environ.get(_CONCURRENT_WARNED):
-        return
-    if not lifecycle.session_in_use(container_name):
-        return
-    print(
-        f"Warning: another agent session is already running for {work_dir}.\n"
-        "         Both will share the one working tree, editing the same files.\n"
-        "         Use --worktree to give this run its own checkout instead.",
-        file=sys.stderr,
+    decided = os.environ.get(_CONCURRENT_DECISION)
+    if decided is not None:
+        return worktree or decided == _DECISION_WORKTREE
+    if worktree or not lifecycle.session_in_use(container_name):
+        return worktree
+
+    problem = (
+        f"Another agent session is already running for {work_dir}.\n"
+        "Both would share the one working tree, editing the same files."
     )
+    # A worktree needs somewhere to branch from. Testing for .git rather than
+    # asking git keeps this on the host (the container isn't up yet); a gitfile
+    # counts, since `git worktree add` works in a linked worktree too.
+    can_worktree = (work_dir / ".git").exists()
+
+    if not sys.stdin.isatty():
+        # Nothing to prompt with. Say it and continue rather than fail: a
+        # non-interactive caller may well know exactly what it is doing.
+        advice = (
+            "Pass --worktree to give this run its own checkout."
+            if can_worktree
+            else f"{work_dir} is not a git repository, so --worktree is no help here."
+        )
+        print(f"Warning: {problem}\n{advice}", file=sys.stderr)
+        return worktree
+
+    click.echo(problem, err=True)
+    if not can_worktree:
+        # Only two real answers, so don't offer a third that cannot work.
+        click.echo(
+            f"{work_dir} is not a git repository, so a worktree is not an option.",
+            err=True,
+        )
+        if click.confirm("Continue anyway?", default=False, err=True):
+            return False
+        raise click.Abort()
+
+    choice = click.prompt(
+        "Run in a new worktree, continue anyway, or exit?",
+        type=click.Choice([_DECISION_WORKTREE, _DECISION_CONTINUE, "exit"]),
+        default=_DECISION_WORKTREE,
+        err=True,
+    )
+    if choice == "exit":
+        raise click.Abort()
+    if choice == _DECISION_WORKTREE:
+        # --worktree semantics, so say what happens to it: the same surprise as
+        # the flag has, but the flag at least had to be typed.
+        click.echo(
+            "Running in a fresh worktree; it is removed when the agent exits "
+            "(--worktree-keep keeps it).",
+            err=True,
+        )
+        return True
+    return False
 
 
 # -- git guard --
@@ -472,7 +522,7 @@ def _tmux_joined_nothing(commands: list[str] | None) -> bool:
     return not any(commands)
 
 
-def _reexec_under_tmux(group: str, window: str) -> None:
+def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
     """Run this aiab invocation inside a tmux session named for its container.
 
     The first run for a container creates the session; a concurrent one joins
@@ -513,15 +563,18 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     # just us; the other members and their agents are untouched. It runs after
     # the exit code is recorded, since it takes this script's pane with it.
     #
-    # _CONCURRENT_WARNED stops the inner process repeating the shared-tree
-    # warning the outer one has already printed (see _warn_shared_tree).
+    # _CONCURRENT_DECISION passes on the shared-tree answer, so the inner
+    # process neither asks again nor loses a worktree chosen here — it is not in
+    # argv, and appending it there would land after any `--` passthrough
+    # separator and go to the agent instead (see _resolve_shared_tree).
+    decision = _DECISION_WORKTREE if worktree else _DECISION_CONTINUE
     script_fd, script_path = tempfile.mkstemp(prefix="aiab-run-", suffix=".sh")
     try:
         os.write(
             script_fd,
             (
                 "#!/bin/bash\n"
-                f"{_CONCURRENT_WARNED}=1 {inner} "
+                f"{_CONCURRENT_DECISION}={decision} {inner} "
                 f"2> >(tee {shlex.quote(log_path)} >&2)\n"
                 f"echo $? > {shlex.quote(rc_path)}\n"
                 f"tmux kill-session -t {shlex.quote(name)} 2>/dev/null\n"
@@ -953,14 +1006,15 @@ def run(
     # steps need, and neither should pay an LXD round-trip for.
     session_name = lxd.container_name_for_dir(work_dir, container_prefix)
 
-    _warn_shared_tree(session_name, work_dir, worktree)
+    worktree = _resolve_shared_tree(session_name, work_dir, worktree)
 
     # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
     use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
     if use_tmux and "TMUX" not in os.environ:
-        _reexec_under_tmux(_tmux_group(session_name), agent)  # does not return
+        # does not return
+        _reexec_under_tmux(_tmux_group(session_name), agent, worktree)
 
     # One-time prepare hooks (opencode's permissive config; a built-in
     # profile's credential setup, e.g. the OpenRouter key prompt). Both run

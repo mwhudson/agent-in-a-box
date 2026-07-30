@@ -57,8 +57,20 @@ You can run several agents for one directory at once — they share the session
 container, its network policy and its filtering proxy, and the container stays
 up until the last one exits. Without `--worktree` they also share the *one
 working tree*, so two agents edit the same files with nothing keeping them
-apart; `aiab run` warns when it spots a session already running for the
-directory. Pass `--worktree` to give each run its own checkout.
+apart. When `aiab run` spots a session already running for the directory it
+asks before going ahead:
+
+```
+Another agent session is already running for /home/you/src/myproject.
+Both would share the one working tree, editing the same files.
+Run in a new worktree, continue anyway, or exit? (worktree, continue, exit) [worktree]:
+```
+
+`worktree` (the default) is the same thing as having passed `--worktree`, so
+the worktree is removed when the agent exits unless you asked for
+`--worktree-keep`. If the directory isn't a git repository there is nothing to
+branch from, so the choice is just whether to continue. Non-interactive runs
+can't be asked, so they get the warning on stderr and proceed.
 
 To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
 API, use the built-in `openrouter` profile:
