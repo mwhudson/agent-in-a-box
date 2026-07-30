@@ -182,6 +182,35 @@ def spawn_stopper(container_name: str) -> None:
         )
 
 
+def session_in_use(container_name: str) -> bool:
+    """Return True if another `aiab run` is currently using this container.
+
+    Probes the same per-container lock stop_when_idle() takes: a live session
+    holds it *shared* for its whole duration, so a non-blocking *exclusive*
+    attempt fails exactly while one is running. Closing the fd releases
+    anything the probe itself acquired, so this never holds a lock and never
+    blocks a real session from taking one.
+
+    Only meaningful before this process enters stop_when_idle() — after that
+    we hold the lock ourselves and would be reporting on us.
+    """
+    lock_path = LOCK_DIR / container_name
+    try:
+        # Not "w": truncating is pointless here (the contents are unused) and
+        # this must not create the file, or a first-ever run would leave a
+        # stray lock file behind for a container that may never be built.
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return False  # no lock file, so nothing has ever locked it
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
 @contextlib.contextmanager
 def stop_when_idle(session: lxd.Container) -> Iterator[None]:
     """Hold the session lock; on exit, schedule a stop if we were the last.
