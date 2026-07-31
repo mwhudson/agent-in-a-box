@@ -1,5 +1,88 @@
 # IDEAS
 
+## What belongs in aiab
+
+aiab started from one idea: `aiab run claude` should feel like running `claude`,
+but confined. Several features have grown past that, so the test is worth having
+written down before the next one arrives — *would I still want this if there
+were no container at all?* If yes, it isn't sandbox work, whatever else it is.
+Failing the test today, roughly in order of distance:
+
+- **Worktrees.** `--worktree`, `--worktree-keep`, `--worktree-branch`, the
+  `_setup_worktree`/`_remove_worktree`/`_prune_worktrees` machinery,
+  `worktrees.py`, branch completion, and a docs section on reaching them from
+  the host. Solves a real problem (two agents, one checkout) that has nothing
+  to do with isolation — and one the agents now solve themselves: Claude Code
+  shipped `--worktree` in the CLI in February 2026 (v2.1.49/2.1.50; the desktop
+  app gives every session a worktree automatically), with resume-into-worktree,
+  exit-time keep/remove prompts, `.worktreeinclude` for gitignored files,
+  `worktree.baseRef`, PR-number worktrees, subagent `isolation: worktree`, and a
+  sweep that reaps abandoned ones. Copilot has it in its desktop app; opencode
+  has no built-in flag but at least four competing plugins.
+- **tmux multiplexing.** Eight helpers in `cli.py` (`_tmux_group`,
+  `_tmux_session_name`, `_tmux_window_name`, `_tmux_sessions`,
+  `_tmux_group_member`, `_tmux_window_commands`, `_tmux_joined_nothing`,
+  `_reexec_under_tmux`). Split this one carefully: tmux existing *at all* is box
+  work, because the monitor pane is how a network decision gets a live surface.
+  The session group with a window per agent, shared across terminals and
+  switched with `C-b w`, is not — that's multi-agent UX anyone would want bare.
+- **The Agents pane** (parked on the `agents-pane` branch), plus
+  `_resolve_shared_tree` and `AIAB_CONCURRENT_DECISION`: an explicit control
+  plane for parallel agents.
+- **`aiab profile`.** `--allow` is box work. Pointing Claude at OpenRouter is
+  not, and neither is the reasoning about `ANTHROPIC_CUSTOM_MODEL_OPTION` vs
+  `ANTHROPIC_MODEL` so an in-session `/model` switch doesn't silently revert.
+  `--isolated` straddles: a separate credential store is box-adjacent, forking
+  the agent's identity isn't.
+- **`aiab opencode config`** — a per-directory opencode settings editor whose
+  entire justification is opencode's config > auth.json > env precedence. Agent
+  configuration management, with no confinement content at all.
+- **The shipped instruction overlays and `/repo-role`.** Of
+  `agent-config/claude/CLAUDE.md`, one section ("Look in `/work`") is about the
+  container; "Verify before you change", "When you're unsure", "Scope" and
+  "Committing" are personal working preferences, and `/repo-role` is a per-repo
+  latitude taxonomy. Same for the opencode and Copilot overlays. So a sandboxing
+  tool versions one person's agent-behaviour opinions, and anyone installing it
+  for the container gets them too. There *is* a parity argument for something
+  being there — the container home is fresh, where on the host `~/.claude` would
+  already exist — but the parity-honest version is to bring the user's own
+  config in, not to ship an opinionated one from this repo. The two have drifted
+  into the same mechanism.
+- **`aiab env`** — half and half. "The container doesn't inherit your shell" is
+  box work; "record variables per directory" is a config manager.
+
+Passing the test despite looking like extras, and worth naming so a later cut
+doesn't sweep them up: the persisted per-agent home (otherwise you authenticate
+every run), `/setup-container` and the `/aiab` state dir (on the host your
+machine already has the toolchain — its *form* reaches into the agent's surface,
+but its reason is the box), port forwarding (a dev server inside the container
+is otherwise unreachable), Wayland passthrough, the monitor's
+Network/Domains/Mounts/Limits tabs, and `upgrade-templates`/`gc`/`list`/`lxc`.
+
+So the line isn't "isolation only" — that parity work is legitimately aiab's.
+It's that **aiab's job is what the agent can't do for itself because aiab put it
+in a box.** Everything else is dotfiles, and dotfiles are better mounted in than
+maintained here. It matters more than tidiness: the harness half is exactly
+where upstream moves fastest (worktrees already, agent view and agent teams for
+multiplexing, and every agent ships its own config system), while the sandbox
+half still has no upstream competitor — no agent confines itself from the
+outside, and of the ~100 tools in `awesome-agent-orchestrators` only a handful
+combine worktrees with containers at all.
+
+Two consequences worth acting on rather than just recording:
+
+- The instruction overlay should probably change shape — mount or copy the
+  host's agent config in, and keep only the `/work` paragraph (and whatever
+  replaces it, see "Tell the agent it's in a sandbox") as aiab's own.
+- The `agents-pane` and `defend-background-detach` branches are both harness,
+  both duplicate something Claude Code is actively building, and both get much
+  smaller if they aim at *making the agent's own version work in the container*
+  instead. Concretely: Claude Code moves a background session into its own
+  worktree under `.claude/worktrees/` before its first edit, but skips that when
+  the session is already inside a linked worktree — which is exactly what `aiab
+  run --worktree-branch` does to it. Untested here, and worth testing before
+  building further on either branch.
+
 ## Lifecycle gaps
 
 - **`aiab refresh`** — after `upgrade-templates`, existing session containers
