@@ -41,18 +41,42 @@ from .provision import Step
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 
 
+# Claude Code from Anthropic's signed apt repository rather than the native
+# installer (`claude.ai/install.sh`). The installer hardcodes
+# ~/.local/bin/claude and ~/.local/share/claude — there is no install-dir
+# knob — which puts ~800MB of binaries *inside the agent's home*, the one
+# directory aiab shares between every container for an agent. Installing from
+# apt puts it in the template image instead, where copilot's already lives, so
+# the shared home holds only config and credentials.
+#
+# 'latest' rather than 'stable': the native installer auto-updated, and this
+# keeps that. Package installs don't auto-update, so a version only moves when
+# `aiab upgrade-templates` rebuilds the template.
+#
+# downloads.claude.ai needs no net rule of its own — claude's api_domains
+# already allow claude.ai and its subdomains.
+_CLAUDE_APT_KEY = "https://downloads.claude.ai/keys/claude-code.asc"
+_CLAUDE_APT_KEYRING = "/etc/apt/keyrings/claude-code.asc"
+_CLAUDE_APT_LINE = (
+    f"deb [signed-by={_CLAUDE_APT_KEYRING}] "
+    "https://downloads.claude.ai/claude-code/apt/latest latest main"
+)
+
+
 def _claude_install() -> list[Step]:
     return [
         (
             "Installing claude ...",
             [
-                "runuser",
-                "-u",
-                "ubuntu",
-                "--",
                 "bash",
                 "-c",
-                "curl -fsSL https://claude.ai/install.sh | bash",
+                "set -e; "
+                "install -d -m 0755 /etc/apt/keyrings; "
+                f"curl -fsSL {_CLAUDE_APT_KEY} -o {_CLAUDE_APT_KEYRING}; "
+                f"echo '{_CLAUDE_APT_LINE}'"
+                " > /etc/apt/sources.list.d/claude-code.list; "
+                "apt-get update -q; "
+                "apt-get install -y -q claude-code",
             ],
         ),
     ]
@@ -136,7 +160,13 @@ BASELINE_DOMAINS: list[str] = [
 # The registry. Keys are agent names.
 AGENTS: dict[str, Agent] = {
     "claude": Agent(
-        command=f"{CONTAINER_HOME}/.local/bin/claude",
+        # Found on PATH, not an absolute path: the apt package installs
+        # system-wide, but a shared home built before this switch still has
+        # ~/.local/bin/claude, which PATH finds first. That shadowing is
+        # deliberate for now — session containers cloned before the switch
+        # have no apt package, and would break if pointed at one. It ends by
+        # itself once the home stops being shared per-agent.
+        command="claude",
         # wl-clipboard stays in the upgrade path (install_cmds doubles as
         # upgrade_cmds) so existing templates pick it up; apt-get install is a
         # no-op once it's present.
