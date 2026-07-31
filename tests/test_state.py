@@ -820,3 +820,52 @@ def test_prune_stale_removes_deleted_env_dirs(tmp_path):
 
     assert str(gone) in pruned["env"]
     assert state.get_env(gone, "opencode") == {}
+
+
+# ---------------------------------------------------------------------------
+# session_home_dir
+# ---------------------------------------------------------------------------
+
+
+def test_session_home_dir_lives_under_the_directory_state_dir(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    home = state.session_home_dir(project, "claude")
+    assert home.is_dir()
+    assert state.dir_state_dir(project) in home.parents
+
+
+def test_session_home_dir_is_per_directory(tmp_path):
+    # The whole point: two projects must not share a home, or one's session
+    # state (transcripts, daemon locks) shows up in the other's container.
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    assert state.session_home_dir(a, "claude") != state.session_home_dir(b, "claude")
+
+
+def test_session_home_dir_is_per_agent(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    assert state.session_home_dir(project, "claude") != state.session_home_dir(
+        project, "opencode"
+    )
+
+
+def test_session_home_dir_separates_an_isolated_profile(tmp_path):
+    # home_key carries the profile, which already has its own credential store;
+    # its session state should be just as separate.
+    project = tmp_path / "project"
+    project.mkdir()
+    assert state.session_home_dir(project, "claude") != state.session_home_dir(
+        project, "claude@openrouter"
+    )
+
+
+def test_session_home_dir_is_stable(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    assert state.session_home_dir(project, "claude") == state.session_home_dir(
+        project, "claude"
+    )

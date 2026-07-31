@@ -77,9 +77,20 @@ exiting never waits on the stop, and starting another session shortly after
 reuses the still-running container. Starting a new session cancels the
 pending stop.
 
-Authentication is persisted on the host (under
-`~/.local/share/aiab/<agent>/home`) and mounted into the container, so you only
-log in once.
+The container's home is the **directory's own**, kept on the host under the
+directory's [state dir](#per-directory-state-and-the-setup-script-aiab) and
+mounted at `/home/ubuntu`. So the state an agent keeps about a machine —
+transcripts, background-session and daemon state, session locks, shell history
+— belongs to the project it was produced in, and the agent doesn't see, or
+trip over, what it did in your other checkouts.
+
+The parts you want set up once are laid back over that home from a per-agent
+shared store (`~/.local/share/aiab/<agent>/home`): **credentials**, and
+user-level configuration such as `settings.json` or installed plugins. So you
+still log in once, per agent, and every directory sees that login. Which paths
+those are is listed per agent in `aiab/agents.py` (`shared_paths`), and it's an
+allowlist: anything an agent starts storing that aiab doesn't know about stays
+per-directory, which is the safe direction to be wrong in.
 
 All containers these tools create live in a dedicated LXD project named
 `aiab` (created automatically on first use), so they stay grouped together
@@ -96,6 +107,13 @@ Each project directory also gets a persistent state directory on the host
 `/aiab` inside every session container for that directory — the same dir for
 every agent. It holds per-directory state the *agent* maintains that should
 survive container recreation; today that's the container setup script.
+
+The same state dir also holds each agent's home for this directory, under
+`home/<agent>/` (`home/<agent>@<profile>/` for an isolated profile). That's not
+mounted at `/aiab`: it's mounted as the container's `/home/ubuntu`, as
+described in [How it works](#how-it-works). Keeping it here means a directory's
+sessions survive the container being rebuilt, and `aiab gc` reclaims them along
+with everything else when the project directory goes away.
 
 The `/setup-container` slash command (shipped from this repo for Claude and
 opencode; shipped as a custom agent for Copilot, see

@@ -868,12 +868,38 @@ def _record_runtime_mounts(
         state.set_mount(work_dir, d, readonly=False)
 
 
+def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path, str]]:
+    """Host/container path pairs for the parts of the home that stay shared.
+
+    The container's home is the directory's own (state.session_home_dir), so
+    these are laid over it from the agent's shared home — the credentials and
+    user config you want to set up once rather than once per project.
+
+    Both ends of a bind mount have to exist, so a path the shared home doesn't
+    have yet is created empty first. That is the fresh-install case; an
+    existing shared home already has them.
+    """
+    mounts: list[tuple[Path, str]] = []
+    for entry in cfg.shared_paths:
+        rel = entry.rstrip("/")
+        host_path = shared_home / rel
+        if not host_path.exists():
+            host_path.parent.mkdir(parents=True, exist_ok=True)
+            if entry.endswith("/"):
+                host_path.mkdir()
+            else:
+                host_path.touch()
+        mounts.append((host_path, f"{CONTAINER_HOME}/{rel}"))
+    return mounts
+
+
 def _apply_session_mounts(
     session: lxd.Container,
     cfg: agents.Agent,
     work_dir: Path,
     add_mount: tuple[str, ...],
     add_mount_rw: tuple[str, ...],
+    shared_home: Path,
 ) -> tuple[str, list[tuple[Path, str, bool]]]:
     """Mount the source dir, recorded extras, dirstate, and config overlays."""
     container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
@@ -887,6 +913,14 @@ def _apply_session_mounts(
     session.add_config_overlay(
         state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
     )
+
+    # Credentials and user config, laid over the directory's own home. Before
+    # the versioned overlays below, which land inside some of these (opencode's
+    # AGENTS.md goes in .config/opencode/) and have to win.
+    for host_path, container_path in _shared_home_mounts(cfg, shared_home):
+        session.add_config_overlay(
+            host_path, container_path, container_user=CONTAINER_USER
+        )
 
     for host_path, overlay_path in cfg.overlays:
         if host_path.exists():
@@ -1184,18 +1218,21 @@ def run(
         # Record the base this session was cloned from, so a later base change
         # for the directory is detected and triggers a rebuild (above).
         session.set_config("user.aiab_base", dir_base)
-        # An isolated profile's session inherits the template's config device,
-        # which points at the agent's own home; repoint it at the profile's
-        # store. Done every run rather than at creation so it self-heals, and
-        # recorded so `aiab list` can say which profile a container belongs to.
+        # The session inherits the template's config device, which points at
+        # the agent's shared home; repoint it at this directory's own. What
+        # stays shared is bind-mounted back on top in _apply_session_mounts.
+        # Done every run rather than at creation so it self-heals, and for an
+        # isolated profile the profile name is recorded too, so `aiab list` can
+        # say which profile a container belongs to.
+        session_home = state.session_home_dir(work_dir, home_key)
+        session.set_device_source(f"{agent}config", session_home)
         if isolated:
-            session.set_device_source(f"{agent}config", config_host_dir)
             session.set_config("user.aiab_profile", profile_name or "")
         session.apply_limits(**state.get_limits(work_dir))
 
         run_cmd = _agent_command(cfg, agent_args, shell)
         container_cwd, applied_mounts = _apply_session_mounts(
-            session, cfg, work_dir, add_mount, add_mount_rw
+            session, cfg, work_dir, add_mount, add_mount_rw, config_host_dir
         )
         proxy_env = _apply_network_policy(conn, session, work_dir, agent, profile_name)
 

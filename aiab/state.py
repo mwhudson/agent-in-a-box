@@ -690,6 +690,27 @@ def dir_state_dir(directory: StrPath) -> Path:
     return d
 
 
+def session_home_dir(directory: StrPath, home_key: str) -> Path:
+    """Return (creating it if needed) a directory's home for one agent.
+
+    Mounted as the container's home, so an agent's session state — transcripts,
+    daemon state, session locks, shell history — belongs to the directory it
+    was produced in. The credentials and user config that should span
+    directories are bind-mounted on top of it from the agent's shared home
+    (aiab.lxd.agent_home_dir), listed per agent as Agent.shared_paths.
+
+    Keyed by home_key rather than by agent, so an isolated profile gets its own
+    home here too, matching the separate credential store it already has.
+
+    It lives inside the directory's dir_state_dir, so it survives the container
+    being recreated and prune_stale() reclaims it with everything else when the
+    project directory goes away.
+    """
+    d = dir_state_dir(directory) / "home" / home_key
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
     """Return (creating it if needed) a host dir holding sidecar copies of a
     git repo's .git/hooks and .git/config (see aiab.cli's git guard).

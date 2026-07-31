@@ -26,6 +26,7 @@ from aiab.cli import (
     _resolve_profile,
     _resolve_shared_tree,
     _session_env,
+    _shared_home_mounts,
     _setup_worktree,
     _tmux_group,
     _tmux_group_member,
@@ -864,3 +865,49 @@ def test_complete_branch_is_quiet_without_git(git_repo, monkeypatch):
     monkeypatch.setattr(sp, "run", no_git)
     monkeypatch.setattr(cli_subprocess, "run", no_git)
     assert _complete("", monkeypatch=monkeypatch, cwd=git_repo) == []
+
+
+# ---------------------------------------------------------------------------
+# _shared_home_mounts
+# ---------------------------------------------------------------------------
+
+
+def test_shared_home_mounts_map_onto_the_container_home(tmp_path):
+    # Each shared path is laid over the directory's own home at the same
+    # relative position, so the agent finds its credentials where it expects.
+    mounts = _shared_home_mounts(agents.get("claude"), tmp_path)
+    by_container = {c: h for h, c in mounts}
+    assert f"{CONTAINER_HOME}/.claude.json" in by_container
+    assert by_container[f"{CONTAINER_HOME}/.claude/.credentials.json"] == (
+        tmp_path / ".claude/.credentials.json"
+    )
+    # The trailing slash marks a directory but doesn't reach the mount point.
+    assert f"{CONTAINER_HOME}/.claude/plugins" in by_container
+
+
+def test_shared_home_mounts_create_what_the_shared_home_lacks(tmp_path):
+    # Both ends of a bind mount must exist, so a fresh shared home is filled in
+    # rather than skipped -- skipping would send credentials to the
+    # per-directory home, where the next directory wouldn't find them.
+    _shared_home_mounts(agents.get("claude"), tmp_path)
+    assert (tmp_path / ".claude.json").is_file()
+    assert (tmp_path / ".claude/.credentials.json").is_file()
+    assert (tmp_path / ".claude/plugins").is_dir()
+
+
+def test_shared_home_mounts_leave_existing_content_alone(tmp_path):
+    creds = tmp_path / ".claude/.credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text('{"token": "secret"}')
+    _shared_home_mounts(agents.get("claude"), tmp_path)
+    assert creds.read_text() == '{"token": "secret"}'
+
+
+@pytest.mark.parametrize("name", agents.AGENT_NAMES)
+def test_every_agent_shares_something_and_only_under_the_home(name, tmp_path):
+    # An agent with no shared paths would ask for a fresh login per directory.
+    mounts = _shared_home_mounts(agents.get(name), tmp_path)
+    assert mounts
+    for host_path, container_path in mounts:
+        assert container_path.startswith(f"{CONTAINER_HOME}/")
+        assert tmp_path in host_path.parents

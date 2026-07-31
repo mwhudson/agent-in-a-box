@@ -44,8 +44,10 @@ other session. Bind-mounting sidesteps that entirely.
 Notes:
 
 - Your **credentials** are *not* versioned — they stay in the per-agent
-  config dir (`~/.local/share/aiab/claude/home/.claude/`); only `CLAUDE.md` and
-  `commands/` are overlaid from the repo.
+  shared store (`~/.local/share/aiab/claude/home/.claude/`), from which they're
+  mounted into every directory's container; only `CLAUDE.md` and `commands/`
+  are overlaid from the repo. The rest of the container's home is
+  [per-directory](concepts.md#how-it-works).
 - Profile sessions get the overlay too: a profile changes an agent's
   configuration, not which agent it is, so `aiab run --profile openrouter
   claude` is still `claude` as far as the overlay is concerned.

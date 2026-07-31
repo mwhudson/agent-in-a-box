@@ -140,6 +140,21 @@ class Agent:
     # auth, and telemetry endpoints. Always allowed when the directory's
     # network mode is 'restricted' (see aiab.netproxy).
     api_domains: list[str] = field(default_factory=list)
+    # Paths under the container home, relative to it, that stay *shared*
+    # between every container for this agent: credentials and user-level
+    # config, the things you want to set up once. Everything else in the home
+    # is per-directory (see aiab.state.session_home_dir), because the rest of
+    # what an agent keeps there — transcripts, daemon state, session locks —
+    # describes one machine and is wrong in another container.
+    #
+    # An allowlist rather than a list of things to keep apart: agents grow new
+    # state directories faster than we would notice them, and the failure mode
+    # here should be "not shared" rather than "silently shared".
+    #
+    # A trailing '/' marks a directory, anything else a file. Both ends of a
+    # bind mount have to exist, so a path that isn't in the shared home yet is
+    # created empty before mounting.
+    shared_paths: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.upgrade_cmds:
@@ -196,6 +211,19 @@ AGENTS: dict[str, Agent] = {
         # anthropic.com covers api./statsig./console.; claude.ai is used for
         # OAuth login; sentry.io for crash reporting.
         api_domains=["anthropic.com", "claude.ai", "claude.com", "sentry.io"],
+        # .claude.json carries the OAuth session, so it has to be shared —
+        # which also shares its per-project map and assorted counters. Checked
+        # and accepted: the entries that would matter (allowedTools,
+        # mcpServers) are unused, and permission state is moot in a container
+        # the agent already runs unconfined in. Everything else under .claude
+        # (projects/, daemon*, tasks/, sessions/, jobs/, file-history/,
+        # history.jsonl) is per-directory.
+        shared_paths=[
+            ".claude.json",
+            ".claude/.credentials.json",
+            ".claude/settings.json",
+            ".claude/plugins/",
+        ],
     ),
     "opencode": Agent(
         command=f"{CONTAINER_HOME}/.opencode/bin/opencode",
@@ -256,6 +284,19 @@ AGENTS: dict[str, Agent] = {
                 f"{CONTAINER_HOME}/.config/opencode/commands",
             ),
         ),
+        # .config/opencode is opencode's global config layer, and doubles as an
+        # npm package holding plugin dependencies — shared, since `aiab
+        # opencode config` already provides the per-directory layer above it
+        # (OPENCODE_CONFIG). .opencode holds the binary, installed into the
+        # home by opencode's installer. The session and message data —
+        # opencode.db, snapshot/, storage/, log/ — stays per-directory; it is
+        # one database for every project otherwise.
+        shared_paths=[
+            ".config/opencode/",
+            ".local/share/opencode/auth.json",
+            ".local/share/opencode/mcp-auth.json",
+            ".opencode/",
+        ],
     ),
     "copilot": Agent(
         command="copilot",
@@ -301,6 +342,18 @@ AGENTS: dict[str, Agent] = {
                 f"{CONTAINER_HOME}/.copilot/agents",
             ),
         ),
+        # Copilot keeps everything under one directory, so the split is inside
+        # it: config.json holds the authentication state, the other three are
+        # user configuration. session-state/, session-store.db,
+        # command-history-state.json, logs/ and ide/ are per-directory — and
+        # session-state/ is where the inuse.<pid>.lock files live, which only
+        # mean anything in the container that wrote them.
+        shared_paths=[
+            ".copilot/config.json",
+            ".copilot/mcp-config.json",
+            ".copilot/lsp-config.json",
+            ".copilot/settings.json",
+        ],
     ),
 }
 
