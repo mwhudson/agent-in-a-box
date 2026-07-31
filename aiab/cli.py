@@ -56,6 +56,7 @@ from . import profiles
 from . import provision
 from . import release
 from . import state
+from . import worktrees
 
 CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
@@ -109,26 +110,8 @@ def _realdir(path: str | None) -> Path:
 
 
 # -- git worktree helpers --
-
-# Worktrees are stored inside the mounted repo's .git directory so they need no
-# extra bind-mounts and are invisible to normal directory listings.
-_WORKTREE_DIR = ".git/aiab-worktrees"
-
-
-def worktree_path_for(repo_cwd: str, branch: str | None) -> str:
-    """Where a run's worktree lives: named for its branch, or for the instant.
-
-    A branch name is the useful label — it is how you tell parallel sessions
-    apart and how you find the result afterwards — so it names the directory
-    too. Branch names may contain '/', which just nests the path; git's own
-    D/F rule (no 'foo' alongside 'foo/bar') is what stops that colliding.
-
-    Without a branch there is nothing to name it after, so fall back to the
-    clock. time_ns() rather than time(): two --worktree runs starting in the
-    same second would otherwise collide.
-    """
-    leaf = branch if branch else str(time.time_ns())
-    return f"{repo_cwd}/{_WORKTREE_DIR}/{leaf}"
+#
+# Where they live is aiab.worktrees; this is the creating/removing half.
 
 
 def _git(
@@ -177,7 +160,7 @@ def _setup_worktree(
     session can be resumed. git refuses if it is checked out in another
     worktree, which is exactly the "another run already has this branch" case.
     """
-    worktree_path = worktree_path_for(repo_cwd, branch)
+    worktree_path = worktrees.path_for(repo_cwd, branch)
 
     # Verify it's actually a git repo.
     r = session.exec(

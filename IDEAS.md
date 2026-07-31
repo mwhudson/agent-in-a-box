@@ -101,6 +101,22 @@
     `--worktree-keep` doesn't exist. Cheap, since `git worktree list
     --porcelain` reports them and the ones under `.git/aiab-worktrees/` are
     unambiguously ours.
+  - *Host-side `git worktree prune` deregisters them.* A worktree created in
+    the container records its admin `gitdir` as a container path
+    (`/work/<name>/.git/aiab-worktrees/<branch>/.git`), which doesn't resolve
+    on the host — so a host-side `git worktree prune`, or the one `git gc`
+    runs for you, decides it's stale and drops the registration. Verified:
+    the directory and the branch survive, but git no longer knows the
+    directory is a worktree. Consequences are narrow but real: anything
+    listing them by the `.git` file rather than git's registry — which is
+    what `worktrees.existing` does — still sees it, yet resuming the branch
+    then fails, because `_setup_worktree` can't re-enter it (`rev-parse`
+    fails in the orphaned checkout) and can't re-add it either (the
+    directory is in the way). The fixes all have teeth — `worktree add
+    --force` might adopt the directory but could equally clobber uncommitted
+    work, and re-registering by hand means writing git's admin files
+    ourselves. Worth deciding deliberately if kept worktrees become a normal
+    thing to rely on rather than an escape hatch.
 - **Bypass a split-tunnel VPN for container egress** — when the host is on a
   non-full-tunnel VPN, the host proxy's outbound `create_connection`
   (`aiab/netproxy.py`) follows the host routing table, so the container can

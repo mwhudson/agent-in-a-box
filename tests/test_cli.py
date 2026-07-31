@@ -11,7 +11,7 @@ import pytest
 import click
 
 from aiab import CONTAINER_HOME
-from aiab import agents, profiles, state
+from aiab import agents, profiles, state, worktrees
 from aiab.cli import (
     _agent_command,
     _guard_git_repo,
@@ -30,7 +30,6 @@ from aiab.cli import (
     _tmux_session_name,
     _tmux_window_name,
     _worktree_add_args,
-    worktree_path_for,
 )
 
 
@@ -598,15 +597,15 @@ def test_resolve_shared_tree_offers_only_two_answers_without_a_repo(
 def test_worktree_path_is_named_for_the_branch():
     # The branch is the useful label, and '/' in it just nests the path.
     assert (
-        worktree_path_for("/work/proj", "feature/x")
+        worktrees.path_for("/work/proj", "feature/x")
         == "/work/proj/.git/aiab-worktrees/feature/x"
     )
 
 
 def test_worktree_path_without_a_branch_is_unique_per_run():
     # Nothing to name it after, so two runs must still not collide.
-    first = worktree_path_for("/work/proj", None)
-    second = worktree_path_for("/work/proj", None)
+    first = worktrees.path_for("/work/proj", None)
+    second = worktrees.path_for("/work/proj", None)
     assert first != second
     assert first.startswith("/work/proj/.git/aiab-worktrees/")
 
