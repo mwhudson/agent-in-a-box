@@ -82,6 +82,56 @@
   would take a kernel escape. Worth revisiting only if aiab ever grows a mode
   aimed at deliberately hostile code rather than a wandering agent — that mode
   would want the no-sudo container, and the guard question answers itself.
+- **A FUSE view of the work dir, for per-operation policy** — mount the
+  project directory through a host-side FUSE daemon instead of binding it in
+  directly, so every filesystem operation passes a decision point. It works
+  mechanically: a disk device's source can be a FUSE mountpoint as easily as a
+  real dir (`lxd.py:543`), `fusermount3` needs no root, and because the
+  container's uids are mapped with `raw.idmap` (`provision.py:168`) there's no
+  shifting to do, so idmapped-mounts-over-FUSE never comes up. The daemon has
+  to run on the *host* — inside the container it's bypassable and, worse,
+  umountable — supervised per session container the way the netproxy already
+  is. Two wrinkles: `allow_other` is mandatory, so a one-time
+  `user_allow_other` in the host's `/etc/fuse.conf`, not for the agent's sake
+  but because LXD binds the source as root and container root (`sudo apt` from
+  `/setup-container`) maps outside the daemon's owner uid; and LXD binds at
+  device-add time, so a daemon that dies mid-session leaves the container
+  seeing ESTALE until the device is re-added. Worth splitting by what the
+  policy actually is, because only one tier needs any of this:
+  - *Path allow/deny* — "hide `.env`", "`docs/` read-only" — doesn't need
+    FUSE. Stack more disk devices: mount an empty file, or a read-only copy,
+    over the path to be hidden. That's the git guard's existing trick
+    generalized, at native speed, and it covers the common case today.
+  - *Write isolation, or a review gate* where the agent's writes land in an
+    upper layer to be accepted or discarded afterwards, is overlayfs's job,
+    and the entry above already concluded that wants host root. FUSE would do
+    it unprivileged, but for tracked files git is the backstop, which is what
+    `concepts.md` already says.
+  - *Per-operation decisions and audit* — "what did this agent read?", or park
+    a write outside the worktree and ask — is the tier with no cheaper
+    substitute, and the real argument for building it: it's the netproxy's
+    architecture on a second axis. One `evaluate()`, denials tailed by `aiab
+    monitor`, and the same structured audit log wanted for the network below.
+  It would also close the `sudo umount` hole above, for exactly the reason
+  that entry says layering can't: the mount source genuinely lacks the real
+  `.git`, so umounting a shadow reveals whatever the view synthesizes rather
+  than the host's hooks dir. Against it, mostly performance, shaped badly for
+  this workload. Bulk I/O can be near-native (kernel passthrough on 6.9+, or
+  writeback caching), but every uncached lookup/getattr is a round trip, and
+  agent sessions are metadata storms — `git status` on a big repo, ripgrep
+  over a tree, `npm ci`, a compiler stat'ing headers. Expect something like
+  2–5× on tree walks and worse on many small files. Generous
+  `entry_timeout`/`attr_timeout` buys most of that back but trades directly
+  against enforcement: a cached dentry means a policy change doesn't bite
+  until it's invalidated. Separately, inotify doesn't propagate host to
+  container, so file watchers, `git fsmonitor` and dev servers get flaky. And
+  the policy has to be path-based — `fuse_req_ctx` reports a pid in the
+  container's pid namespace, so translating it to rule on *who* is asking is
+  racy. So if built: passthrough plus an audit log first, no denials, opt-in
+  per directory (`aiab mount --fuse`, or a profile) so the cost lands only
+  where it's worth paying. Measure `git status` and a real build against the
+  direct mount before adding any policy on top; if the tax turns out too high,
+  the audit log is still the part nothing else provides.
 - **Port forwarding** — `aiab run --publish 8000` via an LXD proxy device and
   persisted to state. Port detection and interactive forwarding already work in
   the monitor's Ports tab, but there's no CLI flag and forwarding isn't
