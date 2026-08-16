@@ -407,17 +407,25 @@ aiab profile add NAME [--agent AGENT]... [--isolated] [--env NAME=VALUE]... [--a
 aiab profile remove NAME
 ```
 
-A **profile** is a reusable bundle of settings applied with `aiab run --profile
-NAME`. Unlike everything under [`aiab env`](#aiab-env) or [`aiab
-net`](#aiab-net), it isn't recorded against a project directory — it's chosen
-per run, so the same directory can be used with and without one.
+A **profile** is a named agent execution variant applied with `aiab run
+--profile NAME`. It coordinates a small set of runtime concerns that otherwise
+need to change together: agent environment, network domains, and optionally the
+agent's credential and session identity. It is not a general-purpose manager
+for the agent's prompts, config files, mounts, worktrees, or resource limits.
+Those remain the responsibility of the agent or of the corresponding aiab
+command.
+
+Unlike everything under [`aiab env`](#aiab-env) or [`aiab
+net`](#aiab-net), a profile isn't recorded against a project directory — it is
+chosen per run, so the same directory can be used with and without one.
 
 A profile carries:
 
 - `--env NAME=VALUE` — environment variables injected into the agent. A
   variable recorded for the *directory* wins over the profile's, so precedence
-  is dir > profile: a profile is a reusable default, and a variable set for one
-  directory is the more specific statement.
+  is dir > profile. The `--env` option accepts the environment variables that
+  the upstream agent uses for provider, model, or other runtime selection; it
+  is not intended to model the agent's complete configuration surface.
 - `--allow DOMAIN` — domains always reachable while the directory is in
   restricted mode. These join the agent's own API domains rather than the
   recorded allow list, so a profile that points an agent at a different
@@ -444,7 +452,10 @@ the network, say. It then reuses the agent's normal credential store and
 container, so entering it doesn't mean authenticating again.
 
 Either way the **template container is shared**: a profile changes how an agent
-is *configured*, never how it's *installed*, so there's nothing to build twice.
+is executed, never how it's *installed*, so there's nothing to build twice.
+Agent configuration that is not represented by the profile remains in the
+agent's own config files or in commands such as `aiab env` and `aiab opencode
+config`.
 
 ### The built-in openrouter profile
 

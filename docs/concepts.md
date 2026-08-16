@@ -100,6 +100,26 @@ project's profiles (network/storage) and image cache — containers work out of
 the box, they're just namespaced separately. List them with `aiab list` (or
 the raw `aiab lxc list`).
 
+### Named execution variants
+
+`aiab run --profile NAME` selects a named execution variant without changing
+the installed agent or recording the choice against the project directory. A
+profile can coordinate the upstream agent's runtime environment, add API domains
+to the directory's restricted network policy, and optionally fork the agent's
+credential and session identity.
+
+This is intentionally narrower than a general agent configuration manager.
+Prompts, model preferences, custom commands, and other agent behavior belong in
+the agent's own configuration system or in the configuration mechanisms
+described in [Configuration](configuration.md). The profile exists where those
+runtime choices intersect with aiab's external boundary.
+
+An isolated profile uses a separate home key such as
+`claude@openrouter` and a separate session-container prefix such as
+`claude-openrouter`. A non-isolated profile shares the normal agent home and
+session container. The template container is shared in both cases because the
+profile changes execution, not installation.
+
 ## Per-directory state and the setup script (`/aiab`)
 
 Each project directory also gets a persistent state directory on the host

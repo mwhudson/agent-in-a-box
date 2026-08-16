@@ -1,12 +1,20 @@
 # IDEAS
 
-## What belongs in aiab
+## Scope And Batches
 
-aiab started from one idea: `aiab run claude` should feel like running `claude`,
-but confined. Several features have grown past that, so the test is worth having
-written down before the next one arrives — *would I still want this if there
-were no container at all?* If yes, it isn't sandbox work, whatever else it is.
-Failing the test today, roughly in order of distance:
+aiab's core job is to run an otherwise ordinary coding agent behind an external
+security and lifecycle boundary: filesystem visibility, network egress, host
+repository protection, container lifecycle, and the persistent state needed to
+make that boundary usable. The agent's own prompts, models, commands, and
+configuration systems should remain upstream-owned rather than becoming an
+aiab configuration manager.
+
+The boundary is not limited to isolation-only features. Worktrees, multiplexing,
+instruction overlays, and per-directory environment settings can be useful
+parity features, but they should be kept visibly separate from the sandbox
+itself. The test for a proposed feature is: *does aiab need to provide this
+because the agent is running in a box, or is it merely an opinionated way to
+configure the agent?*
 
 - **Worktrees.** `--worktree`, `--worktree-keep`, `--worktree-branch`, the
   `_setup_worktree`/`_remove_worktree`/`_prune_worktrees` machinery,
@@ -29,11 +37,13 @@ Failing the test today, roughly in order of distance:
 - **The Agents pane** (parked on the `agents-pane` branch), plus
   `_resolve_shared_tree` and `AIAB_CONCURRENT_DECISION`: an explicit control
   plane for parallel agents.
-- **`aiab profile`.** `--allow` is box work. Pointing Claude at OpenRouter is
-  not, and neither is the reasoning about `ANTHROPIC_CUSTOM_MODEL_OPTION` vs
-  `ANTHROPIC_MODEL` so an in-session `/model` switch doesn't silently revert.
-  `--isolated` straddles: a separate credential store is box-adjacent, forking
-  the agent's identity isn't.
+- **`aiab profile`.** Profiles are a narrow execution-variant layer rather than
+  a general configuration manager. They coordinate agent-scoped environment,
+  additional network domains, and optional credential/session isolation. The
+  profile may point Claude at OpenRouter, for example, because the endpoint,
+  network allowlist, and credential namespace must agree. The agent's broader
+  configuration remains upstream-owned. `--isolated` is the identity boundary:
+  it gives the variant its own credential store and session container.
 - **`aiab opencode config`** — a per-directory opencode settings editor whose
   entire justification is opencode's config > auth.json > env precedence. Agent
   configuration management, with no confinement content at all.

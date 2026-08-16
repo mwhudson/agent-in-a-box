@@ -25,7 +25,7 @@ aiab net ...                # restrict a dir's containers' network access
 aiab base ...               # pick the Ubuntu release a dir's containers use
 aiab limits ...             # set a dir's container CPU/memory limits
 aiab env ...                # inject environment variables per directory
-aiab profile ...            # named setting bundles for run --profile
+aiab profile ...            # named agent execution variants
 aiab opencode config ...    # per-directory opencode config (e.g. its key)
 aiab monitor                # interactive network + mounts control panel
 aiab upgrade-templates      # apt upgrade + reinstall agents in the templates
@@ -35,8 +35,11 @@ aiab lxc ...                # run lxc against the 'aiab' project
 ```
 
 `<agent>` is one of `claude`, `opencode`, or `copilot`. To vary how one runs —
-Claude against OpenRouter, say — use a profile: `aiab run --profile openrouter
-claude`. Full options for every subcommand are in the
+Claude against OpenRouter, say — use a named execution variant:
+`aiab run --profile openrouter claude`. Profiles coordinate a small set of
+runtime concerns around the agent: environment, network domains, and optionally
+separate credentials and session identity. They do not replace the agent's own
+configuration system. Full options for every subcommand are in the
 [command reference](docs/commands.md).
 
 ## Quick start

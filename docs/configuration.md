@@ -1,14 +1,21 @@
 # Configuration
 
-Two kinds of configuration sit alongside the sandbox:
+There are three distinct configuration layers around the sandbox:
 
 - **Versioned config overlays** — global instructions and custom commands,
   shipped from this repo and bind-mounted into every session for an agent.
 - **Per-directory configuration** — environment variables and opencode settings
   scoped to a single project directory, for things like a directory-specific
   API key.
+- **Named execution variants** — profiles selected for an individual run, for
+  provider/runtime environment, additional API domains, and optionally a
+  separate credential and session identity.
 
-In both cases your **credentials are kept separate** from versioned config: they
+Profiles do not replace the agent's own configuration system. Use the native
+Claude, opencode, or Copilot configuration mechanisms for agent behavior and
+settings that are not runtime concerns coordinated by aiab.
+
+In all cases your **credentials are kept separate** from versioned config: they
 live in the per-agent config dir (`~/.local/share/aiab/<agent>/home/...`) and are
 never part of the repo.
 
@@ -48,9 +55,9 @@ Notes:
   mounted into every directory's container; only `CLAUDE.md` and `commands/`
   are overlaid from the repo. The rest of the container's home is
   [per-directory](concepts.md#how-it-works).
-- Profile sessions get the overlay too: a profile changes an agent's
-  configuration, not which agent it is, so `aiab run --profile openrouter
-  claude` is still `claude` as far as the overlay is concerned.
+- Profile sessions get the overlay too: a profile changes how an agent runs, not
+  which agent is installed, so `aiab run --profile openrouter claude` is still
+  `claude` as far as the overlay is concerned.
 - Missing entries are skipped, so it's fine to delete
   `agent-config/claude/CLAUDE.md` or leave `agent-config/claude/commands/`
   empty.
@@ -118,7 +125,20 @@ the Claude/opencode `/setup-container` command, but you reach it by picking
 Claude Code's own persistent memory system, which Copilot CLI has no
 equivalent of.
 
-## Per-directory configuration
+## Profiles and per-directory configuration
+
+A profile is selected with `aiab run --profile NAME`; it is not stored against a
+project directory. Profiles are useful when provider, network, and credential
+selection need to travel together across directories. They support agent scope,
+environment variables, additional restricted-mode domains, and optional
+credential/session isolation. They do not manage the agent's complete config
+surface.
+
+The directory-specific settings below are more specific than a profile. In
+particular, directory environment variables override profile environment
+variables.
+
+### Per-directory configuration
 
 Beyond the repo-wide overlays, two commands record configuration scoped to a
 single project directory (kept in `~/.local/share/aiab/`, keyed by the resolved
