@@ -401,8 +401,17 @@ def _resolve_shared_tree(container_name: str, work_dir: Path, worktree: bool) ->
 # .git/hooks (read-write, so in-container hook installs still work — they just
 # stay in the container) and .git/config (read-only), seeded from the host's,
 # bind-mounted over the repo's real paths. The host's files are shadowed and
-# left untouched. Defeating it would need a kernel container escape, the same
-# bar as the rest of the sandbox.
+# left untouched.
+#
+# Like the rest of the sandbox this guards against an agent wandering, not
+# against a deliberate exploit. The shadows are bind mounts layered over the
+# real .git, which lives inside the mounted work dir, so container root can
+# `sudo umount` one and get the host's path back read-write. No kernel bug
+# needed; it just takes deliberately reaching for it. What the kernel does
+# rule out is the unprivileged version: mounts inherited through a user
+# namespace are locked together, so umount fails with EINVAL for anyone who
+# isn't root in the container. Known, accepted, and explained in
+# docs/concepts.md ("the git guard") along with why the fixes are worse.
 
 
 def _reseed_file(dst: Path, src: Path) -> None:
