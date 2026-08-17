@@ -81,9 +81,58 @@ combine worktrees with containers at all.
 
 Two consequences worth acting on rather than just recording:
 
-- The instruction overlay should probably change shape — mount or copy the
-  host's agent config in, and keep only the `/work` paragraph (and whatever
-  replaces it, see "Tell the agent it's in a sandbox") as aiab's own.
+- The instruction overlay should change shape — and the shape is worked out
+  (2026-08-17). The property worth keeping — versioned files, bind-mounted into
+  every session's home, editable from either side, tracked by git — is the
+  *mechanism*, and the mechanism is box work: it exists because the container
+  home is fresh and a symlink into a checkout would dangle in-container
+  (configuration.md explains why). The *content* is dotfiles. So the content
+  moves to a personal dotfiles repo, and aiab keeps the mechanism plus a
+  convention for finding the user's content:
+  - *A stow-style user overlay dir.* `~/.config/aiab/agent-config/<agent>/`,
+    laid out as a mirror of the container home
+    (`claude/.claude/CLAUDE.md`, `claude/.claude/commands/repo-role.md`,
+    `opencode/.config/opencode/AGENTS.md`, ...). At run time, walk the agent's
+    dir and overlay each entry onto `$HOME/<relative path>` — the machinery
+    already exists (`Container.add_config_overlay` is idempotent;
+    `_apply_session_mounts` already loops `cfg.overlays`), and the layout
+    itself expresses the destinations, so no per-agent path table, no new
+    verb, no new state file. The dir can be a symlink into a dotfiles
+    checkout: it resolves on the *host* before the path reaches LXD (resolve
+    it explicitly when scanning), so the dangling-symlink problem doesn't
+    apply. Order user overlays after the shipped ones, so the user's files win
+    a collision.
+  - *Rejected:* an `aiab overlay add HOST CONTAINER` verb (a new command plus
+    a seventh state file to do what a convention dir does for free), and
+    adding `.claude/CLAUDE.md` to `shared_paths` and hand-managing the shared
+    home (loses the git checkout, and a symlink inside the shared home dangles
+    in-container for exactly the reason above).
+  - *What aiab keeps shipping:* `/setup-container` for all three agents (its
+    reason is the box, per the list above) and the sandbox-orientation text —
+    roughly the "Look in `/work`" paragraph, eventually the generated
+    per-session file from "Tell the agent it's in a sandbox".
+  - *The wrinkle: who owns `~/.claude/CLAUDE.md`.* Claude reads one global
+    file, and after the split both the user and aiab have something to say.
+    In preference order: (1) mount aiab's part at `/work/CLAUDE.md` — Claude
+    Code collects CLAUDE.md from directories above the cwd, and the session
+    cwd is `/work/<basename>`, so it reaches every session without touching
+    the repo (the file is a mount, so "nothing in the repo" holds) or the
+    user's global file; verify the parent-dir walk actually fires there, and
+    expect it to be claude-only (opencode/copilot parent-walk behaviour
+    unverified). (2) Concatenate per run — user file + aiab's section —
+    into the dirstate and mount that; the same generation step "Tell the
+    agent it's in a sandbox" wants anyway, at the cost that the mounted file
+    is no longer the user's editable source. (3) A "read `/aiab/sandbox.md`"
+    line in the user's own file — works, but couples the dotfiles to aiab,
+    which is the dependency direction being removed.
+  - *Migration order:* land the user-dir scan alongside the repo overlays;
+    move the content out and symlink; only then trim `agent-config/` to
+    `/setup-container` plus the sandbox note and rewrite configuration.md's
+    overlay sections around the user dir. Steps one and two land without step
+    three, so nothing breaks mid-move. One consequence to accept out loud:
+    fresh installs stop getting opinionated instructions — which is the point
+    — so configuration.md then needs a worked example of the convention dir,
+    it being the documented way to get *any* global instructions in.
 - The `agents-pane` branch is harness, duplicates something Claude Code is
   actively building, and gets much smaller if it aims at *making the agent's
   own version work in the container* instead. (`defend-background-detach`
