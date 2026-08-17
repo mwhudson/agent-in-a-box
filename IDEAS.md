@@ -406,3 +406,19 @@ Two consequences worth acting on rather than just recording:
   second container without naming a profile for it first.
 - **`aiab doctor`** — check LXD init state and idmap support; first-run
   failures there are probably the worst onboarding experience.
+
+## Upstream facts worth not rediscovering
+
+Found while working out where each agent keeps its state, and true of the
+agents rather than of aiab — so they outlive whatever prompted them.
+
+- **Claude Code supports a custom launcher** at `~/.local/bin/claude` since
+  v2.1.207: auto-update leaves it alone and installs under `versions/`. That's
+  the fallback if the apt package (`agents._claude_install`) ever stops being
+  viable. Downside: it then keeps every version on disk forever, which is what
+  the apt switch was getting away from.
+- **`COPILOT_HOME` relocates copilot's whole config directory.** There is no
+  documented equivalent for claude (`CLAUDE_CONFIG_DIR` is not in the settings
+  docs) or for opencode (no documented XDG support) — which is why
+  `Agent.shared_paths` layers mounts over one home instead of just pointing
+  each agent at a different one.
