@@ -84,22 +84,24 @@ Two consequences worth acting on rather than just recording:
 - The instruction overlay should probably change shape — mount or copy the
   host's agent config in, and keep only the `/work` paragraph (and whatever
   replaces it, see "Tell the agent it's in a sandbox") as aiab's own.
-- The `agents-pane` and `defend-background-detach` branches are both harness,
-  both duplicate something Claude Code is actively building, and both get much
-  smaller if they aim at *making the agent's own version work in the container*
-  instead. Concretely: Claude Code moves a background session into its own
-  worktree under `.claude/worktrees/` before its first edit, but skips that when
-  the session is already inside a linked worktree — which is exactly what `aiab
-  run --worktree-branch` does to it. Untested here, and worth testing before
-  building further on either branch.
+- The `agents-pane` branch is harness, duplicates something Claude Code is
+  actively building, and gets much smaller if it aims at *making the agent's
+  own version work in the container* instead. (`defend-background-detach`
+  looked like the same case and wasn't: an idle stopper reaping a container out
+  from under a `/background` session is box work by definition — nothing the
+  agent can defend itself against — so it was built rather than dropped.)
+  One thing still untested, and worth settling: Claude Code moves a background
+  session into its own worktree under `.claude/worktrees/` before its first
+  edit, but skips that when the session is already inside a linked worktree —
+  which is exactly what `aiab run --worktree-branch` does to it.
 
 ## Lifecycle gaps
 
 - **`aiab refresh`** — after `upgrade-templates`, existing session containers
-  stay stale forever (the README just notes this). A command that recreates a
-  session container from the updated template would be cheap to build, since
-  recorded mounts are already replayed automatically on recreation and
-  /setup-container restores the dev environment from its persisted script.
+  stay stale forever (`docs/commands.md` just notes this). A command that
+  recreates a session container from the updated template would be cheap to
+  build, since recorded mounts are already replayed automatically on recreation
+  and /setup-container restores the dev environment from its persisted script.
 - **Snapshot/reset** — `lxc snapshot` before a risky run, `aiab reset` to roll
   the session container back. Useful when an agent has installed packages or
   mutated container state you want to keep most of the time.
@@ -386,16 +388,6 @@ Two consequences worth acting on rather than just recording:
   referenced. Keep it short and factual: it competes for context with the
   actual instructions. Prior art: code-on-incus auto-injects a
   `SANDBOX_CONTEXT.md` into each tool's native context system.
-- **Profile follow-through** — named execution variants now cover agent-scoped
-  environment, additional network domains, and optional credential/session
-  isolation. Keep them narrow; do not turn profiles into a second worktree,
-  mount, limits, prompt, or agent-configuration system. Revisit only if a new
-  provider or sandbox boundary requires another field that must be coordinated
-  at launch time.
-- **Profile identity and lifecycle** — isolated profiles use separate homes and
-  containers. Keep checking that `list`, `monitor`, `remove`, garbage collection,
-  and network-policy tooling find those containers just as they find ordinary
-  agent sessions.
 
 ## Deferred / Small
 
@@ -407,8 +399,10 @@ Two consequences worth acting on rather than just recording:
   docs, not a feature.
 - More agents in the registry (gemini-cli, codex, aider) — the dataclass
   design makes each one a single entry.
-- A `--name`/session-suffix option so two agents of the same kind can run
-  concurrently in one directory with separate containers. Note this falls out
-  of named profiles above, which need the same suffix for a different reason.
+- A `--name`/session-suffix option for running two agents of the same kind in
+  one directory with separate containers. Mostly delivered by isolated
+  profiles, which already fork both halves (`profiles.container_prefix` and
+  `profiles.home_key`); what's left is only the ad-hoc case, where you want a
+  second container without naming a profile for it first.
 - **`aiab doctor`** — check LXD init state and idmap support; first-run
   failures there are probably the worst onboarding experience.
