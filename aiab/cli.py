@@ -39,11 +39,9 @@ from pathlib import Path
 from typing import Any
 
 import click
-from click.shell_completion import CompletionItem
 
 from . import (
     PROJECT,
-    CONTAINER_LOGIN,
     CONTAINER_USER,
     CONTAINER_HOME,
     WORK_PREFIX,
@@ -57,7 +55,6 @@ from . import profiles
 from . import provision
 from . import release
 from . import state
-from . import worktrees
 
 CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
 
@@ -73,13 +70,6 @@ _CONTAINER_PATH: str = (
 
 AGENT_CHOICE = click.Choice(agents.AGENT_NAMES)
 
-# Carries the shared-tree answer (see _resolve_shared_tree) from the outer
-# process to the inner one _reexec_under_tmux starts, so the question is asked
-# once, on a real terminal, rather than again inside the tmux pane.
-_CONCURRENT_DECISION: str = "AIAB_CONCURRENT_DECISION"
-_DECISION_WORKTREE: str = "worktree"
-_DECISION_CONTINUE: str = "continue"
-
 # The type for every directory-valued parameter. Its only real job is shell
 # completion: click derives the completion script from the command tree, and
 # this is what makes a DIR parameter offer directories (see docs/install.md).
@@ -89,51 +79,6 @@ _DECISION_CONTINUE: str = "continue"
 # is still rejected, which is what the old hand-written completions could only
 # hint at.
 _DIR = click.Path(file_okay=False)
-
-
-def _complete_branch(
-    ctx: click.Context, param: click.Parameter, incomplete: str
-) -> list[CompletionItem]:
-    """Complete --worktree-branch with the repo's existing branches.
-
-    Branches that already have an aiab worktree on disk come first and say so:
-    those are sessions to resume rather than new branches to start, and which
-    one you are asking for is worth seeing before you press enter.
-
-    Completion runs in the user's shell, on the host, on every Tab — so this
-    stays quick and never fails loudly. No git, not a repository, or a git that
-    takes too long all just mean no suggestions.
-    """
-    work_dir = _realdir(ctx.params.get("for_dir"))
-    try:
-        r = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(work_dir),
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "refs/heads",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if r.returncode != 0:
-        return []
-    resumable = set(worktrees.existing(work_dir))
-    names = [b for b in r.stdout.splitlines() if b.startswith(incomplete)]
-    return [
-        (
-            CompletionItem(name, help="worktree waiting")
-            if name in resumable
-            else CompletionItem(name)
-        )
-        # Resumable first, alphabetical within each group.
-        for name in sorted(names, key=lambda b: (b not in resumable, b))
-    ]
 
 
 def _agent_command(
@@ -153,241 +98,6 @@ def _agent_command(
 
 def _realdir(path: str | None) -> Path:
     return Path(path).resolve() if path else Path.cwd()
-
-
-# -- git worktree helpers --
-#
-# Where they live is aiab.worktrees; this is the creating/removing half.
-
-
-def _git(
-    session: lxd.Container, repo_cwd: str, *args: str
-) -> subprocess.CompletedProcess:
-    """Run git in the container as the login user, without checking the result."""
-    return session.exec(
-        ["runuser", "-u", CONTAINER_LOGIN, "--", "git", "-C", repo_cwd, *args],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _worktree_add_args(
-    worktree_path: str, branch: str | None, branch_exists: bool
-) -> list[str]:
-    """The `git worktree add` arguments for a run.
-
-    Three shapes, because git spells them differently: no branch is a detached
-    checkout; a new branch needs -b; an existing branch must *not* get -b, which
-    fails outright rather than reusing it.
-    """
-    if branch is None:
-        return ["worktree", "add", "--detach", worktree_path]
-    if branch_exists:
-        return ["worktree", "add", worktree_path, branch]
-    return ["worktree", "add", "-b", branch, worktree_path]
-
-
-def _setup_worktree(
-    session: lxd.Container, repo_cwd: str, user: int, branch: str | None = None
-) -> str:
-    """Create (or re-enter) a git worktree inside the container; return its path.
-
-    Stored under <repo>/.git/aiab-worktrees/. With a branch the worktree is
-    checked out on it; without one it is a detached HEAD at the current commit,
-    which avoids leaving throwaway branch refs behind.
-
-    A branch is also what makes the result survive: `git worktree remove` drops
-    the checkout but never the branch, so committed work outlives the session
-    even without --worktree-keep. A detached worktree has no ref keeping its
-    commits reachable, so removing it discards them.
-
-    Naming a branch that already exists re-enters it rather than failing, so a
-    session can be resumed. git refuses if it is checked out in another
-    worktree, which is exactly the "another run already has this branch" case.
-    """
-    worktree_path = worktrees.path_for(repo_cwd, branch)
-
-    # Verify it's actually a git repo.
-    r = session.exec(
-        ["git", "rev-parse", "--git-dir"],
-        cwd=repo_cwd,
-        user=user,
-        check=False,
-        capture_output=True,
-    )
-    if r.returncode != 0:
-        raise click.ClickException(
-            f"--worktree requires a git repository, but {repo_cwd} is not one"
-        )
-
-    # A leftover directory (--worktree-keep, or a crash before cleanup) is
-    # reusable when it really is this branch's worktree; anything else in the
-    # way is something we must not silently clobber.
-    if (
-        branch
-        and _git(session, worktree_path, "rev-parse", "--git-dir").returncode == 0
-    ):
-        head = _git(session, worktree_path, "rev-parse", "--abbrev-ref", "HEAD")
-        if head.stdout.strip() == branch:
-            print(f"Reusing worktree at container:{worktree_path}", file=sys.stderr)
-            return worktree_path
-        raise click.ClickException(
-            f"{worktree_path} already exists and is not a worktree for "
-            f"'{branch}' (it is on '{head.stdout.strip()}'); remove it or pick "
-            "another branch name"
-        )
-
-    branch_exists = branch is not None and (
-        _git(
-            session, repo_cwd, "rev-parse", "--verify", f"refs/heads/{branch}"
-        ).returncode
-        == 0
-    )
-    add_args = _worktree_add_args(worktree_path, branch, branch_exists)
-
-    r = _git(session, repo_cwd, *add_args)
-    if r.returncode != 0:
-        # git's own message is the useful one here — an invalid branch name, or
-        # a branch another worktree already holds.
-        raise click.ClickException(
-            (r.stderr or r.stdout).strip() or f"git {' '.join(add_args)} failed"
-        )
-    print(f"Created worktree at container:{worktree_path}", file=sys.stderr)
-    return worktree_path
-
-
-def _remove_worktree(session: lxd.Container, repo_cwd: str, worktree_path: str) -> None:
-    """Remove a worktree created by _setup_worktree."""
-    try:
-        session.exec(
-            [
-                "runuser",
-                "-u",
-                CONTAINER_LOGIN,
-                "--",
-                "git",
-                "-C",
-                repo_cwd,
-                "worktree",
-                "remove",
-                "--force",
-                worktree_path,
-            ]
-        )
-        print(f"Removed worktree at container:{worktree_path}", file=sys.stderr)
-    except subprocess.CalledProcessError:
-        print(
-            f"Warning: could not remove worktree {worktree_path}",
-            file=sys.stderr,
-        )
-
-
-def _drop_stale_mounts(container: lxd.Container) -> None:
-    """Remove disk devices whose host source no longer exists.
-
-    A container with a bind mount to a since-moved/removed host directory
-    refuses to start under LXD. Since ``remove`` is about to delete the
-    container anyway, dropping those devices is safe and unblocks startup so
-    worktree pruning can still run. The root device and devices whose source
-    still exists are left alone.
-    """
-    for name, dev in list(container.devices().items()):
-        if dev.get("type") != "disk" or dev.get("path") == "/":
-            continue
-        source = dev.get("source")
-        if source and not Path(source).exists():
-            print(
-                f"Dropping stale mount '{name}' (source {source} no longer "
-                f"exists on host)",
-                file=sys.stderr,
-            )
-            container.remove_device(name)
-
-
-def _prune_worktrees(session: lxd.Container, repo_cwd: str, user: int) -> None:
-    """Prune stale worktree bookkeeping for a repo (e.g. after a crash)."""
-    session.exec(
-        ["git", "worktree", "prune"],
-        cwd=repo_cwd,
-        user=user,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _resolve_shared_tree(container_name: str, work_dir: Path, worktree: bool) -> bool:
-    """Return whether to use a worktree, asking about a shared tree if need be.
-
-    Concurrent runs for one directory are supported by design — they share the
-    session container, its lock and its proxy (see aiab.lifecycle) — but
-    without --worktree they also share one checkout, so two agents edit the
-    same files with nothing keeping them apart. That is a footgun rather than a
-    feature, and too easy to miss as a printed warning: this runs moments before
-    the agent takes over the screen and redraws it. So ask instead, and offer
-    the fix as one of the answers rather than as advice to go and re-run.
-
-    Called before stop_when_idle() takes this run's own lock, or the probe would
-    find us. Asked by the outer process only — the answer reaches the inner one
-    through the environment (see _CONCURRENT_DECISION), which is also how a
-    worktree chosen here survives the re-exec, since the flag is not in argv.
-    """
-    decided = os.environ.get(_CONCURRENT_DECISION)
-    if decided is not None:
-        return worktree or decided == _DECISION_WORKTREE
-    if worktree or not lifecycle.session_in_use(container_name):
-        return worktree
-
-    problem = (
-        f"Another agent session is already running for {work_dir}.\n"
-        "Both would share the one working tree, editing the same files."
-    )
-    # A worktree needs somewhere to branch from. Testing for .git rather than
-    # asking git keeps this on the host (the container isn't up yet); a gitfile
-    # counts, since `git worktree add` works in a linked worktree too.
-    can_worktree = (work_dir / ".git").exists()
-
-    if not sys.stdin.isatty():
-        # Nothing to prompt with. Say it and continue rather than fail: a
-        # non-interactive caller may well know exactly what it is doing.
-        advice = (
-            "Pass --worktree to give this run its own checkout."
-            if can_worktree
-            else f"{work_dir} is not a git repository, so --worktree is no help here."
-        )
-        print(f"Warning: {problem}\n{advice}", file=sys.stderr)
-        return worktree
-
-    click.echo(problem, err=True)
-    if not can_worktree:
-        # Only two real answers, so don't offer a third that cannot work.
-        click.echo(
-            f"{work_dir} is not a git repository, so a worktree is not an option.",
-            err=True,
-        )
-        if click.confirm("Continue anyway?", default=False, err=True):
-            return False
-        raise click.Abort()
-
-    choice = click.prompt(
-        "Run in a new worktree, continue anyway, or exit?",
-        type=click.Choice([_DECISION_WORKTREE, _DECISION_CONTINUE, "exit"]),
-        default=_DECISION_WORKTREE,
-        err=True,
-    )
-    if choice == "exit":
-        raise click.Abort()
-    if choice == _DECISION_WORKTREE:
-        # --worktree semantics, so say what happens to it: the same surprise as
-        # the flag has, but the flag at least had to be typed.
-        click.echo(
-            "Running in a fresh worktree; it is removed when the agent exits "
-            "(--worktree-keep keeps it).",
-            err=True,
-        )
-        return True
-    return False
 
 
 # -- git guard --
@@ -551,16 +261,6 @@ def _tmux_group(container_name: str) -> str:
     return f"aiab-{container_name}"
 
 
-def _tmux_window_name(agent: str, branch: str | None) -> str:
-    """Label for a run's tmux window: the agent, and its branch if it has one.
-
-    This is what makes the windows of parallel runs tellable apart in the window
-    list. '@' rather than ':' as the separator, since ':' is what splits session
-    from window in a tmux target string.
-    """
-    return f"{agent}@{branch}" if branch else agent
-
-
 def _tmux_sessions() -> list[tuple[str, str]]:
     """Every live tmux session as (name, group); empty if there is no server.
 
@@ -645,7 +345,7 @@ def _tmux_joined_nothing(commands: list[str] | None) -> bool:
     return not any(commands)
 
 
-def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
+def _reexec_under_tmux(group: str, window: str) -> None:
     """Run this aiab invocation inside a tmux session named for its container.
 
     The first run for a container creates the session; a concurrent one joins
@@ -689,12 +389,6 @@ def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
     # agent and leave this terminal attached. Killing our own session detaches
     # just us; the other members and their agents are untouched. It runs after
     # the exit code is recorded, since it takes this script's pane with it.
-    #
-    # _CONCURRENT_DECISION passes on the shared-tree answer, so the inner
-    # process neither asks again nor loses a worktree chosen here — it is not in
-    # argv, and appending it there would land after any `--` passthrough
-    # separator and go to the agent instead (see _resolve_shared_tree).
-    decision = _DECISION_WORKTREE if worktree else _DECISION_CONTINUE
     script_fd, script_path = tempfile.mkstemp(prefix="aiab-run-", suffix=".sh")
     try:
         os.write(
@@ -702,8 +396,7 @@ def _reexec_under_tmux(group: str, window: str, worktree: bool) -> None:
             (
                 "#!/bin/bash\n"
                 f"export {_EXIT_NOTICE_ENV}={shlex.quote(notice_path)}\n"
-                f"{_CONCURRENT_DECISION}={decision} {inner} "
-                f"2> >(tee {shlex.quote(log_path)} >&2)\n"
+                f"{inner} 2> >(tee {shlex.quote(log_path)} >&2)\n"
                 f"echo $? > {shlex.quote(rc_path)}\n"
                 f"tmux kill-session -t {shlex.quote(name)} 2>/dev/null\n"
             ).encode(),
@@ -923,9 +616,7 @@ def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path
     return mounts
 
 
-def _notify_backgrounded(
-    session: lxd.Container, agent: str, worktree_kept: bool
-) -> None:
+def _notify_backgrounded(session: lxd.Container, agent: str) -> None:
     """Tell the user their agent kept running in the background after it exited.
 
     Claude Code's /background exits the foreground process while the session
@@ -948,11 +639,6 @@ def _notify_backgrounded(
         f"Re-attach from this directory with `aiab run --shell {agent}`, "
         f"then `{agent} agents`.",
     ]
-    if worktree_kept:
-        lines.append(
-            "Its git worktree was left in place because the session is still "
-            "using it."
-        )
     notice = "\n".join(lines) + "\n"
     print(notice, file=sys.stderr, end="")
 
@@ -1136,25 +822,6 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     help="apply the named profile for this run (see `aiab profile list`)",
 )
 @click.option(
-    "--worktree",
-    is_flag=True,
-    help="run the agent in a fresh git worktree (detached at HEAD)",
-)
-@click.option(
-    "--worktree-keep",
-    is_flag=True,
-    help="keep the worktree after the agent exits (implies --worktree)",
-)
-@click.option(
-    "--worktree-branch",
-    "worktree_branch",
-    metavar="BRANCH",
-    default=None,
-    shell_complete=_complete_branch,
-    help="run in a worktree on BRANCH, creating it if needed (implies "
-    "--worktree); the branch outlives the session even without --worktree-keep",
-)
-@click.option(
     "--no-git-guard",
     "no_git_guard",
     is_flag=True,
@@ -1181,9 +848,6 @@ def run(
     add_mount_rw: tuple[str, ...],
     base_release: str | None,
     profile_name: str | None,
-    worktree: bool,
-    worktree_keep: bool,
-    worktree_branch: str | None,
     no_git_guard: bool,
     shell: bool,
     no_tmux: bool,
@@ -1195,9 +859,6 @@ def run(
     is available, the session runs under tmux with an `aiab monitor` control
     pane below the agent; --no-tmux opts out.
     """
-    # --worktree-keep and --worktree-branch both imply --worktree.
-    if worktree_keep or worktree_branch:
-        worktree = True
     cfg = agents.get(agent)
     profile = _resolve_profile(profile_name, agent)
     isolated = bool(profile.get("isolated")) if profile else False
@@ -1226,19 +887,13 @@ def run(
     # steps need, and neither should pay an LXD round-trip for.
     session_name = lxd.container_name_for_dir(work_dir, container_prefix)
 
-    worktree = _resolve_shared_tree(session_name, work_dir, worktree)
-
     # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
     use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
     if use_tmux and "TMUX" not in os.environ:
         # does not return
-        _reexec_under_tmux(
-            _tmux_group(session_name),
-            _tmux_window_name(agent, worktree_branch),
-            worktree,
-        )
+        _reexec_under_tmux(_tmux_group(session_name), agent)
 
     # One-time prepare hooks (opencode's permissive config; a built-in
     # profile's credential setup, e.g. the OpenRouter key prompt). Both run
@@ -1305,20 +960,8 @@ def run(
         )
         proxy_env = _apply_network_policy(conn, session, work_dir, agent, profile_name)
 
-        # If --worktree was requested, create one inside the repo and use it
-        # as the agent's working directory instead of the repo root.
-        agent_cwd = container_cwd
-        if worktree:
-            agent_cwd = _setup_worktree(
-                session, container_cwd, CONTAINER_USER, worktree_branch
-            )
-
         # Shadow the repo's .git/hooks and .git/config so the agent can't plant
-        # code there that would run on the *host*. Done after the worktree
-        # setup above so aiab's own git commands aren't subject to the
-        # read-only config; the agent/shell session below is. A worktree shares
-        # the main repo's .git/hooks and .git/config, so guarding container_cwd
-        # (the repo root) covers it too.
+        # code there that would run on the *host*.
         # Read-write mounts can themselves be git repos, so guard their .git
         # too; read-only mounts can't be written, so they need no guard.
         if not no_git_guard:
@@ -1335,20 +978,17 @@ def run(
         with _monitor_pane(work_dir, session.name, enabled=use_tmux):
             rc = session.run_interactive(
                 run_cmd,
-                cwd=agent_cwd,
+                cwd=container_cwd,
                 user=CONTAINER_USER,
                 group=CONTAINER_USER,
                 env=env,
             )
         # The agent may have exited into a background session (Claude Code's
-        # /background) that's still using the container — and the worktree. If
-        # so, leave the worktree in place and tell the user; the idle-stopper
-        # keeps the container up until the session finishes (see aiab.stopper).
-        backgrounded = lifecycle.has_live_background_session(session, agent)
-        if worktree and not worktree_keep and not backgrounded:
-            _remove_worktree(session, container_cwd, agent_cwd)
-        if backgrounded:
-            _notify_backgrounded(session, agent, worktree and not worktree_keep)
+        # /background) that's still using the container. If so, tell the user;
+        # the idle-stopper keeps the container up until the session finishes
+        # (see aiab.stopper).
+        if lifecycle.has_live_background_session(session, agent):
+            _notify_backgrounded(session, agent)
     sys.exit(rc)
 
 
@@ -1358,11 +998,7 @@ def run(
 
 
 def _destroy_session(session: lxd.Container) -> None:
-    """Tear down a session container and its proxy (e.g. to rebuild it).
-
-    Unlike `aiab remove`, this skips worktree pruning — the caller is about to
-    re-create the container, and the work dir lives on the host either way.
-    """
+    """Tear down a session container and its proxy (e.g. to rebuild it)."""
     if session.status() == "RUNNING":
         lifecycle.stop_proxy(session.name)
         session.remove_device("netproxy")
@@ -1395,9 +1031,8 @@ def remove(
     """Delete the session container for a directory.
 
     The base/template container is left intact, so the next run clones a fresh
-    one quickly. Any leftover git worktrees created by --worktree are pruned
-    from the host directory before deleting the container. An isolated profile
-    runs in its own container, so removing that one needs --profile.
+    one quickly. An isolated profile runs in its own container, so removing
+    that one needs --profile.
     """
     work_dir = _realdir(for_dir)
     profile = _resolve_profile(profile_name, agent)
@@ -1414,31 +1049,6 @@ def remove(
     if not session.exists():
         print(f"No container '{session.name}' to remove.", file=sys.stderr)
         return
-    # Prune stale worktrees before deleting — only possible if the container
-    # is running (exec needs a live container) and the host working directory
-    # still exists. Start the container temporarily if needed, but first drop
-    # any bind mounts whose host source has disappeared: a missing source
-    # makes LXD refuse to start. If the working directory itself is gone, or
-    # the container still won't start after dropping stale mounts, skip prune
-    # and fall through to delete (which works on a stopped container).
-    can_prune = work_dir.is_dir()
-    was_stopped = session.status() != "RUNNING"
-    if was_stopped and can_prune:
-        _drop_stale_mounts(session)
-        try:
-            session.start()
-        except subprocess.CalledProcessError:
-            print(
-                f"Container '{session.name}' would not start; skipping "
-                f"worktree prune and deleting directly.",
-                file=sys.stderr,
-            )
-            can_prune = False
-    if can_prune:
-        container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
-        _prune_worktrees(session, container_cwd, CONTAINER_USER)
-        if was_stopped:
-            session.stop(timeout=30)
     print(f"Removing container '{session.name}' ...", file=sys.stderr)
     session.delete()
     lifecycle.stop_proxy(session.name)  # in case a crashed session left one behind
