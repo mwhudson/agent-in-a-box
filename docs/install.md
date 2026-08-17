@@ -32,12 +32,8 @@ ln -s ~/src/agent-in-a-box/bin/aiab ~/.local/bin/aiab
 ## Shell completion
 
 Completion for subcommands, options, agent names and directories comes from
-Click, which generates it from `aiab`'s own command definitions.
-`--worktree-branch` completes the repository's branches too, with any that
-already have an aiab worktree offered first (labelled "worktree waiting" in
-shells that show descriptions) — those are the sessions there is something to
-resume. It respects `--for DIR` when you've given one, and stays silent outside
-a git repository. Enable it by adding one line to your shell's startup file:
+Click, which generates it from `aiab`'s own command definitions. Enable it by
+adding one line to your shell's startup file:
 
 ```sh
 # bash — add to ~/.bashrc:

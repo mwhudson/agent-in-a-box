@@ -21,7 +21,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 ## aiab run
 
 ```
-aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--base RELEASE] [--profile NAME] [--worktree] [--worktree-keep] [--worktree-branch BRANCH] [--no-git-guard] [--shell] [--no-tmux] [-- AGENT_ARGS...]
+aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--base RELEASE] [--profile NAME] [--no-git-guard] [--shell] [--no-tmux] [-- AGENT_ARGS...]
 ```
 
 - `<agent>` — `claude`, `opencode`, or `copilot`.
@@ -33,15 +33,6 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--bas
   record it for this directory.
 - `--profile NAME` — apply a named profile for this run (see
   [`aiab profile`](#aiab-profile)).
-- `--worktree` — run the agent in a fresh git worktree (detached at HEAD)
-  instead of the repo's working tree, so the agent's checkout and the host's
-  can diverge; `--worktree-keep` keeps the worktree after the agent exits
-  instead of removing it.
-- `--worktree-branch BRANCH` — run in a worktree checked out on `BRANCH`,
-  creating the branch if it doesn't exist (implies `--worktree`). Tab-completes
-  the repository's branches, resumable ones first (see
-  [Shell completion](install.md#shell-completion)). See
-  [Worktrees and branches](#worktrees-and-branches) below.
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).
 - `--shell` — open an interactive shell in the container instead of the agent.
@@ -60,106 +51,9 @@ the container on first run; credentials are stored under
 
 You can run several agents for one directory at once — they share the session
 container, its network policy and its filtering proxy, and the container stays
-up until the last one exits. Without `--worktree` they also share the *one
-working tree*, so two agents edit the same files with nothing keeping them
-apart. When `aiab run` spots a session already running for the directory it
-asks before going ahead:
-
-```
-Another agent session is already running for /home/you/src/myproject.
-Both would share the one working tree, editing the same files.
-Run in a new worktree, continue anyway, or exit? (worktree, continue, exit) [worktree]:
-```
-
-`worktree` (the default) is the same thing as having passed `--worktree`, so
-the worktree is removed when the agent exits unless you asked for
-`--worktree-keep`. If the directory isn't a git repository there is nothing to
-branch from, so the choice is just whether to continue. Non-interactive runs
-can't be asked, so they get the warning on stderr and proceed.
-
-### Worktrees and branches
-
-Worktrees live under `<repo>/.git/aiab-worktrees/`, so they need no extra
-mounts and don't show up in ordinary directory listings. `--worktree` alone
-checks out a detached HEAD in a directory named after the moment it started;
-`--worktree-branch BRANCH` checks out `BRANCH` in a directory named after it:
-
-```sh
-aiab run --worktree-branch refactor-api claude     # in one terminal
-aiab run --worktree-branch fix-tests claude        # in another
-```
-
-Both share the session container but work in separate checkouts on separate
-branches, and each terminal's tmux window is labelled `claude@<branch>` so the
-window list says who is working on what.
-
-The branch is what makes the result keepable. `git worktree remove` drops the
-checkout but never the branch, so **committed work survives the session even
-without `--worktree-keep`** — afterwards the branch is just there in the repo,
-ready to `git switch` to or merge. A plain `--worktree` has no ref keeping its
-commits reachable, so removing it discards them. Uncommitted changes go either
-way, so tell the agent to commit.
-
-Naming a branch that already exists checks it out rather than failing, so a
-session can be picked up again later. git refuses if that branch is already
-checked out in another worktree, which is what stops two runs colliding on one
-branch.
-
-#### Using a worktree from the host
-
-A worktree records where its repository is as an absolute path, and the
-container's view of the repo is `/work/<name>`, which doesn't exist on the
-host. So a worktree the agent created is not usable from outside the container:
-git there fails with `fatal: not a git repository: /work/...`, and `git
-worktree list` reports it as `prunable` — which is why a host-side `git
-worktree prune`, or the one `git gc` runs for you, can quietly deregister it.
-
-git can link worktrees with relative paths instead, which fixes both. Since
-aiab's worktrees live *inside* the repo, every link becomes internal to the
-tree and no longer names either view of it, so the same worktree works from the
-container and the host. It's off by default in git, and aiab doesn't turn it on
-for you (see below), so enable it per repository on the host:
-
-```sh
-git config worktree.useRelativePaths true
-```
-
-That is enough for worktrees the container creates afterwards: `.git/config` is
-inside the mounted repo, so the container's git reads the same setting.
-
-Worktrees made before you set it need converting once, from the repo root:
-
-```sh
-find .git/aiab-worktrees -name .git -type f -printf '%h\0' \
-  | xargs -0 -r git worktree repair --relative-paths
-```
-
-This works even though the container path they currently point at doesn't
-exist on the host. The `find` picks out directories holding a `.git` file,
-which is what a worktree is; a plain `.git/aiab-worktrees/*` glob also works
-but complains about the intermediate directory of a nested branch name like
-`feature/x`. Plain `git worktree repair` with no path argument doesn't work
-here — it can't read the broken worktrees to find them.
-
-Two things to know before turning it on:
-
-- **It needs git 2.48 or newer in the container**, not just on the host, since
-  that's where the worktree is created. Older git doesn't recognise the config
-  key, ignores it silently, and makes an absolute worktree as before — no
-  error, just no effect. Relative paths arrived in git 2.48, which is newer
-  than the git in some of the releases aiab can run, including the 24.04
-  default; check the base with [`aiab base`](#aiab-base) and the git in a
-  running container with `aiab lxc exec <container> -- git --version`
-  (`aiab list` gives the name), and raise the base if it's too old.
-- **It's effectively one-way for that repo.** Creating the first relative
-  worktree sets `extensions.relativeWorktrees` and bumps the repository format
-  version, and any git older than 2.48 then refuses the repository outright —
-  not just its worktrees. That includes a 24.04 container if you later move the
-  base back down.
-
-That second point is why this is yours to enable rather than something aiab
-does when it notices both sides are new enough: it changes the shared repo in a
-way that reaches well beyond aiab.
+up until the last one exits. They also share the *one working tree*, so keeping
+concurrent agents out of each other's way is the agents' own business: most can
+put a session in its own git worktree, and aiab leaves that to them.
 
 To run Claude against [OpenRouter](https://openrouter.ai) instead of the Claude
 API, use the built-in `openrouter` profile:
@@ -411,7 +305,7 @@ A **profile** is a named agent execution variant applied with `aiab run
 --profile NAME`. It coordinates a small set of runtime concerns that otherwise
 need to change together: agent environment, network domains, and optionally the
 agent's credential and session identity. It is not a general-purpose manager
-for the agent's prompts, config files, mounts, worktrees, or resource limits.
+for the agent's prompts, config files, mounts, or resource limits.
 Those remain the responsibility of the agent or of the corresponding aiab
 command.
 
