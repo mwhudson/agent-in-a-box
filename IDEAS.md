@@ -16,21 +16,22 @@ itself. The test for a proposed feature is: *does aiab need to provide this
 because the agent is running in a box, or is it merely an opinionated way to
 configure the agent?*
 
-- **Worktrees.** `--worktree`, `--worktree-keep`, `--worktree-branch`, the
-  `_setup_worktree`/`_remove_worktree`/`_prune_worktrees` machinery,
-  `worktrees.py`, branch completion, and a docs section on reaching them from
-  the host. Solves a real problem (two agents, one checkout) that has nothing
-  to do with isolation — and one the agents now solve themselves: Claude Code
-  shipped `--worktree` in the CLI in February 2026 (v2.1.49/2.1.50; the desktop
-  app gives every session a worktree automatically), with resume-into-worktree,
+- **Worktrees** — assessed as harness, and since *removed* (404ed35 and the
+  docs follow-up). `--worktree`/`--worktree-keep`/`--worktree-branch` solved a
+  real problem (two agents, one checkout) that had nothing to do with
+  isolation — and one the agents now solve themselves: Claude Code shipped
+  `--worktree` in the CLI in February 2026 (v2.1.49/2.1.50; the desktop app
+  gives every session a worktree automatically), with resume-into-worktree,
   exit-time keep/remove prompts, `.worktreeinclude` for gitignored files,
   `worktree.baseRef`, PR-number worktrees, subagent `isolation: worktree`, and a
   sweep that reaps abandoned ones. Copilot has it in its desktop app; opencode
-  has no built-in flag but at least four competing plugins.
-- **tmux multiplexing.** Eight helpers in `cli.py` (`_tmux_group`,
-  `_tmux_session_name`, `_tmux_window_name`, `_tmux_sessions`,
-  `_tmux_group_member`, `_tmux_window_commands`, `_tmux_joined_nothing`,
-  `_reexec_under_tmux`). Split this one carefully: tmux existing *at all* is box
+  has no built-in flag but at least four competing plugins. Concurrency is now
+  the agents' own business (commands.md says so under `aiab run`); kept here as
+  the worked example of the test cutting something real.
+- **tmux multiplexing.** Seven helpers in `cli.py` (`_tmux_group`,
+  `_tmux_session_name`, `_tmux_sessions`, `_tmux_group_member`,
+  `_tmux_window_commands`, `_tmux_joined_nothing`, `_reexec_under_tmux`),
+  plus `_monitor_pane`. Split this one carefully: tmux existing *at all* is box
   work, because the monitor pane is how a network decision gets a live surface.
   The session group with a window per agent, shared across terminals and
   switched with `C-b w`, is not — that's multi-agent UX anyone would want bare.
@@ -139,10 +140,11 @@ Two consequences worth acting on rather than just recording:
   looked like the same case and wasn't: an idle stopper reaping a container out
   from under a `/background` session is box work by definition — nothing the
   agent can defend itself against — so it was built rather than dropped.)
-  One thing still untested, and worth settling: Claude Code moves a background
-  session into its own worktree under `.claude/worktrees/` before its first
-  edit, but skips that when the session is already inside a linked worktree —
-  which is exactly what `aiab run --worktree-branch` does to it.
+  The open question this used to carry — Claude Code skips its own worktree
+  move when the session is already inside a linked worktree, which
+  `--worktree-branch` used to cause — went moot with the worktree removal:
+  sessions run in the real checkout now, so Claude Code's worktree behaviour
+  applies unmodified.
 
 ## Lifecycle gaps
 
@@ -157,7 +159,7 @@ Two consequences worth acting on rather than just recording:
 
 ## Security And Usability
 
-- **Git guard: follow `core.hooksPath`** — `_guard_git_repo` (`cli.py:419`)
+- **Git guard: follow `core.hooksPath`** — `_guard_git_repo` (`cli.py:158`)
   hardcodes `.git/hooks`, but that's only where git looks by default. Husky
   (and anything else setting `core.hooksPath`) relocates the hook dir into the
   worktree, typically `.husky/_`. The agent can't *set* the key — `.git/config`
@@ -280,37 +282,22 @@ Two consequences worth acting on rather than just recording:
   persisted to state. Port detection and interactive forwarding already work in
   the monitor's Ports tab, but there's no CLI flag and forwarding isn't
   persisted across sessions.
-- **Worktree follow-through** — mostly closed by `--worktree-branch`: the
-  branch ref *is* the handle, so there's nothing to "adopt" any more (the work
-  is already on a branch in the repo, and survives the worktree being removed),
-  and `git worktree list` already lists them. What's left is narrower:
-  - *The detached case still buries things.* Plain `--worktree` puts a detached
-    HEAD in `.git/aiab-worktrees/<timestamp>`, and with `--worktree-keep` those
-    accumulate with nothing naming them and nothing keeping their commits
-    reachable. Either point people at `--worktree-branch` and leave it, or have
-    `--worktree-keep` imply a generated branch name so the result is always
-    findable.
-  - *Nothing prunes kept worktrees.* `aiab gc` removes containers whose
-    directory is gone; the equivalent for worktrees left behind by
-    `--worktree-keep` doesn't exist. Cheap, since `git worktree list
-    --porcelain` reports them and the ones under `.git/aiab-worktrees/` are
-    unambiguously ours.
-  - *Host-side `git worktree prune` deregisters them.* A worktree created in
-    the container records its admin `gitdir` as a container path
-    (`/work/<name>/.git/aiab-worktrees/<branch>/.git`), which doesn't resolve
-    on the host — so a host-side `git worktree prune`, or the one `git gc`
-    runs for you, decides it's stale and drops the registration. Verified:
-    the directory and the branch survive, but git no longer knows the
-    directory is a worktree. Consequences are narrow but real: anything
-    listing them by the `.git` file rather than git's registry — which is
-    what `worktrees.existing` does — still sees it, yet resuming the branch
-    then fails, because `_setup_worktree` can't re-enter it (`rev-parse`
-    fails in the orphaned checkout) and can't re-add it either (the
-    directory is in the way). The fixes all have teeth — `worktree add
-    --force` might adopt the directory but could equally clobber uncommitted
-    work, and re-registering by hand means writing git's admin files
-    ourselves. Worth deciding deliberately if kept worktrees become a normal
-    thing to rely on rather than an escape hatch.
+- **Agent-created worktrees vs host-side `git worktree prune`** — the one
+  fact that outlives the removed worktree feature (the rest of the old
+  "worktree follow-through" entry died with it). Agents now make their own
+  worktrees inside the container — Claude Code puts sessions under
+  `.claude/worktrees/` in the repo — and those record their admin `gitdir` as
+  a container path (`/work/<basename>/...`), which doesn't resolve on the
+  host. So a host-side `git worktree prune`, or the one `git gc` runs for
+  you, decides the worktree is stale and drops its registration. Verified
+  against aiab's own worktrees before the removal, and the mechanism (an
+  absolute container path in git's admin files) is identical: the directory
+  and any branch survive, but git forgets the directory is a worktree, and
+  re-entering it is awkward (`worktree add --force` might adopt it but could
+  equally clobber uncommitted work; re-registering by hand means writing
+  git's admin files yourself). Nothing to build — just worth knowing when a
+  container-made worktree quietly vanishes from `git worktree list` on the
+  host.
 - **Bypass a split-tunnel VPN for container egress** — when the host is on a
   non-full-tunnel VPN, the host proxy's outbound `create_connection`
   (`aiab/netproxy.py`) follows the host routing table, so the container can
@@ -323,7 +310,7 @@ Two consequences worth acting on rather than just recording:
     once): a lean routing table holding just the physical default route, plus
     `ip rule add from <physical-ip> lookup <table>`. Then the proxy binds its
     outbound sockets to `<physical-ip>` — `create_connection` at
-    `netproxy.py:266` already takes `source_address=`, and binding a local IP
+    `netproxy.py:300` already takes `source_address=`, and binding a local IP
     is unprivileged, so the recurring half lives in aiab with no privilege.
   - *Always egress via the default gateway.* Same lean table, but don't be
     selective — route all proxy egress out the physical default route. Since
@@ -334,7 +321,7 @@ Two consequences worth acting on rather than just recording:
   rule, and a stable physical IP. Cheaper alternative if the VPN resources are
   tunnel-*only* (no other path): just deny them by CIDR in the proxy, since
   route-around and block are then the same outcome — but `evaluate()`
-  (`netproxy.py:96`) matches hostnames only, so CIDR/IP deny would be new.
+  (`netproxy.py:98`) matches hostnames only, so CIDR/IP deny would be new.
 - **IDE integration** — aiab's value (confined agent process, network lockdown,
   git guard, "safe to disable permission prompts") is about *where the agent
   runs*, not the terminal front-end, so it carries over to IDE users. Three
