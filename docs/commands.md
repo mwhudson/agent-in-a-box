@@ -203,10 +203,10 @@ Caveats:
 ```
 aiab base [--for DIR]                 # show the directory's base release
 aiab base [--for DIR] RELEASE         # set it (e.g. 22.04, jammy or devel)
-aiab base [--for DIR] default         # clear back to the default (24.04)
+aiab base [--for DIR] default         # clear back to the default (26.04)
 ```
 
-By default a directory's containers are built on Ubuntu 24.04. `aiab base
+By default a directory's containers are built on Ubuntu 26.04. `aiab base
 RELEASE` overrides that for one project directory; `RELEASE` is a version
 (`22.04`), a codename (`jammy`), or `devel` for the release currently in
 development, and `default` clears the override. Like `aiab net` and `aiab

@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The release used when a directory has recorded no base of its own.
-DEFAULT_BASE = "24.04"
+DEFAULT_BASE = "26.04"
 
 # The release table every Ubuntu host already has: distro-info-data is
 # Priority: important and a dependency of python3-apt, and Debian ships the

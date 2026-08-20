@@ -59,7 +59,7 @@ an `aiab` container if you want a second layer.
 ## How it works
 
 The first time you run `aiab run claude` it creates a **base container** from
-`ubuntu-daily:24.04` (or whatever release the directory is set to — see
+`ubuntu-daily:26.04` (or whatever release the directory is set to — see
 [`aiab base`](commands.md#aiab-base)), installs the agent into it, then stops it as a
 template. Subsequent runs clone a lightweight **per-directory session container**
 from that base — its name is derived from the directory path
