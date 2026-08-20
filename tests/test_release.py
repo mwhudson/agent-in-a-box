@@ -167,6 +167,55 @@ def test_base_name_alternate_gets_token_suffix():
 
 
 # ---------------------------------------------------------------------------
+# base_from_container_name
+# ---------------------------------------------------------------------------
+
+# Only consulted for containers built before the user.aiab_base marker, where
+# the name is the only record of what they were built on.
+
+
+def test_base_from_name_reads_the_token():
+    assert release.base_from_container_name("claude-base-2204", "claude") == "22.04"
+    assert release.base_from_container_name("claude-base-2404", "claude") == "24.04"
+
+
+def test_base_from_name_handles_a_hyphenated_agent():
+    name = release.base_container_name("two-words", "22.04")
+    assert release.base_from_container_name(name, "two-words") == "22.04"
+
+
+def test_base_from_name_bare_agent_is_the_old_default():
+    # An unmarked template under the bare name was built when the bare name
+    # meant the previous default; anything built since carries a marker.
+    old = release.LEGACY_DEFAULT_BASE
+    assert release.base_from_container_name("claude", "claude") == old
+
+
+def test_base_from_name_session_container_is_the_old_default():
+    # Sessions ('<agent>-<basename>-<hash>', and the profile-prefixed form)
+    # predate the marker for the same reason, so they get the same answer.
+    old = release.LEGACY_DEFAULT_BASE
+    assert release.base_from_container_name("claude-myproj-1a2b3c4d", "claude") == old
+    name = "claude-openrouter-myproj-1a2b3c4d"
+    assert release.base_from_container_name(name, "claude") == old
+
+
+def test_base_from_name_ignores_another_agents_template():
+    old = release.LEGACY_DEFAULT_BASE
+    assert release.base_from_container_name("opencode-base-2204", "claude") == old
+
+
+def test_base_from_name_round_trips_base_container_name():
+    # The two must agree for every alternate base, or a freshly built template
+    # would look stale to the rebuild check on the next run. The default base
+    # is excluded on purpose: its template is bare-named, and is only dated
+    # from its name when it has no marker, which a fresh one always has.
+    for version in ("20.04", "22.04", "24.04", "25.10"):
+        name = release.base_container_name("claude", version)
+        assert release.base_from_container_name(name, "claude") == version
+
+
+# ---------------------------------------------------------------------------
 # is_base_container_name
 # ---------------------------------------------------------------------------
 

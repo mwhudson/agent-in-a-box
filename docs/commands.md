@@ -240,6 +240,17 @@ discarded and re-cloned from the right template. Your work isn't in the
 container — the working directory is a host bind mount — so the rebuild is just
 the clone cost.
 
+Every container records the release it was built on (`user.aiab_base`), which
+is what that check compares against — not the name, since the default
+template's bare name means "the default" and so stops meaning what it did
+whenever the default moves. A template whose record disagrees with the release
+now being asked for is deleted and rebuilt, and any session cloned from it goes
+with it. Containers created before the record existed are dated from their
+name: an alternate-base one says its release outright, and a bare-named one
+must be from 24.04, the default before 26.04. So the first `aiab run` after
+upgrading to a 26.04-default aiab rebuilds each agent's default template —
+once, and only for the agents you actually use.
+
 ## aiab limits
 
 ```

@@ -89,6 +89,7 @@ def provision_base(
     container: Container,
     *,
     image: str,
+    base: str,
     config_host_dir: StrPath,
     config_container_path: str,
     config_device_name: str,
@@ -96,6 +97,11 @@ def provision_base(
     container_user: int = 0,
 ) -> None:
     """Create a base template container, install the agent, then stop it.
+
+    ``base`` is the canonical release ``image`` was picked for; it is recorded
+    on the container as user.aiab_base so that a later change to the default
+    base is noticed rather than silently reusing a template built on the old
+    one (see aiab.release and the rebuild check in aiab.cli).
 
     Provisioning runs under a temporary '<name>-provisioning' container name
     and is only renamed to the final name on success.  This means that a
@@ -115,6 +121,7 @@ def provision_base(
         _create(
             tmp,
             image,
+            base,
             config_host_dir,
             config_container_path,
             config_device_name,
@@ -142,6 +149,7 @@ def provision_base(
 def _create(
     container: Container,
     image: str,
+    base: str,
     config_host_dir: StrPath,
     config_container_path: str,
     config_device_name: str,
@@ -167,6 +175,12 @@ def _create(
     container.set_config(
         "raw.idmap", f"uid {uid} {container_user}\ngid {gid} {container_user}"
     )
+
+    # Record the release this was built from, so it survives a change to the
+    # default base. Set before the install so it is already there when the
+    # container is renamed to its final name; sessions cloned from here
+    # inherit it, and aiab.cli overwrites it with the directory's own.
+    container.set_config("user.aiab_base", base)
 
     # Mount a dedicated config directory for persistent authentication.
     # On first use the agent will prompt for credentials inside the container.

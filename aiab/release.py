@@ -27,6 +27,12 @@
 # is the version without its dot — container names can't contain dots, and a
 # four-digit token can't be mistaken for the eight-hex-char directory hash that
 # ends a session container's name (see aiab.lxd.container_name_for_dir).
+#
+# Because the bare name says "the default" rather than a release, it stops
+# meaning what it did whenever DEFAULT_BASE moves. So the release a container
+# was actually built on is recorded on it as user.aiab_base, and aiab.cli
+# rebuilds any container whose marker disagrees with the release now being
+# asked for; base_from_container_name dates the ones built before the marker.
 
 from __future__ import annotations
 
@@ -39,6 +45,11 @@ from pathlib import Path
 
 # The release used when a directory has recorded no base of its own.
 DEFAULT_BASE = "26.04"
+
+# The default before it moved to 26.04. Containers built back then carry no
+# user.aiab_base marker, so this is what an unmarked one was built on — see
+# base_from_container_name, and the rebuild checks in aiab.cli.
+LEGACY_DEFAULT_BASE = "24.04"
 
 # The release table every Ubuntu host already has: distro-info-data is
 # Priority: important and a dependency of python3-apt, and Debian ships the
@@ -215,6 +226,22 @@ def base_container_name(agent: str, base: str) -> str:
     if base == DEFAULT_BASE:
         return agent
     return f"{agent}-base-{_token(base)}"
+
+
+def base_from_container_name(name: str, agent: str) -> str:
+    """The release a template was built on, inferred from its name alone.
+
+    For templates that predate the user.aiab_base marker, where the name is
+    the only record left. An '<agent>-base-<token>' name spells its release
+    out in the token; the bare agent name means whatever the default was when
+    it was built, which can only be LEGACY_DEFAULT_BASE — anything built under
+    the current default is marked. A name that is neither gets the same
+    answer, since it is no younger than the marker either.
+    """
+    m = re.fullmatch(rf"{re.escape(agent)}-base-(\d{{2}})(\d{{2}})", name)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}"
+    return LEGACY_DEFAULT_BASE
 
 
 def is_base_container_name(name: str, agent_names: Collection[str]) -> bool:

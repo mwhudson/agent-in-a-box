@@ -780,6 +780,19 @@ def _resolve_profile(name: str | None, agent: str) -> profiles.Profile | None:
     return profile
 
 
+def _container_base(container: lxd.Container, agent: str) -> str:
+    """The Ubuntu release a template or session container was built on.
+
+    From the user.aiab_base marker, falling back to what the container's name
+    implies for the ones built before the marker existed — which for anything
+    but an alternate-base template means the old default (see
+    aiab.release.base_from_container_name).
+    """
+    return container.get_config("user.aiab_base") or release.base_from_container_name(
+        container.name, agent
+    )
+
+
 @main.command()
 @click.argument("agent", type=AGENT_CHOICE)
 @click.option(
@@ -908,13 +921,25 @@ def run(
     base = conn.container(release.base_container_name(agent, dir_base))
     session = conn.container_for_dir(work_dir, container_prefix)
 
-    # A session cloned from a different base (the directory's base changed since
-    # it was created) is discarded so it re-clones from the right template.
-    # Sessions made before bases existed carry no marker; treat them as default.
-    if (
-        session.exists()
-        and (session.get_config("user.aiab_base") or release.DEFAULT_BASE) != dir_base
-    ):
+    # A template built on a release other than the one now being asked for is
+    # discarded so it is rebuilt from the right image. This only bites the
+    # default template, whose bare name says "the default" rather than a
+    # release, so it stops meaning what it did when DEFAULT_BASE moves.
+    # Templates predating the marker are dated from their name instead.
+    built_on = _container_base(base, agent) if base.exists() else dir_base
+    stale_base = built_on != dir_base
+    if stale_base:
+        print(
+            f"Template '{base.name}' was built on {built_on}, not {dir_base}; "
+            "rebuilding ...",
+            file=sys.stderr,
+        )
+        base.delete()
+
+    # A session cloned from a different base — because the directory's base
+    # changed since it was created, or because the template it came from was
+    # just discarded — is dropped so it re-clones from the right template.
+    if session.exists() and (stale_base or _container_base(session, agent) != dir_base):
         print(
             f"Directory base is now {dir_base}; rebuilding '{session.name}' ...",
             file=sys.stderr,
@@ -925,6 +950,7 @@ def run(
         provision.provision_base(
             base,
             image=release.image_for(dir_base),
+            base=dir_base,
             # Always the *agent's* own home, never a profile's: the template is
             # shared by every profile, so building it under an isolated
             # profile's credential store would hand that store to plain runs
