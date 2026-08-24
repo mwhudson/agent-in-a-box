@@ -17,17 +17,10 @@ because the agent is running in a box, or is it merely an opinionated way to
 configure the agent?*
 
 - **Worktrees** — assessed as harness, and since *removed* (404ed35 and the
-  docs follow-up). `--worktree`/`--worktree-keep`/`--worktree-branch` solved a
-  real problem (two agents, one checkout) that had nothing to do with
-  isolation — and one the agents now solve themselves: Claude Code shipped
-  `--worktree` in the CLI in February 2026 (v2.1.49/2.1.50; the desktop app
-  gives every session a worktree automatically), with resume-into-worktree,
-  exit-time keep/remove prompts, `.worktreeinclude` for gitignored files,
-  `worktree.baseRef`, PR-number worktrees, subagent `isolation: worktree`, and a
-  sweep that reaps abandoned ones. Copilot has it in its desktop app; opencode
-  has no built-in flag but at least four competing plugins. Concurrency is now
-  the agents' own business (commands.md says so under `aiab run`); kept here as
-  the worked example of the test cutting something real.
+  docs follow-up): they solved a real problem (two agents, one checkout) with
+  nothing to do with isolation, and one every agent now ships a solution for.
+  Concurrency is the agents' own business (commands.md says so under `aiab
+  run`); kept here as the worked example of the test cutting something real.
 - **tmux multiplexing.** Seven helpers in `cli.py` (`_tmux_group`,
   `_tmux_session_name`, `_tmux_sessions`, `_tmux_group_member`,
   `_tmux_window_commands`, `_tmux_joined_nothing`, `_reexec_under_tmux`),
@@ -35,9 +28,11 @@ configure the agent?*
   work, because the monitor pane is how a network decision gets a live surface.
   The session group with a window per agent, shared across terminals and
   switched with `C-b w`, is not — that's multi-agent UX anyone would want bare.
-- **The Agents pane** — built on a branch, never landed, and the branch has
-  since been deleted — plus `_resolve_shared_tree` and
+- **The Agents pane**, plus `_resolve_shared_tree` and
   `AIAB_CONCURRENT_DECISION`: an explicit control plane for parallel agents.
+  Built on a branch, never landed, branch since deleted — it duplicated
+  something Claude Code is actively building, and was rooted in
+  `--worktree-branch` besides.
 - **`aiab profile`.** Profiles are a narrow execution-variant layer rather than
   a general configuration manager. They coordinate agent-scoped environment,
   additional network domains, and optional credential/session isolation. The
@@ -68,7 +63,9 @@ every run), `/setup-container` and the `/aiab` state dir (on the host your
 machine already has the toolchain — its *form* reaches into the agent's surface,
 but its reason is the box), port forwarding (a dev server inside the container
 is otherwise unreachable), Wayland passthrough, the monitor's
-Network/Domains/Mounts/Limits tabs, and `upgrade-templates`/`gc`/`list`/`lxc`.
+Network/Domains/Mounts/Limits tabs, `upgrade-templates`/`gc`/`list`/`lxc`, and
+not reaping a container out from under a `/background` session (box work by
+definition — nothing the agent can defend itself against).
 
 So the line isn't "isolation only" — that parity work is legitimately aiab's.
 It's that **aiab's job is what the agent can't do for itself because aiab put it
@@ -80,7 +77,7 @@ half still has no upstream competitor — no agent confines itself from the
 outside, and of the ~100 tools in `awesome-agent-orchestrators` only a handful
 combine worktrees with containers at all.
 
-Two consequences worth acting on rather than just recording:
+One consequence worth acting on rather than just recording:
 
 - The instruction overlay should change shape — and the shape is worked out
   (2026-08-17). The property worth keeping — versioned files, bind-mounted into
@@ -134,21 +131,6 @@ Two consequences worth acting on rather than just recording:
     fresh installs stop getting opinionated instructions — which is the point
     — so configuration.md then needs a worked example of the convention dir,
     it being the documented way to get *any* global instructions in.
-- The Agents pane — a monitor tab that listed parked agent worktrees and
-  offered to restart one — is harness: it duplicates something Claude Code is
-  actively building, and gets much smaller if it aims at *making the agent's
-  own version work in the container* instead. It was built but never landed,
-  and the branch holding it has been deleted; it was rooted in
-  `--worktree-branch` besides, which 404ed35 removed. (Defending a backgrounded
-  session looked like the same case and wasn't: an idle stopper reaping a
-  container out from under a `/background` session is box work by definition —
-  nothing the agent can defend itself against — so it was built rather than
-  dropped, and landed in c38fedd and follow-ups.)
-  The open question this used to carry — Claude Code skips its own worktree
-  move when the session is already inside a linked worktree, which
-  `--worktree-branch` used to cause — went moot with the worktree removal:
-  sessions run in the real checkout now, so Claude Code's worktree behaviour
-  applies unmodified.
 
 ## Lifecycle gaps
 
