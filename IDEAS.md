@@ -35,9 +35,9 @@ configure the agent?*
   work, because the monitor pane is how a network decision gets a live surface.
   The session group with a window per agent, shared across terminals and
   switched with `C-b w`, is not — that's multi-agent UX anyone would want bare.
-- **The Agents pane** (parked on the `agents-pane` branch), plus
-  `_resolve_shared_tree` and `AIAB_CONCURRENT_DECISION`: an explicit control
-  plane for parallel agents.
+- **The Agents pane** — built on a branch, never landed, and the branch has
+  since been deleted — plus `_resolve_shared_tree` and
+  `AIAB_CONCURRENT_DECISION`: an explicit control plane for parallel agents.
 - **`aiab profile`.** Profiles are a narrow execution-variant layer rather than
   a general configuration manager. They coordinate agent-scoped environment,
   additional network domains, and optional credential/session isolation. The
@@ -134,12 +134,16 @@ Two consequences worth acting on rather than just recording:
     fresh installs stop getting opinionated instructions — which is the point
     — so configuration.md then needs a worked example of the convention dir,
     it being the documented way to get *any* global instructions in.
-- The `agents-pane` branch is harness, duplicates something Claude Code is
+- The Agents pane — a monitor tab that listed parked agent worktrees and
+  offered to restart one — is harness: it duplicates something Claude Code is
   actively building, and gets much smaller if it aims at *making the agent's
-  own version work in the container* instead. (`defend-background-detach`
-  looked like the same case and wasn't: an idle stopper reaping a container out
-  from under a `/background` session is box work by definition — nothing the
-  agent can defend itself against — so it was built rather than dropped.)
+  own version work in the container* instead. It was built but never landed,
+  and the branch holding it has been deleted; it was rooted in
+  `--worktree-branch` besides, which 404ed35 removed. (Defending a backgrounded
+  session looked like the same case and wasn't: an idle stopper reaping a
+  container out from under a `/background` session is box work by definition —
+  nothing the agent can defend itself against — so it was built rather than
+  dropped, and landed in c38fedd and follow-ups.)
   The open question this used to carry — Claude Code skips its own worktree
   move when the session is already inside a linked worktree, which
   `--worktree-branch` used to cause — went moot with the worktree removal:
