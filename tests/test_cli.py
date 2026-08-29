@@ -15,10 +15,12 @@ from aiab import agents, profiles, state
 
 from aiab.cli import (
     _agent_command,
+    _drop_stale_home_overlays,
     _guard_git_repo,
     _json_set,
     _json_unset,
     _parse_config_value,
+    _private_home_mounts,
     _reseed_file,
     _reseed_tree,
     _resolve_profile,
@@ -34,13 +36,23 @@ from aiab.cli import (
 class FakeContainer:
     """Records add_config_overlay calls instead of touching LXD."""
 
-    def __init__(self):
+    def __init__(self, devices=None):
         self.overlays = []
+        # container path -> device name, as Container.config_overlays reports.
+        self._devices = dict(devices or {})
+        self.removed = []
 
     def add_config_overlay(
-        self, host_path, container_path, container_user=0, readonly=False
+        self, host_path, container_path, container_user=0, readonly=False, force=False
     ):
         self.overlays.append((host_path, container_path, readonly))
+
+    def config_overlays(self):
+        return {name: path for path, name in self._devices.items()}
+
+    def remove_device(self, name):
+        self.removed.append(name)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -521,3 +533,89 @@ def test_every_agent_shares_something_and_only_under_the_home(name, tmp_path):
     for host_path, container_path in mounts:
         assert container_path.startswith(f"{CONTAINER_HOME}/")
         assert tmp_path in host_path.parents
+
+
+# ---------------------------------------------------------------------------
+# _private_home_mounts
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_shares_its_directory_not_the_files_in_it(tmp_path):
+    # Copilot rewrites config.json by renaming a temp file over it, which is
+    # EBUSY when config.json is itself a bind mount (issue #3). So the share
+    # is the directory; the file must not be a mount point of its own.
+    cfg = agents.get("copilot")
+    shared = {c for _h, c in _shared_home_mounts(cfg, tmp_path)}
+    assert shared == {f"{CONTAINER_HOME}/.copilot"}
+    assert f"{CONTAINER_HOME}/.copilot/config.json" not in shared
+
+
+def test_private_paths_come_from_the_directorys_own_home(tmp_path):
+    # The point of carving these back out: session state that a shared
+    # ~/.copilot would otherwise pool across every project directory.
+    cfg = agents.get("copilot")
+    mounts = _private_home_mounts(cfg, tmp_path)
+    by_container = {c: h for h, c in mounts}
+    assert by_container[f"{CONTAINER_HOME}/.copilot/session-store.db"] == (
+        tmp_path / ".copilot/session-store.db"
+    )
+    assert (tmp_path / ".copilot/session-state").is_dir()
+    assert (tmp_path / ".copilot/session-store.db").is_file()
+
+
+@pytest.mark.parametrize("name", agents.AGENT_NAMES)
+def test_private_paths_sit_inside_a_shared_directory(name, tmp_path):
+    # A private path outside every shared directory would be mounting the
+    # container's own home back onto itself -- it is already per-directory.
+    cfg = agents.get(name)
+    shared_dirs = [e.rstrip("/") for e in cfg.shared_paths if e.endswith("/")]
+    for entry in cfg.private_paths:
+        assert any(entry.startswith(d + "/") for d in shared_dirs), entry
+
+
+# ---------------------------------------------------------------------------
+# _drop_stale_home_overlays
+# ---------------------------------------------------------------------------
+
+
+def test_stale_overlay_inside_a_mounted_directory_is_dropped(tmp_path):
+    # The copilot upgrade path: a container from before the move still has a
+    # device for the config.json file mount, which would be layered back over
+    # the new ~/.copilot directory mount and bring the EBUSY back.
+    shared = tmp_path / "shared" / ".copilot"
+    shared.mkdir(parents=True)
+    container: Any = FakeContainer(
+        {f"{CONTAINER_HOME}/.copilot/config.json": "cfg-oldfile"}
+    )
+    _drop_stale_home_overlays(container, [(shared, f"{CONTAINER_HOME}/.copilot")])
+    assert container.removed == ["cfg-oldfile"]
+
+
+def test_overlays_this_run_wants_are_kept(tmp_path):
+    shared = tmp_path / "shared" / ".copilot"
+    shared.mkdir(parents=True)
+    instructions = tmp_path / "repo" / "copilot-instructions.md"
+    instructions.parent.mkdir(parents=True)
+    instructions.touch()
+    wanted = [
+        (shared, f"{CONTAINER_HOME}/.copilot"),
+        (instructions, f"{CONTAINER_HOME}/.copilot/copilot-instructions.md"),
+    ]
+    container: Any = FakeContainer(
+        {
+            f"{CONTAINER_HOME}/.copilot": "cfg-dir",
+            f"{CONTAINER_HOME}/.copilot/copilot-instructions.md": "cfg-md",
+        }
+    )
+    _drop_stale_home_overlays(container, wanted)
+    assert container.removed == []
+
+
+def test_overlays_outside_the_mounted_directories_are_left_alone(tmp_path):
+    # The git guard adds its own cfg-* devices under /work later in the run;
+    # nothing here may touch them.
+    shared = tmp_path / "shared" / ".copilot"
+    shared.mkdir(parents=True)
+    container: Any = FakeContainer({"/work/repo/.git/config": "cfg-gitguard"})
+    _drop_stale_home_overlays(container, [(shared, f"{CONTAINER_HOME}/.copilot")])
+    assert container.removed == []

@@ -439,6 +439,14 @@ agents rather than of aiab — so they outlive whatever prompted them.
   the fallback if the apt package (`agents._claude_install`) ever stops being
   viable. Downside: it then keeps every version on disk forever, which is what
   the apt switch was getting away from.
+- **A bind-mounted *file* can't be replaced by `rename()`.** It's a mount
+  point, so the rename gets `EBUSY`, and write-temp-then-rename is how agents
+  update config atomically. Copilot 1.0.81 started doing this to
+  `~/.copilot/config.json` and stopped working entirely (issue #3); the fix
+  was to share `~/.copilot` as a directory and mount the per-directory state
+  back inside it. Anything else in `shared_paths` that names a file the agent
+  rewrites — `.claude.json` and `.claude/.credentials.json` are the
+  candidates — is one upstream change away from the same failure.
 - **`COPILOT_HOME` relocates copilot's whole config directory.** There is no
   documented equivalent for claude (`CLAUDE_CONFIG_DIR` is not in the settings
   docs) or for opencode (no documented XDG support) — which is why

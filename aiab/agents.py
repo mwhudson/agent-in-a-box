@@ -154,7 +154,27 @@ class Agent:
     # A trailing '/' marks a directory, anything else a file. Both ends of a
     # bind mount have to exist, so a path that isn't in the shared home yet is
     # created empty before mounting.
+    #
+    # Prefer sharing a *directory* over the individual files inside it when an
+    # agent rewrites those files. A bind-mounted file is a mount point, and
+    # rename() onto a mount point fails with EBUSY — which breaks the
+    # write-temp-then-rename dance agents use to update config atomically
+    # (github.com/mwhudson/agent-in-a-box#3). Sharing the parent directory
+    # leaves the file itself an ordinary file, so the rename lands.
     shared_paths: list[str] = field(default_factory=list)
+    # Paths under the container home that stay *per-directory* even though a
+    # shared_paths entry above them would otherwise share them: the exceptions
+    # carved back out of a shared directory, mounted from the directory's own
+    # home on top of the shared mount.
+    #
+    # Only needed where sharing had to be done at directory granularity for
+    # the EBUSY reason above. The allowlist rationale doesn't hold inside such
+    # a directory — new state an agent starts keeping there is shared until
+    # someone lists it — so keep these directories narrow, and prefer a
+    # shared_paths entry per file wherever the agent doesn't rewrite them.
+    #
+    # Same trailing-'/' convention as shared_paths.
+    private_paths: list[str] = field(default_factory=list)
     # Argv appended to `command` that lists the agent's currently-active
     # sessions as a JSON array on stdout, each an object with a `kind` field.
     # A `kind == "background"` entry is a session that outlives the foreground
@@ -355,16 +375,21 @@ AGENTS: dict[str, Agent] = {
             ),
         ),
         # Copilot keeps everything under one directory, so the split is inside
-        # it: config.json holds the authentication state, the other three are
-        # user configuration. session-state/, session-store.db,
-        # command-history-state.json, logs/ and ide/ are per-directory — and
-        # session-state/ is where the inuse.<pid>.lock files live, which only
-        # mean anything in the container that wrote them.
-        shared_paths=[
-            ".copilot/config.json",
-            ".copilot/mcp-config.json",
-            ".copilot/lsp-config.json",
-            ".copilot/settings.json",
+        # it — but the split can't be made by sharing the individual config
+        # files. Copilot rewrites config.json by renaming a sibling temp file
+        # over it, and rename() onto a bind-mounted file is EBUSY, so sharing
+        # the file itself stops copilot starting at all (issue #3). The whole
+        # directory is shared instead, and the per-directory state is carved
+        # back out below: session-state/ (where the inuse.<pid>.lock files
+        # live, which only mean anything in the container that wrote them),
+        # session-store.db, command-history-state.json, logs/ and ide/.
+        shared_paths=[".copilot/"],
+        private_paths=[
+            ".copilot/session-state/",
+            ".copilot/session-store.db",
+            ".copilot/command-history-state.json",
+            ".copilot/logs/",
+            ".copilot/ide/",
         ],
     ),
 }

@@ -591,21 +591,18 @@ def _record_runtime_mounts(
         state.set_mount(work_dir, d, readonly=False)
 
 
-def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path, str]]:
-    """Host/container path pairs for the parts of the home that stay shared.
+def _home_mounts(entries: list[str], home: Path) -> list[tuple[Path, str]]:
+    """Host/container path pairs laying `entries` of `home` onto the container home.
 
-    The container's home is the directory's own (state.session_home_dir), so
-    these are laid over it from the agent's shared home — the credentials and
-    user config you want to set up once rather than once per project.
-
-    Both ends of a bind mount have to exist, so a path the shared home doesn't
-    have yet is created empty first. That is the fresh-install case; an
-    existing shared home already has them.
+    Both ends of a bind mount have to exist, so an entry `home` doesn't have
+    yet is created empty first — a trailing '/' marks a directory, anything
+    else a file. That is the fresh-install case; an established home already
+    has them.
     """
     mounts: list[tuple[Path, str]] = []
-    for entry in cfg.shared_paths:
+    for entry in entries:
         rel = entry.rstrip("/")
-        host_path = shared_home / rel
+        host_path = home / rel
         if not host_path.exists():
             host_path.parent.mkdir(parents=True, exist_ok=True)
             if entry.endswith("/"):
@@ -614,6 +611,29 @@ def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path
                 host_path.touch()
         mounts.append((host_path, f"{CONTAINER_HOME}/{rel}"))
     return mounts
+
+
+def _shared_home_mounts(cfg: agents.Agent, shared_home: Path) -> list[tuple[Path, str]]:
+    """Host/container path pairs for the parts of the home that stay shared.
+
+    The container's home is the directory's own (state.session_home_dir), so
+    these are laid over it from the agent's shared home — the credentials and
+    user config you want to set up once rather than once per project.
+    """
+    return _home_mounts(cfg.shared_paths, shared_home)
+
+
+def _private_home_mounts(
+    cfg: agents.Agent, session_home: Path
+) -> list[tuple[Path, str]]:
+    """Host/container path pairs for what a shared directory shares too much of.
+
+    Where an agent's config had to be shared a whole directory at a time
+    (copilot's ~/.copilot — see agents.Agent.shared_paths), the per-directory
+    state inside it is mounted back from the directory's own home on top. So
+    these must be applied *after* the shared mounts they sit inside.
+    """
+    return _home_mounts(cfg.private_paths, session_home)
 
 
 def _notify_backgrounded(session: lxd.Container, agent: str) -> None:
@@ -648,6 +668,34 @@ def _notify_backgrounded(session: lxd.Container, agent: str) -> None:
             Path(notice_file).write_text(notice)
 
 
+def _drop_stale_home_overlays(
+    session: lxd.Container, wanted: list[tuple[Path, str]]
+) -> None:
+    """Remove config overlays nested inside a directory this run mounts whole.
+
+    A container built by an earlier aiab carries the overlays that aiab wanted
+    then, and add_config_overlay only ever adds. That is fine while the sets
+    only grow, but not when a mount moves *up*: copilot's four shared config
+    files became a mount of the whole ~/.copilot (see agents.py), and the
+    leftover ~/.copilot/config.json file mount would be layered straight back
+    over the new directory mount — reinstating the EBUSY the move was fixing.
+
+    So anything left mounted underneath one of this run's directory mounts in
+    the home, and not itself wanted, is removed. Scoped that way rather than
+    applied to every cfg-* device, because the git guard adds overlays of its
+    own (under /work) later in the run, and the dirstate mount holds files
+    that are the directory's to keep.
+    """
+    keep = {container_path for _host, container_path in wanted}
+    roots = [c for h, c in wanted if h.is_dir() and c.startswith(CONTAINER_HOME + "/")]
+    for name, container_path in session.config_overlays().items():
+        if container_path in keep:
+            continue
+        if any(container_path.startswith(root + "/") for root in roots):
+            session.remove_device(name)
+            print(f"Dropped stale overlay container:{container_path}", file=sys.stderr)
+
+
 def _apply_session_mounts(
     session: lxd.Container,
     cfg: agents.Agent,
@@ -655,6 +703,7 @@ def _apply_session_mounts(
     add_mount: tuple[str, ...],
     add_mount_rw: tuple[str, ...],
     shared_home: Path,
+    session_home: Path,
 ) -> tuple[str, list[tuple[Path, str, bool]]]:
     """Mount the source dir, recorded extras, dirstate, and config overlays."""
     container_cwd = session.add_device(work_dir, work_prefix=WORK_PREFIX)
@@ -662,26 +711,42 @@ def _apply_session_mounts(
     _record_runtime_mounts(work_dir, add_mount, add_mount_rw)
     applied_mounts = _apply_recorded_mounts(session, work_dir)
 
-    # Mount the directory's persistent state dir (shared by all agents for this
-    # directory). /setup-container maintains the setup script there, so it
-    # survives container recreation.
-    session.add_config_overlay(
-        state.dir_state_dir(work_dir), STATE_MOUNT, container_user=CONTAINER_USER
-    )
+    # Ordered outermost first, because several of these nest: the versioned
+    # overlays land inside the shared mounts (opencode's AGENTS.md goes in
+    # .config/opencode/) and the private mounts inside them too (copilot's
+    # session state goes in .copilot/), and in each case the inner one has to
+    # win. Adding them in this order gets that for a running container; a
+    # container restarted behind our back is put right by the forced re-add
+    # below.
+    home_overlays = [
+        # The directory's persistent state dir (shared by all agents for this
+        # directory). /setup-container maintains the setup script there, so it
+        # survives container recreation.
+        (state.dir_state_dir(work_dir), STATE_MOUNT),
+        # Credentials and user config, laid over the directory's own home.
+        *_shared_home_mounts(cfg, shared_home),
+        # The per-directory state carved back out of a shared directory.
+        *_private_home_mounts(cfg, session_home),
+        # The versioned config this repo ships for the agent.
+        *[(h, c) for h, c in cfg.overlays if h.exists()],
+    ]
 
-    # Credentials and user config, laid over the directory's own home. Before
-    # the versioned overlays below, which land inside some of these (opencode's
-    # AGENTS.md goes in .config/opencode/) and have to win.
-    for host_path, container_path in _shared_home_mounts(cfg, shared_home):
-        session.add_config_overlay(
-            host_path, container_path, container_user=CONTAINER_USER
+    _drop_stale_home_overlays(session, home_overlays)
+
+    # A nested overlay is re-added even when its device is already right, so
+    # that it is mounted *after* the mount it sits inside: LXD's own ordering
+    # when it starts a container is not something we get to choose, and an
+    # inner mount applied first is silently shadowed by the outer one.
+    outer = {c for h, c in home_overlays if h.is_dir()}
+    for host_path, container_path in home_overlays:
+        nested = any(
+            container_path.startswith(root + "/")
+            for root in outer
+            if root != container_path
         )
-
-    for host_path, overlay_path in cfg.overlays:
-        if host_path.exists():
-            session.add_config_overlay(
-                host_path, overlay_path, container_user=CONTAINER_USER
-            )
+        session.add_config_overlay(
+            host_path, container_path, container_user=CONTAINER_USER, force=nested
+        )
     return container_cwd, applied_mounts
 
 
@@ -982,7 +1047,13 @@ def run(
 
         run_cmd = _agent_command(cfg, agent_args, shell)
         container_cwd, applied_mounts = _apply_session_mounts(
-            session, cfg, work_dir, add_mount, add_mount_rw, config_host_dir
+            session,
+            cfg,
+            work_dir,
+            add_mount,
+            add_mount_rw,
+            config_host_dir,
+            session_home,
         )
         proxy_env = _apply_network_policy(conn, session, work_dir, agent, profile_name)
 

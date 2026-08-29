@@ -697,12 +697,26 @@ class Container:
         )
         self._invalidate()
 
+    def config_overlays(self) -> dict[str, str]:
+        """Map device name -> container path for the overlays we added.
+
+        Only the 'cfg-' devices add_config_overlay owns, so callers can find
+        overlays a previous version of aiab left behind (see aiab.cli's
+        _drop_stale_home_overlays) without touching the dir-* working mounts.
+        """
+        return {
+            name: props["path"]
+            for name, props in self.devices().items()
+            if name.startswith("cfg-") and "path" in props
+        }
+
     def add_config_overlay(
         self,
         host_path: StrPath,
         container_path: str,
         container_user: int = 0,
         readonly: bool = False,
+        force: bool = False,
     ) -> None:
         """Bind-mount a host file or directory at an explicit container path.
 
@@ -713,6 +727,11 @@ class Container:
         container_path so the mount is idempotent across sessions, and uses a
         'cfg-' prefix to keep it distinct from the dir-* working mounts. With
         readonly=True the mount is read-only in the container.
+
+        An already-correct device is left alone; force=True removes and re-adds
+        it anyway, which on a running container remounts it. That is how a
+        mount nested inside another overlay is put back on top after a restart,
+        where the order LXD mounted them in isn't ours to pick.
         """
         # host_path is handed to lxc / compared against config-show output; the
         # container_path is a path *inside* the container (always POSIX).
@@ -720,12 +739,13 @@ class Container:
         name = "cfg-" + hashlib.md5(container_path.encode()).hexdigest()[:8]
         devices = self.devices()
         existing = devices.get(name)
-        if (
+        unchanged = bool(
             existing
             and existing.get("source") == host_path
             and existing.get("path") == container_path
             and (str(existing.get("readonly", "false")).lower() == "true") == readonly
-        ):
+        )
+        if unchanged and not force:
             return
         # Create the mountpoint's parent dirs as container_user first. Otherwise
         # LXD creates any missing parents as container root, which falls outside
@@ -767,11 +787,14 @@ class Container:
             add_cmd.append("readonly=true")
         run(self._argv(add_cmd), stdout=subprocess.DEVNULL)
         self._invalidate()
-        mode = " (read-only)" if readonly else ""
-        print(
-            f"Overlaid {host_path} -> container:{container_path}{mode}",
-            file=sys.stderr,
-        )
+        # A forced re-add of an unchanged device says nothing the user needs;
+        # it happens on every run for every nested overlay.
+        if not unchanged:
+            mode = " (read-only)" if readonly else ""
+            print(
+                f"Overlaid {host_path} -> container:{container_path}{mode}",
+                file=sys.stderr,
+            )
 
     def mount_wayland(self, container_user: int) -> dict[str, str]:
         """Bind-mount the host Wayland socket; return env vars to set (or {}).

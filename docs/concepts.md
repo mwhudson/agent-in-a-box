@@ -92,6 +92,16 @@ those are is listed per agent in `aiab/agents.py` (`shared_paths`), and it's an
 allowlist: anything an agent starts storing that aiab doesn't know about stays
 per-directory, which is the safe direction to be wrong in.
 
+A file that the agent *rewrites* has to be shared as part of its directory
+rather than on its own, because a bind-mounted file is a mount point and
+renaming a new version over a mount point fails with `EBUSY` — which is how
+agents update config atomically. Copilot's `~/.copilot` is shared whole for
+that reason, and the per-directory state inside it (`session-state/`,
+`session-store.db`, the logs) is mounted back on top from the directory's own
+home; those exceptions are the agent's `private_paths`. Inside such a
+directory the allowlist no longer applies, so new state an agent starts
+keeping there is shared until it's listed.
+
 All containers these tools create live in a dedicated LXD project named
 `aiab` (created automatically on first use), so they stay grouped together
 and out of your `default` project. The project is created with
