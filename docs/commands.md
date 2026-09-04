@@ -452,6 +452,19 @@ agent's `npm install` usually just works once you answer — no retry needed.
 Without a monitor session attached the proxy keeps the old fail-fast
 behaviour.
 
+Sixty seconds is easy to miss in a pane you aren't looking at, so each parked
+host is *also* raised as a desktop notification, carrying the same **Allow**
+/ **15m** / **Deny** buttons — clicking one there decides the host without
+going back to the terminal, and ignoring it is Skip. The notification is
+withdrawn once the host is decided in the pane or the request gives up
+waiting. If a click lands after that (the notification outlives the proxy's
+wait) the rule is still recorded, so the agent's next attempt goes straight
+through.
+
+This needs `notify-send` on your `PATH` — `apt install libnotify-bin`.
+Without it, or without a notification daemon to talk to, nothing is raised and
+the pane and the bell are the whole UI, exactly as before.
+
 ### Domains tab
 
 The domains tab is where you revisit decisions already made. It lists every

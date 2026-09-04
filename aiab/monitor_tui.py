@@ -39,6 +39,11 @@
 #     a Set button. Changes are saved to aiab.state and take effect on the next
 #     `aiab run` for the directory.
 #
+# A parked host is also raised as a desktop notification, with the same
+# Allow / 15m / Deny buttons on it, so a decision doesn't depend on this pane
+# being looked at — see aiab.notify, which no-ops when notify-send isn't
+# installed.
+#
 # Textual asks the terminal for mouse tracking itself, and tmux forwards mouse
 # input to the pane, so the buttons work inside the tmux layout `aiab run` sets
 # up (which also turns the tmux `mouse` option on in the sessions it creates,
@@ -71,6 +76,7 @@ from . import PROJECT, WORK_PREFIX
 from . import agents
 from . import netproxy
 from . import netwatch
+from . import notify
 from . import profiles
 from . import state
 from .lxd import Container, Lxd
@@ -572,6 +578,10 @@ class MonitorApp(App[None]):
         # (fetched lazily from lxc info, reset when the proc entry vanishes),
         # ports seen on the last poll, ports the user chose to ignore this
         # session, and ports currently forwarded to the host.
+        # Desktop notifications for parked hosts, so a decision is
+        # noticeable when nobody is looking at this pane. A no-op when
+        # notify-send isn't installed (see aiab.notify).
+        self._notifier = notify.Notifier(self._notification_action)
         self._init_pid: int | None = None
         self._known_ports: set[int] = set()
         self._ignored_ports: set[int] = set()
@@ -650,9 +660,11 @@ class MonitorApp(App[None]):
         removed = [h for h, row in rows.items() if h not in present]
         for host in removed:
             rows[host].remove()
+            self._notifier.close(host)
         new = sorted(present - rows.keys() - self._handled)
         for host in new:
             pending.mount(PendingRow(host))
+            self._notify_pending(host)
         if new:
             # tmux turns the bell into a visual alert on the window — the
             # "decision pending" signal.
@@ -664,6 +676,7 @@ class MonitorApp(App[None]):
         self._check_ports()
 
     def _decide(self, row: PendingRow, action: str) -> None:
+        self._notifier.close(row.host)
         self._handled.add(row.host)
         message = netwatch.apply_decision(self.work_dir, row.host, action)
         row.remove()
@@ -685,6 +698,49 @@ class MonitorApp(App[None]):
         rows = self.query(PendingRow)
         if rows:
             self._decide(rows.first(), action)
+
+    def _notify_pending(self, host: str) -> None:
+        """Ask about a newly parked host on the desktop as well as in here.
+
+        The buttons are the pane's, minus Skip: ignoring the notification
+        already is Skip, and a fourth button would only crowd the banner.
+        """
+        self._notifier.notify(
+            host,
+            f"aiab: allow {host}?",
+            f"An agent working in {self.work_dir.name} wants to reach it.",
+            [
+                (netwatch.ALLOW, "Allow"),
+                (netwatch.TEMP, "15m"),
+                (netwatch.DENY, "Deny"),
+            ],
+        )
+
+    def _notification_action(self, host: str, action: str) -> None:
+        """A decision clicked on a desktop notification (notifier thread).
+
+        Hop onto the UI thread to apply it, and drop it if the app has already
+        gone — a verdict has nowhere to land once the monitor has exited.
+        """
+        with contextlib.suppress(RuntimeError):
+            self.call_from_thread(self._decide_host, host, action)
+
+    def _decide_host(self, host: str, action: str) -> None:
+        """Apply a decision that came from outside the pane, by host.
+
+        The row may be gone already: the proxy waits 60s for a verdict and the
+        notification outlives that. Recording the rule anyway is still the
+        useful thing to do — it's exactly what the Domains tab would have
+        written, and it's what makes the agent's next attempt go straight
+        through.
+        """
+        for row in self.query(PendingRow):
+            if row.host == host:
+                self._decide(row, action)
+                return
+        self._handled.add(host)
+        self._write_log(netwatch.apply_decision(self.work_dir, host, action))
+        self._refresh_policy()
 
     # -- tab switching --
 
@@ -1015,7 +1071,8 @@ class MonitorApp(App[None]):
         self._refresh_limits()
 
     def on_unmount(self) -> None:
-        """Remove host-side port-forwarding proxy devices when the monitor exits."""
+        """Drop what outlives the pane: notifications, then port forwards."""
+        self._notifier.close_all()
         for port in list(self._forwarded_ports):
             self._apply_to_containers(
                 f"remove forward for port {port}",

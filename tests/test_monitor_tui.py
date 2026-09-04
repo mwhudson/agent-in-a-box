@@ -138,6 +138,119 @@ def test_vanished_file_removes_row_and_reappearance_reprompts(work_dir):
     asyncio.run(scenario())
 
 
+class _FakeNotifier:
+    """Stands in for aiab.notify.Notifier: records instead of notifying."""
+
+    def __init__(self):
+        self.raised = []
+        self.closed = []
+
+    def notify(self, key, summary, body, actions):
+        self.raised.append((key, summary, body, actions))
+
+    def close(self, key):
+        self.closed.append(key)
+
+    def close_all(self):
+        self.closed.extend(key for key, *_ in self.raised)
+
+
+def test_parked_host_raises_a_desktop_notification(work_dir):
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+
+            key, summary, _, actions = notifier.raised[0]
+            assert key == "example.com"
+            assert "example.com" in summary
+            # Skip is deliberately absent: ignoring the notification is Skip.
+            assert [action for action, _ in actions] == [
+                netwatch.ALLOW,
+                netwatch.TEMP,
+                netwatch.DENY,
+            ]
+
+    asyncio.run(scenario())
+
+
+def test_deciding_in_the_pane_withdraws_the_notification(work_dir):
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+            assert notifier.closed == ["example.com"]
+
+    asyncio.run(scenario())
+
+
+def test_timed_out_request_withdraws_the_notification(work_dir):
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+
+            (pdir / "example.com").unlink()  # the proxy gave up waiting
+            app._poll()
+            await pilot.pause()
+            assert notifier.closed == ["example.com"]
+
+    asyncio.run(scenario())
+
+
+def test_notification_decision_applies_to_the_pending_row(work_dir):
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+
+            app._decide_host("example.com", netwatch.ALLOW)
+            await pilot.pause()
+            allows = state.get_network(work_dir)["allow"]
+            assert [a["domain"] for a in allows] == ["example.com"]
+            assert _pending_hosts_shown(app) == []
+
+    asyncio.run(scenario())
+
+
+def test_notification_decision_after_the_request_timed_out_still_records(work_dir):
+    # The notification outlives the proxy's 60s wait, so a click can land with
+    # no row left to answer for. The rule is still worth recording: it is what
+    # lets the agent's retry go straight through.
+    async def scenario():
+        app = _new_app(work_dir)
+        app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            app._decide_host("example.com", netwatch.ALLOW)
+            await pilot.pause()
+            allows = state.get_network(work_dir)["allow"]
+            assert [a["domain"] for a in allows] == ["example.com"]
+
+    asyncio.run(scenario())
+
+
 def test_pending_flashes_network_tab_only_from_other_tabs(work_dir):
     pdir = netwatch.pending_dir(work_dir)
 

@@ -15,6 +15,10 @@
   0.1.x relic that predates the modern API). Only `aiab monitor` imports it,
   so the other subcommands still work without it, but the interactive
   allow/deny prompts that restricted mode relies on do not.
+- Optionally `notify-send` (`apt install libnotify-bin`), which lets
+  [`aiab monitor`](commands.md#network-tab) raise a parked host as a desktop
+  notification with Allow/Deny buttons on it. Without it the monitor pane is
+  the only place a request shows up.
 
 ## Install
 
