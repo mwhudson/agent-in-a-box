@@ -674,6 +674,17 @@ def remove_profile(name: str) -> bool:
 # -- per-directory state dir --
 
 
+def dir_state_path(directory: StrPath) -> Path:
+    """Where a directory's state dir lives, without touching the disk.
+
+    dir_state_dir() below creates the directory and rewrites its .source
+    marker under a lock, which is right for a caller about to *use* it and
+    wrong for one that only wants to look: `aiab monitor` polls for a file in
+    there several times a second (see aiab.attention).
+    """
+    return _DIRSTATE_DIR / dir_slug(_key(directory))
+
+
 def dir_state_dir(directory: StrPath) -> Path:
     """Return (creating it if needed) the persistent state dir for a directory.
 
@@ -683,7 +694,7 @@ def dir_state_dir(directory: StrPath) -> Path:
     maps the dir back to its project directory for prune_stale().
     """
     key = _key(directory)
-    d = _DIRSTATE_DIR / dir_slug(key)
+    d = dir_state_path(directory)
     with _locked_path(_DIRSTATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
         (d / _SOURCE_FILE).write_text(key + "\n")

@@ -4,9 +4,12 @@
 # rather than error when the import fails.
 
 import asyncio
+import os
+import time
 
 import pytest
 
+import aiab.attention as attention
 import aiab.netproxy as netproxy
 import aiab.netwatch as netwatch
 import aiab.state as state
@@ -21,6 +24,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "_MOUNTS_PATH", tmp_path / "mounts.json")
     monkeypatch.setattr(netwatch, "_PENDING_BASE", tmp_path / "pending")
     monkeypatch.setattr(netproxy, "PROXY_DIR", tmp_path / "proxy")
+    monkeypatch.setattr(state, "_DIRSTATE_DIR", tmp_path / "dirstate")
 
 
 @pytest.fixture
@@ -145,7 +149,7 @@ class _FakeNotifier:
         self.raised = []
         self.closed = []
 
-    def notify(self, key, summary, body, actions):
+    def notify(self, key, summary, body, actions=()):
         self.raised.append((key, summary, body, actions))
 
     def close(self, key):
@@ -247,6 +251,103 @@ def test_notification_decision_after_the_request_timed_out_still_records(work_di
             await pilot.pause()
             allows = state.get_network(work_dir)["allow"]
             assert [a["domain"] for a in allows] == ["example.com"]
+
+    asyncio.run(scenario())
+
+
+def _record_wait(work_dir, key, reason="Waiting for your next prompt", age=0.0):
+    """Write what the container's hooks would write, `age` seconds ago."""
+    adir = attention.attention_dir(work_dir)
+    adir.mkdir(parents=True, exist_ok=True)
+    path = adir / key
+    path.write_text(reason + "\n")
+    when = time.time() - age
+    os.utime(path, (when, when))
+    return path
+
+
+def test_a_brief_wait_says_nothing(work_dir):
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude")
+            app._poll()
+            await pilot.pause()
+            assert notifier.raised == []
+
+    asyncio.run(scenario())
+
+
+def test_a_wait_that_outlasts_the_delay_notifies(work_dir):
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+
+            key, summary, body, actions = notifier.raised[0]
+            assert key.endswith("claude")
+            assert "claude" in summary
+            assert work_dir.name in body
+            # Nothing to click: answering means going to the terminal.
+            assert list(actions) == []
+
+    asyncio.run(scenario())
+
+
+def test_a_session_is_only_announced_once(work_dir):
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            for _ in range(3):
+                app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 1
+
+    asyncio.run(scenario())
+
+
+def test_answering_withdraws_the_notification(work_dir):
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            path = _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+            assert notifier.raised
+
+            path.unlink()  # the UserPromptSubmit hook: you answered
+            app._poll()
+            await pilot.pause()
+            assert notifier.closed == [notifier.raised[0][0]]
+
+            # A later wait is a new question, so it announces itself again.
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 2
+
+    asyncio.run(scenario())
+
+
+def test_each_agent_waits_for_itself(work_dir):
+    async def scenario():
+        app = _new_app(work_dir)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            _record_wait(work_dir, "claude@openrouter", age=1.0)
+            app._poll()
+            await pilot.pause()
+
+            assert len(notifier.raised) == 1
+            assert notifier.raised[0][0].endswith("claude")
 
     asyncio.run(scenario())
 

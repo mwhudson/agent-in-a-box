@@ -37,6 +37,12 @@ echo 41
 echo allow
 """
 
+# What a notification with no buttons looks like: notify-send prints the id
+# and exits at once, leaving the banner up.
+_NO_ACTIONS = """#!/bin/sh
+echo 41
+"""
+
 
 def _wait_until(predicate):
     """Spin until the stub has got far enough, rather than hang if it never does."""
@@ -153,6 +159,28 @@ def test_close_asks_the_daemon_to_withdraw_by_id(monkeypatch, clicked, tmp_path)
     assert cmd[0] == "/usr/bin/gdbus"
     assert cmd[-2] == "org.freedesktop.Notifications.CloseNotification"
     assert cmd[-1] == "41"
+
+
+def test_a_notification_without_buttons_can_still_be_withdrawn(
+    monkeypatch, clicked, tmp_path
+):
+    # notify-send exiting is not the banner going away — with no actions it
+    # exits immediately — so the notification must stay withdrawable.
+    monkeypatch.setenv("PATH", _fake_notify_send(tmp_path, "plain", _NO_ACTIONS))
+    notifier = notify.Notifier(clicked)
+    notifier._gdbus = "/usr/bin/gdbus"  # not run: subprocess.run is stubbed
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    notifier.notify("claude", "summary", "body")
+    (live,) = notifier._live.values()
+    live.proc.wait(5)
+    _wait_until(lambda: live.ident is not None)
+
+    notifier.close("claude")
+    assert calls and calls[0][-1] == "41"
+    assert notifier._live == {}
+    assert clicked.seen == []
 
 
 def test_bus_address_falls_back_to_the_socket_path(monkeypatch, tmp_path):

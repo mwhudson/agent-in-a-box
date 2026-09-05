@@ -39,10 +39,12 @@
 #     a Set button. Changes are saved to aiab.state and take effect on the next
 #     `aiab run` for the directory.
 #
-# A parked host is also raised as a desktop notification, with the same
-# Allow / 15m / Deny buttons on it, so a decision doesn't depend on this pane
-# being looked at — see aiab.notify, which no-ops when notify-send isn't
-# installed.
+# Two things are also raised as desktop notifications, so that neither depends
+# on this pane being looked at: a parked host, carrying the same
+# Allow / 15m / Deny buttons, and an agent that has been waiting on the user
+# for longer than aiab.attention.DELAY. See aiab.notify, which no-ops when
+# notify-send isn't installed, and aiab.attention for how a wait inside the
+# container gets out to here.
 #
 # Textual asks the terminal for mouse tracking itself, and tmux forwards mouse
 # input to the pane, so the buttons work inside the tmux layout `aiab run` sets
@@ -60,6 +62,7 @@ import contextlib
 import io
 import os
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -74,6 +77,7 @@ from textual.widgets import Button, Input, RichLog, Static
 
 from . import PROJECT, WORK_PREFIX
 from . import agents
+from . import attention
 from . import netproxy
 from . import netwatch
 from . import notify
@@ -91,6 +95,10 @@ _MIN_FORWARD_PORT = 1024
 _EXCLUDED_PORTS: frozenset[int] = frozenset({netproxy.PROXY_PORT})
 
 _VIEWS = ("network", "domains", "mounts", "ports", "limits")
+
+# Notifier keys are a single namespace, and a parked host's key is the host
+# itself; prefix the waiting-session ones so the two can never collide.
+_ATTENTION_PREFIX = "waiting:"
 
 
 def _read_listening_ports(init_pid: int) -> set[int]:
@@ -582,6 +590,9 @@ class MonitorApp(App[None]):
         # noticeable when nobody is looking at this pane. A no-op when
         # notify-send isn't installed (see aiab.notify).
         self._notifier = notify.Notifier(self._notification_action)
+        # Sessions we have already said are waiting; cleared when the wait
+        # ends, so the next one notifies again.
+        self._attention_shown: set[str] = set()
         self._init_pid: int | None = None
         self._known_ports: set[int] = set()
         self._ignored_ports: set[int] = set()
@@ -674,6 +685,7 @@ class MonitorApp(App[None]):
             self.refresh_bindings()
         self._refresh_policy()
         self._check_ports()
+        self._check_attention()
 
     def _decide(self, row: PendingRow, action: str) -> None:
         self._notifier.close(row.host)
@@ -715,6 +727,30 @@ class MonitorApp(App[None]):
                 (netwatch.DENY, "Deny"),
             ],
         )
+
+    def _check_attention(self) -> None:
+        """Notify about an agent that has been waiting on the user too long.
+
+        The agent records *since when* it has been waiting (aiab.attention);
+        the delay before that is worth interrupting for is decided here. A
+        wait that ends — you answered, or the session finished — takes its
+        notification down with it.
+        """
+        waiting = attention.waiting(self.work_dir)
+        for key in sorted(self._attention_shown - waiting.keys()):
+            self._notifier.close(_ATTENTION_PREFIX + key)
+            self._attention_shown.discard(key)
+        now = time.time()
+        for key, (since, reason) in sorted(waiting.items()):
+            if key in self._attention_shown or now - since < attention.DELAY:
+                continue
+            self._attention_shown.add(key)
+            self._notifier.notify(
+                _ATTENTION_PREFIX + key,
+                attention.summary(key),
+                attention.body(reason, self.work_dir),
+            )
+            self._write_log(f"{key}: {reason.lower()}")
 
     def _notification_action(self, host: str, action: str) -> None:
         """A decision clicked on a desktop notification (notifier thread).

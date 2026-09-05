@@ -124,12 +124,18 @@ class Notifier:
         return self._send is not None
 
     def notify(
-        self, key: str, summary: str, body: str, actions: Sequence[tuple[str, str]]
+        self,
+        key: str,
+        summary: str,
+        body: str,
+        actions: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Raise a notification for key, with (action, label) buttons.
 
         A second call for a key already on screen is ignored, so a caller can
         re-assert a pending question every poll without stacking up banners.
+        With no actions it is a statement rather than a question: nothing to
+        click, and close() is the only thing that takes it down.
         """
         if self._send is None:
             return
@@ -180,6 +186,11 @@ class Notifier:
         notification is still the live one for its key: if close() got there
         first the question has already been answered in the pane, and a click
         that raced with the withdrawal shouldn't overrule it.
+
+        Only a click retires the notification here. notify-send exiting does
+        not mean the banner is gone — one raised with no actions exits
+        immediately and stays on screen — so otherwise the entry is left for
+        close() to withdraw.
         """
         action: str | None = None
         if live.proc.stdout is not None:
@@ -193,11 +204,12 @@ class Notifier:
                     action = line
         live.proc.wait()
         with self._lock:
-            if self._live.get(key) is live:
+            current = self._live.get(key) is live
+            if current and action is not None:
+                # Acting on a notification closes it, so there is nothing
+                # left for close() to withdraw.
                 del self._live[key]
-            else:
-                action = None
-        if action is not None:
+        if current and action is not None:
             self._on_action(key, action)
 
     def close(self, key: str) -> None:

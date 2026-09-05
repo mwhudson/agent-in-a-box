@@ -48,6 +48,7 @@ from . import (
     STATE_MOUNT,
 )
 from . import agents
+from . import attention
 from . import lifecycle
 from . import lxd
 from . import netproxy
@@ -1063,6 +1064,11 @@ def run(
         # too; read-only mounts can't be written, so they need no guard.
         if not no_git_guard:
             _apply_git_guard(session, work_dir, container_cwd, applied_mounts)
+
+        # Let the agent tell the host when it is waiting on the user, so the
+        # monitor can say so on the desktop (see aiab.attention).
+        if cfg.attention:
+            attention.install(session, work_dir, home_key)
 
         env = _session_env(
             session,

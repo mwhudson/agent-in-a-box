@@ -465,6 +465,32 @@ This needs `notify-send` on your `PATH` — `apt install libnotify-bin`.
 Without it, or without a notification daemon to talk to, nothing is raised and
 the pane and the bell are the whole UI, exactly as before.
 
+### Waiting agents
+
+The monitor also notices when the *agent* is waiting on you — its turn ended,
+or it stopped to ask something — and says so on the desktop once the wait has
+gone on for 15 seconds. Answering the agent (or the session ending) withdraws
+the notification. The log line in the Network tab records it too.
+
+This is Claude only, and it works by hooks: `aiab run` writes a Claude Code
+managed-settings drop-in into the session container which records "waiting
+since" into the directory's state dir (mounted at `/aiab`), and the monitor —
+which is on the host — reads it from there. The host's session bus is
+deliberately *not* passed into the container; one file crossing the boundary
+is the whole channel.
+
+Managed settings are a separate source from `~/.claude/settings.json`, and
+hooks from different sources are concatenated rather than overridden, so these
+hooks neither displace your own nor can be displaced by them. `aiab` claims
+one drop-in file, `50-aiab-attention.json`, not
+`/etc/claude-code/managed-settings.json` itself.
+
+The 15 seconds is aiab's own, not Claude Code's idle threshold — the hooks
+only record *when* the wait started, and the monitor decides when that has
+gone on long enough. Note that "you noticed" means "you sent a prompt": if you
+are reading the output for 20 seconds before replying, you get a notification
+anyway.
+
 ### Domains tab
 
 The domains tab is where you revisit decisions already made. It lists every

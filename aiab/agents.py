@@ -131,6 +131,10 @@ class Agent:
     extra_args: list[str] = field(default_factory=list)
     # Bind-mount the host Wayland socket (clipboard support).
     wayland: bool = False
+    # Install the hooks that tell the host when this agent is waiting on the
+    # user, so `aiab monitor` can raise a desktop notification (see
+    # aiab.attention). Claude Code only: it is the mechanism that carries it.
+    attention: bool = False
     # Versioned config (host_path, container_path) pairs bind-mounted onto the
     # container home.
     overlays: list[tuple[Path, str]] = field(default_factory=list)
@@ -231,6 +235,8 @@ AGENTS: dict[str, Agent] = {
         # Claude shells out to wl-clipboard (wl-copy/wl-paste) for clipboard
         # access on Wayland — image paste in, copy out.
         wayland=True,
+        # Claude Code hooks can report a wait to the host (see aiab.attention).
+        attention=True,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
         overlays=_overlays(
             ("agent-config/claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),

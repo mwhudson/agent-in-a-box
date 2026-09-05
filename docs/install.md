@@ -17,8 +17,9 @@
   allow/deny prompts that restricted mode relies on do not.
 - Optionally `notify-send` (`apt install libnotify-bin`), which lets
   [`aiab monitor`](commands.md#network-tab) raise a parked host as a desktop
-  notification with Allow/Deny buttons on it. Without it the monitor pane is
-  the only place a request shows up.
+  notification with Allow/Deny buttons on it, and say when an agent has been
+  [waiting on you](commands.md#waiting-agents). Without it the monitor pane is
+  the only place either shows up.
 
 ## Install
 
