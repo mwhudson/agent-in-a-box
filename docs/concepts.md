@@ -138,10 +138,10 @@ Each project directory also gets a persistent state directory on the host
 every agent. It holds per-directory state the *agent* maintains that should
 survive container recreation; today that's the container setup script.
 
-It doubles as the one channel from a session back out to the host. Hooks in
-the container write `/aiab/attention/<agent>` when the agent starts waiting on
-you and delete it when you answer, and `aiab monitor` — which runs on the host
-— reads that to raise a desktop notification (see
+It doubles as the one channel from a session back out to the host. Hooks (or
+an opencode plugin) in the container write `/aiab/attention/<agent>` when the
+agent starts waiting on you and delete it when you answer, and `aiab monitor`
+— which runs on the host — reads that to raise a desktop notification (see
 [waiting agents](commands.md#waiting-agents)). A file in a directory both
 sides already share is the whole mechanism: nothing of the host's session is
 passed into the container to make it work.

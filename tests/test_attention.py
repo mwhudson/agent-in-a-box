@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import aiab.agents as agents
 import aiab.attention as attention
 import aiab.state as state
 
@@ -80,7 +81,7 @@ def test_a_profile_session_gets_its_own_file():
 
 def test_install_writes_the_drop_in(work_dir):
     container: Any = _FakeContainer()
-    attention.install(container, work_dir, "claude")
+    attention.install(container, work_dir, "claude", attention.HOOKS)
     cmd, stdin = container.execs[0]
     assert cmd[0] == "sh"
     assert attention.DROP_IN_PATH in cmd[2]
@@ -92,7 +93,7 @@ def test_install_clears_a_wait_left_by_a_killed_session(work_dir):
     (attention.attention_dir(work_dir) / "claude").write_text("Waiting\n")
 
     container: Any = _FakeContainer()
-    attention.install(container, work_dir, "claude")
+    attention.install(container, work_dir, "claude", attention.HOOKS)
     assert attention.waiting(work_dir) == {}
 
 
@@ -101,8 +102,54 @@ def test_install_leaves_another_agents_wait_alone(work_dir):
     (attention.attention_dir(work_dir) / "opencode").write_text("Waiting\n")
 
     container: Any = _FakeContainer()
-    attention.install(container, work_dir, "claude")
+    attention.install(container, work_dir, "claude", attention.HOOKS)
     assert set(attention.waiting(work_dir)) == {"opencode"}
+
+
+def test_install_writes_nothing_for_a_plugin_agent(work_dir):
+    # opencode's plugin arrives as an overlay, mounted fresh every run; there
+    # is nothing to write into the container.
+    container: Any = _FakeContainer()
+    attention.install(container, work_dir, "opencode", attention.PLUGIN)
+    assert container.execs == []
+
+
+def test_install_clears_a_plugin_agents_stale_wait(work_dir):
+    attention.attention_dir(work_dir).mkdir(parents=True)
+    (attention.attention_dir(work_dir) / "opencode").write_text("Waiting\n")
+
+    container: Any = _FakeContainer()
+    attention.install(container, work_dir, "opencode", attention.PLUGIN)
+    assert attention.waiting(work_dir) == {}
+
+
+# ---------------------------------------------------------------------------
+# the plugin
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_is_told_which_file_to_write():
+    assert attention.env("opencode", attention.PLUGIN) == {
+        "AIAB_ATTENTION": "/aiab/attention/opencode"
+    }
+    # A profile session writes its own file, same as a hooked agent's.
+    assert attention.env("opencode@zen", attention.PLUGIN) == {
+        "AIAB_ATTENTION": "/aiab/attention/opencode@zen"
+    }
+
+
+def test_hook_agents_need_no_environment():
+    assert attention.env("claude", attention.HOOKS) == {}
+
+
+def test_plugin_reports_the_same_reasons_the_monitor_shows():
+    # The plugin is the container half of this module and writes the reason
+    # text itself; the two have to agree on the wording.
+    plugin = agents.REPO_ROOT / "agent-config/opencode/plugins/attention.js"
+    source = plugin.read_text()
+    assert attention._WAITING_FOR_PROMPT in source
+    assert attention._WAITING_FOR_ANSWER in source
+    assert attention.ENV_VAR in source
 
 
 # ---------------------------------------------------------------------------

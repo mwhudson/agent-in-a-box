@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import CONTAINER_HOME
+from . import CONTAINER_HOME, attention
 from .provision import Step
 
 # Repo root (the directory containing this package), used to locate the
@@ -131,10 +131,10 @@ class Agent:
     extra_args: list[str] = field(default_factory=list)
     # Bind-mount the host Wayland socket (clipboard support).
     wayland: bool = False
-    # Install the hooks that tell the host when this agent is waiting on the
-    # user, so `aiab monitor` can raise a desktop notification (see
-    # aiab.attention). Claude Code only: it is the mechanism that carries it.
-    attention: bool = False
+    # How this agent tells the host it is waiting on the user, so `aiab
+    # monitor` can raise a desktop notification: one of attention.MECHANISMS,
+    # or empty for an agent that has no way to say (see aiab.attention).
+    attention: str = ""
     # Versioned config (host_path, container_path) pairs bind-mounted onto the
     # container home.
     overlays: list[tuple[Path, str]] = field(default_factory=list)
@@ -236,7 +236,7 @@ AGENTS: dict[str, Agent] = {
         # access on Wayland — image paste in, copy out.
         wayland=True,
         # Claude Code hooks can report a wait to the host (see aiab.attention).
-        attention=True,
+        attention=attention.HOOKS,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
         overlays=_overlays(
             ("agent-config/claude/CLAUDE.md", f"{CONTAINER_HOME}/.claude/CLAUDE.md"),
@@ -307,6 +307,9 @@ AGENTS: dict[str, Agent] = {
             ),
         ],
         wayland=True,
+        # An opencode plugin can report a wait to the host (see
+        # aiab.attention); the plugin itself is the overlay below.
+        attention=attention.PLUGIN,
         prepare=_ensure_opencode_permissive_config,
         # opencode.ai for auth/updates, models.dev for its model catalogue,
         # anthropic.com for the default provider. Using a different provider
@@ -320,6 +323,14 @@ AGENTS: dict[str, Agent] = {
             (
                 "agent-config/opencode/commands",
                 f"{CONTAINER_HOME}/.config/opencode/commands",
+            ),
+            # opencode loads every {plugin,plugins}/*.{ts,js} under a config
+            # directory, the global one included. Overlaid as a single file
+            # rather than the directory, so a plugin of your own dropped into
+            # the shared config dir is still loaded alongside it.
+            (
+                "agent-config/opencode/plugins/attention.js",
+                f"{CONTAINER_HOME}/.config/opencode/plugins/aiab-attention.js",
             ),
         ),
         # .config/opencode is opencode's global config layer, and doubles as an

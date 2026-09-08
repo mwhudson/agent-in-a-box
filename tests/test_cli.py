@@ -11,7 +11,7 @@ import pytest
 import click
 
 from aiab import CONTAINER_HOME
-from aiab import agents, profiles, state
+from aiab import agents, attention, profiles, state
 
 from aiab.cli import (
     _agent_command,
@@ -307,12 +307,12 @@ class _EnvFakeContainer:
         return {"WAYLAND_DISPLAY": "wayland-0"}
 
 
-def _env_for(monkeypatch, dir_env, profile_env):
+def _env_for(monkeypatch, dir_env, profile_env, agent="claude"):
     """Run _session_env with a stubbed directory env and no proxy."""
     monkeypatch.setattr(state, "get_env", lambda work_dir, agent: dir_env)
-    cfg = agents.get("claude")
+    cfg = agents.get(agent)
     container: Any = _EnvFakeContainer()
-    return _session_env(container, cfg, {}, Path("/tmp/x"), "claude", profile_env)
+    return _session_env(container, cfg, {}, Path("/tmp/x"), agent, agent, profile_env)
 
 
 def test_session_env_includes_profile_vars(monkeypatch):
@@ -331,6 +331,18 @@ def test_session_env_aiab_vars_beat_both(monkeypatch):
     # HOME/PATH are managed by aiab and can't be displaced by either source.
     env = _env_for(monkeypatch, {"HOME": "/nope"}, {"HOME": "/also-nope"})
     assert env["HOME"] == CONTAINER_HOME
+
+
+def test_session_env_says_where_a_plugin_reports_a_wait(monkeypatch):
+    # opencode's plugin is one file serving every session, so which file to
+    # write is the session's to say (see aiab.attention).
+    env = _env_for(monkeypatch, {}, {}, agent="opencode")
+    assert env[attention.ENV_VAR] == "/aiab/attention/opencode"
+
+
+def test_session_env_leaves_hook_agents_without_it(monkeypatch):
+    # Claude's drop-in is generated per session and has the name in it already.
+    assert attention.ENV_VAR not in _env_for(monkeypatch, {}, {})
 
 
 # ---------------------------------------------------------------------------

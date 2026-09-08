@@ -805,6 +805,7 @@ def _session_env(
     proxy_env: dict[str, str],
     work_dir: Path,
     agent: str,
+    home_key: str,
     profile_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Environment for the agent or shell process inside the container.
@@ -812,13 +813,15 @@ def _session_env(
     A profile's vars go in first and the directory's recorded `aiab env` vars
     on top, so the precedence is dir > profile: a profile is a reusable
     default, and a variable set for one directory is the more specific
-    statement. Both are then overlaid with HOME, PATH, the network-proxy vars
-    and the Wayland socket, which aiab manages and which stay authoritative.
+    statement. Both are then overlaid with HOME, PATH, the network-proxy vars,
+    the Wayland socket and where to report a wait, which aiab manages and which
+    stay authoritative.
     """
     env = dict(profile_env or {})
     env.update(state.get_env(work_dir, agent))
     env["HOME"] = CONTAINER_HOME
     env["PATH"] = _CONTAINER_PATH
+    env.update(attention.env(home_key, cfg.attention))
     env.update(proxy_env)
     if cfg.wayland:
         env.update(session.mount_wayland(CONTAINER_USER))
@@ -1068,7 +1071,7 @@ def run(
         # Let the agent tell the host when it is waiting on the user, so the
         # monitor can say so on the desktop (see aiab.attention).
         if cfg.attention:
-            attention.install(session, work_dir, home_key)
+            attention.install(session, work_dir, home_key, cfg.attention)
 
         env = _session_env(
             session,
@@ -1076,6 +1079,7 @@ def run(
             proxy_env,
             work_dir,
             agent,
+            home_key,
             profile.get("env") if profile else None,
         )
         with _monitor_pane(work_dir, session.name, enabled=use_tmux):

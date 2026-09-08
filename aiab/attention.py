@@ -24,31 +24,40 @@
 # The agent runs in the container and the notification has to be raised on the
 # host, so something has to cross the boundary. The channel is one the
 # container already has: the directory's state dir, mounted read-write at
-# STATE_MOUNT (see aiab.state.dir_state_dir). Claude Code hooks write a file
-# named for the session under STATE_MOUNT/attention, and `aiab monitor` — which
-# is on the host, and already polling — reads it. Nothing else is opened up;
-# in particular the host's D-Bus session bus stays outside the container, where
-# a notification daemon is the least of what it would hand an agent.
+# STATE_MOUNT (see aiab.state.dir_state_dir). The agent writes a file named for
+# the session under STATE_MOUNT/attention, and `aiab monitor` — which is on the
+# host, and already polling — reads it. Nothing else is opened up; in
+# particular the host's D-Bus session bus stays outside the container, where a
+# notification daemon is the least of what it would hand an agent.
 #
-# The hooks are delivered as a Claude Code *managed settings* drop-in, written
-# into the session container at STATE_DROP_IN. That matters for staying out of
-# the user's way: managed settings are a separate source from
-# ~/.claude/settings.json, and hook lists across sources are concatenated
-# rather than overridden, so these hooks neither displace the user's own nor
-# can be displaced by them. The drop-in directory means aiab doesn't have to
-# own /etc/claude-code/managed-settings.json either.
+# Getting the agent to write that file is the part that isn't shared: the
+# mechanism belongs to the agent, so there is one per agent (see MECHANISMS,
+# and Agent.attention for which one an agent uses).
 #
-# Three hooks, and the timing is deliberately *not* theirs:
+# HOOKS (Claude Code) is a *managed settings* drop-in, written into the session
+# container at DROP_IN_PATH. That matters for staying out of the user's way:
+# managed settings are a separate source from ~/.claude/settings.json, and hook
+# lists across sources are concatenated rather than overridden, so these hooks
+# neither displace the user's own nor can be displaced by them. The drop-in
+# directory means aiab doesn't have to own
+# /etc/claude-code/managed-settings.json either. Three hooks:
 #
 #   * Stop — the turn ended, so the agent is now waiting for a prompt;
 #   * Notification — it stopped mid-turn to ask for something;
 #   * UserPromptSubmit / SessionEnd — you answered, or the session is over.
 #
-# Nothing here waits 15 seconds. The hooks only record *since when* the agent
-# has been waiting, and the host decides when that has gone on long enough
-# (DELAY) — so "and I hadn't noticed" is a host-side policy that can change
-# without touching a container, and Claude Code's own idle threshold is left
-# alone.
+# PLUGIN (opencode) is agent-config/opencode/plugins/attention.js, overlaid
+# into opencode's global plugin directory like the rest of the versioned config
+# this repo ships (see aiab.agents). It watches the same three moments —
+# session.idle, permission.updated, chat.message/dispose — but because it is
+# one static file serving every session of that agent, the file it writes is
+# named by ENV_VAR rather than baked in.
+#
+# Nothing on the container side waits 15 seconds. The hooks only record *since
+# when* the agent has been waiting, and the host decides when that has gone on
+# long enough (DELAY) — so "and I hadn't noticed" is a host-side policy that
+# can change without touching a container, and the agent's own idle threshold
+# is left alone.
 
 from __future__ import annotations
 
@@ -64,6 +73,17 @@ from .state import dir_state_path
 # Long enough not to fire while you are still reading the answer, short enough
 # to be the reason you look up.
 DELAY = 15.0
+
+# How an agent is made to report a wait. Named here rather than in aiab.agents
+# because what each one means is this module's business; the registry only says
+# which one an agent uses.
+HOOKS = "hooks"  # Claude Code: a managed-settings drop-in (DROP_IN_PATH).
+PLUGIN = "plugin"  # opencode: a plugin, overlaid with the versioned config.
+MECHANISMS = (HOOKS, PLUGIN)
+
+# Where the PLUGIN mechanism is told to write. One plugin file serves every
+# session, so the session's own file has to be named for it in the environment.
+ENV_VAR = "AIAB_ATTENTION"
 
 # Where the waiting-session files live: a directory inside the per-directory
 # state dir, so it is the same place on both sides of the mount.
@@ -166,14 +186,16 @@ def drop_in(key: str) -> str:
     return json.dumps(settings, indent=2) + "\n"
 
 
-def install(container: Container, directory: StrPath, key: str) -> None:
-    """Install the hooks in a session container and clear any stale wait.
+def install(container: Container, directory: StrPath, key: str, mechanism: str) -> None:
+    """Prepare a session container to report its waits, and clear any stale one.
 
-    Written on every run rather than baked into the template: the template is
-    only rebuilt on `aiab upgrade-templates`, and a session container outlives
-    that, so a template-time install would reach existing sessions only after
-    a container was recreated. It is one small file, so writing it each time
-    costs a single exec and is always the version this checkout ships.
+    The HOOKS drop-in is written on every run rather than baked into the
+    template: the template is only rebuilt on `aiab upgrade-templates`, and a
+    session container outlives that, so a template-time install would reach
+    existing sessions only after a container was recreated. It is one small
+    file, so writing it each time costs a single exec and is always the version
+    this checkout ships. PLUGIN needs no write at all — the plugin arrives as
+    an overlay, mounted fresh from this checkout every run.
 
     The stale clear matters because the file is the container's to remove: a
     session container that was killed rather than exited leaves its last wait
@@ -181,11 +203,24 @@ def install(container: Container, directory: StrPath, key: str) -> None:
     wait that ended days ago.
     """
     attention_dir(directory).mkdir(parents=True, exist_ok=True)
-    container.exec(
-        ["sh", "-c", f"mkdir -p {_DROP_IN_DIR} && cat > {DROP_IN_PATH}"],
-        input=drop_in(key).encode(),
-    )
+    if mechanism == HOOKS:
+        container.exec(
+            ["sh", "-c", f"mkdir -p {_DROP_IN_DIR} && cat > {DROP_IN_PATH}"],
+            input=drop_in(key).encode(),
+        )
     (attention_dir(directory) / key).unlink(missing_ok=True)
+
+
+def env(key: str, mechanism: str) -> dict[str, str]:
+    """Environment a session needs to report its waits.
+
+    Only PLUGIN wants anything: the plugin is one file shared by every session
+    of that agent, so which file to write is the session's to say. The HOOKS
+    drop-in is generated per session and has the name in it already.
+    """
+    if mechanism != PLUGIN:
+        return {}
+    return {ENV_VAR: f"{_CONTAINER_DIR}/{key}"}
 
 
 def summary(key: str) -> str:

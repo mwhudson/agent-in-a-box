@@ -472,24 +472,34 @@ or it stopped to ask something — and says so on the desktop once the wait has
 gone on for 15 seconds. Answering the agent (or the session ending) withdraws
 the notification. The log line in the Network tab records it too.
 
-This is Claude only, and it works by hooks: `aiab run` writes a Claude Code
-managed-settings drop-in into the session container which records "waiting
-since" into the directory's state dir (mounted at `/aiab`), and the monitor —
+This works for Claude and opencode. Either way the agent records "waiting
+since" into the directory's state dir (mounted at `/aiab`) and the monitor —
 which is on the host — reads it from there. The host's session bus is
 deliberately *not* passed into the container; one file crossing the boundary
 is the whole channel.
 
-Managed settings are a separate source from `~/.claude/settings.json`, and
-hooks from different sources are concatenated rather than overridden, so these
-hooks neither displace your own nor can be displaced by them. `aiab` claims
-one drop-in file, `50-aiab-attention.json`, not
-`/etc/claude-code/managed-settings.json` itself.
+How the agent is made to record it is the agent's own mechanism:
 
-The 15 seconds is aiab's own, not Claude Code's idle threshold — the hooks
-only record *when* the wait started, and the monitor decides when that has
-gone on long enough. Note that "you noticed" means "you sent a prompt": if you
-are reading the output for 20 seconds before replying, you get a notification
-anyway.
+- **Claude** — `aiab run` writes a managed-settings drop-in into the session
+  container. Managed settings are a separate source from
+  `~/.claude/settings.json`, and hooks from different sources are concatenated
+  rather than overridden, so these hooks neither displace your own nor can be
+  displaced by them. `aiab` claims one drop-in file,
+  `50-aiab-attention.json`, not `/etc/claude-code/managed-settings.json`
+  itself.
+- **opencode** — a plugin, `aiab-attention.js`, mounted into opencode's global
+  plugin directory alongside the `AGENTS.md` and slash commands this repo
+  ships. It is overlaid as a single file, so plugins of your own in
+  `~/.config/opencode/plugins/` are still loaded. It watches `session.idle`
+  for the end of a turn and `permission.updated` for a mid-turn ask, and
+  ignores a subagent's session going idle — that is the middle of the turn you
+  are watching, not a wait on you.
+
+The 15 seconds is aiab's own, not the agent's idle threshold — the container
+side only records *when* the wait started, and the monitor decides when that
+has gone on long enough. Note that "you noticed" means "you sent a prompt": if
+you are reading the output for 20 seconds before replying, you get a
+notification anyway.
 
 ### Domains tab
 
