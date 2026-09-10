@@ -35,11 +35,33 @@ def work_dir(tmp_path):
     return work
 
 
-def _new_app(work_dir):
+def _new_app(work_dir, looking=None):
     """A MonitorApp with live container ops stubbed out (no LXD in tests)."""
     app = monitor_tui.MonitorApp(work_dir)
     app._containers = lambda: []  # mount edits stay state-only, no lxc calls
+    # Never ask the real tmux where the user is: a test run from inside tmux
+    # would otherwise read (and change options on) the developer's own server.
+    app._focus = looking if looking is not None else _FakeFocus()
     return app
+
+
+class _FakeFocus:
+    """Stands in for aiab.focus.Focus: whatever the test says you are doing.
+
+    Defaults to the answer a terminal that can't report focus gives, which is
+    what every test written before focus mattered assumes.
+    """
+
+    def __init__(self, focused=None):
+        self.focused = focused
+        self.typed = False
+        self.looks = 0
+
+    def look(self):
+        self.looks += 1
+        # A keystroke is news once, exactly as the real one reports it.
+        typed, self.typed = self.typed, False
+        return monitor_tui.focus.Look(focused=self.focused, typed=typed)
 
 
 def _pending_hosts_shown(app):
@@ -348,6 +370,120 @@ def test_each_agent_waits_for_itself(work_dir):
 
             assert len(notifier.raised) == 1
             assert notifier.raised[0][0].endswith("claude")
+
+    asyncio.run(scenario())
+
+
+def test_a_wait_you_are_looking_at_says_nothing(work_dir):
+    async def scenario():
+        app = _new_app(work_dir, looking=_FakeFocus(focused=True))
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+            # The terminal is right there in front of you; a banner about it
+            # would be telling you what you can see.
+            assert notifier.raised == []
+
+    asyncio.run(scenario())
+
+
+def test_looking_at_the_terminal_withdraws_the_notification(work_dir):
+    async def scenario():
+        looking = _FakeFocus(focused=False)
+        app = _new_app(work_dir, looking=looking)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+            assert notifier.raised
+
+            looking.focused = True
+            app._poll()
+            await pilot.pause()
+            assert notifier.closed == [notifier.raised[0][0]]
+
+    asyncio.run(scenario())
+
+
+def test_looking_away_again_re_arms_the_wait(work_dir, monkeypatch):
+    # A glance is not an answer: the agent is still waiting, so once you are
+    # gone again the countdown starts over.
+    monkeypatch.setattr(attention, "DELAY", 0.05)
+
+    async def scenario():
+        looking = _FakeFocus(focused=True)
+        app = _new_app(work_dir, looking=looking)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=1.0)
+            app._poll()
+            await pilot.pause()
+            assert notifier.raised == []
+
+            looking.focused = False
+            app._poll()  # the moment you leave, not DELAY after the wait began
+            await pilot.pause()
+            assert notifier.raised == []
+
+            time.sleep(attention.DELAY * 2)
+            app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_key_pressed_while_looking_settles_it(work_dir, monkeypatch):
+    # You saw it and did something about it, in your own time. Walking away
+    # from that is not worth interrupting you over again.
+    monkeypatch.setattr(attention, "DELAY", 0.05)
+
+    async def scenario():
+        looking = _FakeFocus(focused=True)
+        app = _new_app(work_dir, looking=looking)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=1.0)
+            looking.typed = True
+            app._poll()
+            await pilot.pause()
+
+            looking.focused = False
+            time.sleep(attention.DELAY * 2)
+            for _ in range(3):
+                app._poll()
+            await pilot.pause()
+            assert notifier.raised == []
+
+            # A fresh wait — the agent asking something else — still does.
+            _record_wait(work_dir, "claude", reason="Waiting for a response")
+            time.sleep(attention.DELAY * 2)
+            app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 1
+
+    asyncio.run(scenario())
+
+
+def test_focus_is_not_asked_about_while_nobody_waits(work_dir):
+    async def scenario():
+        looking = _FakeFocus(focused=False)
+        app = _new_app(work_dir, looking=looking)
+        app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            for _ in range(3):
+                app._poll()
+            await pilot.pause()
+            # No wait, no question for tmux — which is most of the time.
+            assert looking.looks == 0
+
+            _record_wait(work_dir, "claude")
+            app._poll()
+            await pilot.pause()
+            assert looking.looks == 1
 
     asyncio.run(scenario())
 

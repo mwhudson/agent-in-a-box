@@ -43,8 +43,9 @@
 # on this pane being looked at: a parked host, carrying the same
 # Allow / 15m / Deny buttons, and an agent that has been waiting on the user
 # for longer than aiab.attention.DELAY. See aiab.notify, which no-ops when
-# notify-send isn't installed, and aiab.attention for how a wait inside the
-# container gets out to here.
+# notify-send isn't installed, aiab.attention for how a wait inside the
+# container gets out to here, and aiab.focus for why looking at the terminal
+# takes a waiting agent's notification back down again.
 #
 # Textual asks the terminal for mouse tracking itself, and tmux forwards mouse
 # input to the pane, so the buttons work inside the tmux layout `aiab run` sets
@@ -64,6 +65,7 @@ import os
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from textual import events
@@ -78,6 +80,7 @@ from textual.widgets import Button, Input, RichLog, Static
 from . import PROJECT, WORK_PREFIX
 from . import agents
 from . import attention
+from . import focus
 from . import netproxy
 from . import netwatch
 from . import notify
@@ -99,6 +102,24 @@ _VIEWS = ("network", "domains", "mounts", "ports", "limits")
 # Notifier keys are a single namespace, and a parked host's key is the host
 # itself; prefix the waiting-session ones so the two can never collide.
 _ATTENTION_PREFIX = "waiting:"
+
+
+@dataclass
+class _Wait:
+    """One waiting session, as this pane is keeping track of it.
+
+    `armed` is when its countdown to a notification started, which is not
+    always when the wait itself did: looking at the window and then away
+    starts it again. `seen` is whether the window has had your attention since
+    then, and `typed` whether you pressed a key while it did — see
+    MonitorApp._check_attention for what each of those buys.
+    """
+
+    since: float
+    armed: float
+    shown: bool = False
+    seen: bool = False
+    typed: bool = False
 
 
 def _read_listening_ports(init_pid: int) -> set[int]:
@@ -590,9 +611,13 @@ class MonitorApp(App[None]):
         # noticeable when nobody is looking at this pane. A no-op when
         # notify-send isn't installed (see aiab.notify).
         self._notifier = notify.Notifier(self._notification_action)
-        # Sessions we have already said are waiting; cleared when the wait
-        # ends, so the next one notifies again.
-        self._attention_shown: set[str] = set()
+        # What each waiting session has done since it started waiting, keyed
+        # by its home key; dropped when the wait ends, so the next one
+        # announces itself again.
+        self._waits: dict[str, _Wait] = {}
+        # Whether the window this pane is in has the user's attention, which
+        # decides whether a wait in it is worth a notification at all.
+        self._focus = focus.Focus()
         self._init_pid: int | None = None
         self._known_ports: set[int] = set()
         self._ignored_ports: set[int] = set()
@@ -735,16 +760,50 @@ class MonitorApp(App[None]):
         the delay before that is worth interrupting for is decided here. A
         wait that ends — you answered, or the session finished — takes its
         notification down with it.
+
+        So does looking: aiab.focus says when the agent's window has your
+        attention, and a banner about something you are looking at is noise.
+        Looking away again re-arms it, on the grounds that a glance is not an
+        answer and the agent is still sitting there — unless you pressed a key
+        while you were there, which is you dealing with it in your own time
+        and not something to interrupt you about twice. Where focus cannot be
+        established at all (no tmux, a terminal that doesn't report it) every
+        wait behaves as it did before any of this: announced once, DELAY after
+        it started.
+
+        Nothing is asked of tmux while no agent is waiting, which is nearly
+        all the time.
         """
         waiting = attention.waiting(self.work_dir)
-        for key in sorted(self._attention_shown - waiting.keys()):
-            self._notifier.close(_ATTENTION_PREFIX + key)
-            self._attention_shown.discard(key)
+        for key in sorted(self._waits.keys() - waiting.keys()):
+            if self._waits.pop(key).shown:
+                self._notifier.close(_ATTENTION_PREFIX + key)
+        if not waiting:
+            return
+        look = self._focus.look()
         now = time.time()
         for key, (since, reason) in sorted(waiting.items()):
-            if key in self._attention_shown or now - since < attention.DELAY:
+            wait = self._waits.get(key)
+            if wait is None or wait.since != since:
+                # One we haven't weighed up before: either the first wait of
+                # this session or a rewritten file, which means the agent is
+                # waiting on something else now and the question is new.
+                wait = self._waits[key] = _Wait(since=since, armed=since)
+            if look.focused:
+                wait.seen = True
+                wait.typed = wait.typed or look.typed
+                if wait.shown:
+                    self._notifier.close(_ATTENTION_PREFIX + key)
+                    wait.shown = False
                 continue
-            self._attention_shown.add(key)
+            if wait.seen:
+                # You looked, and you are somewhere else again with the agent
+                # still waiting: start the clock over.
+                wait.seen = False
+                wait.armed = now
+            if wait.shown or wait.typed or now - wait.armed < attention.DELAY:
+                continue
+            wait.shown = True
             self._notifier.notify(
                 _ATTENTION_PREFIX + key,
                 attention.summary(key),

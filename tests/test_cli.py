@@ -3,6 +3,7 @@
 # Only the host-side filesystem helpers are covered here; the parts that drive
 # LXD (containers, devices) need a live LXD and are exercised manually.
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from aiab.cli import (
     _resolve_profile,
     _session_env,
     _shared_home_mounts,
+    _reexec_under_tmux,
     _tmux_group,
     _tmux_group_member,
     _tmux_joined_nothing,
@@ -491,6 +493,36 @@ def test_tmux_joined_nothing_false_when_a_real_window_was_shared():
     # window — killing the session then would kill the agent.
     assert _tmux_joined_nothing(["/tmp/aiab-run-xyz.sh"]) is False
     assert _tmux_joined_nothing(["/tmp/aiab-run-xyz.sh", ""]) is False
+
+
+def test_reexec_turns_focus_reporting_on_before_the_terminal_attaches(
+    monkeypatch, tmp_path
+):
+    # tmux only asks a terminal to report focus while it is working out what
+    # that terminal can do, just after it attaches — so an enable that lands
+    # afterwards never reaches it, and the monitor can never tell whether you
+    # are looking at a waiting agent (see aiab.focus).
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    # The wrapper script outlives a session that is still running, so keep the
+    # temp files this makes out of /tmp.
+    monkeypatch.setattr("aiab.cli.tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr("aiab.cli.subprocess.run", fake_run)
+    monkeypatch.setattr("aiab.cli.focus.enable", lambda: calls.append(("enable",)))
+    with pytest.raises(SystemExit):
+        _reexec_under_tmux("aiab-claude-proj", "claude")
+
+    attaching = [
+        i
+        for i, call in enumerate(calls)
+        if "new-session" in call or "attach-session" in call
+    ]
+    assert attaching, calls
+    assert calls.index(("enable",)) < attaching[0]
 
 
 def test_tmux_joined_nothing_false_when_the_window_list_is_unreadable():

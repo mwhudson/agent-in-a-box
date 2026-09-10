@@ -497,9 +497,38 @@ How the agent is made to record it is the agent's own mechanism:
 
 The 15 seconds is aiab's own, not the agent's idle threshold — the container
 side only records *when* the wait started, and the monitor decides when that
-has gone on long enough. Note that "you noticed" means "you sent a prompt": if
-you are reading the output for 20 seconds before replying, you get a
-notification anyway.
+has gone on long enough.
+
+Looking at the agent counts as noticing it. Neither Claude's hooks nor
+opencode's plugin events can say when you focus a terminal or press a key —
+both stop at "you answered" — but they don't have to, because the notification
+is raised on the host and the terminal is on the host too. The monitor asks
+tmux (which `aiab run` wraps the agent in anyway) which window each attached
+client is showing, whether that client's terminal has focus, and when it last
+received input. From that:
+
+- a wait you are already looking at is never announced;
+- a notification that is up is withdrawn the moment you look at the window;
+- looking away again with the agent still waiting starts the 15 seconds over —
+  a glance is not an answer — **unless** you pressed a key while you were
+  there, which is taken as you dealing with it in your own time, and that wait
+  is not raised again.
+
+This needs tmux's `focus-events`, which is off by default: with it off tmux
+never asks the terminal to report focus and every client looks permanently
+focused. `aiab run` turns it on just before it attaches your terminal, which
+is the only moment that works — tmux asks a terminal to start reporting focus
+while it is working out what that terminal can do, once, as the client
+attaches, so switching the option on later never reaches it. It is left on
+afterwards: "off" is not aiab's to restore, since you may have set it and
+another session may be relying on it. It is a server-wide option, the only
+scope tmux has for it, so this applies to a tmux server that was yours rather
+than one `aiab run` started.
+
+Where focus can't be established at all — no tmux, or a terminal that has not
+been seen to report focus, which includes a run started inside a tmux session
+you were already attached to — every wait behaves exactly as it did before any
+of this: announced once, 15 seconds in.
 
 ### Domains tab
 

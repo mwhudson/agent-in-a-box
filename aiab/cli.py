@@ -49,6 +49,7 @@ from . import (
 )
 from . import agents
 from . import attention
+from . import focus
 from . import lifecycle
 from . import lxd
 from . import netproxy
@@ -363,7 +364,9 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     Mouse mode is set on our session only (no -g, so a user's own tmux
     sessions and config are untouched): clicks then switch pane focus, and
     reach the watch pane's allow/deny buttons even while the agent pane has
-    focus.
+    focus. Focus reporting, which has no scope narrower than the server, is
+    turned on just before the terminal attaches — the only moment it can be
+    (see aiab.focus).
     """
     inner = shlex.join([_self_argv0(), *sys.argv[1:]])
 
@@ -405,6 +408,12 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     finally:
         os.close(script_fd)
     os.chmod(script_path, 0o700)
+
+    # Ask tmux to have this terminal report focus, before it attaches below.
+    # That is the only moment tmux passes the request on (see aiab.focus), and
+    # without it the monitor cannot tell whether you are looking at a waiting
+    # agent, so it never says one is.
+    focus.enable()
 
     if member is not None:
         # Detached first, so our window exists before this terminal attaches and
