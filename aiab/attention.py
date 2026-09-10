@@ -43,7 +43,8 @@
 # /etc/claude-code/managed-settings.json either. Three hooks:
 #
 #   * Stop — the turn ended, so the agent is now waiting for a prompt;
-#   * Notification — it stopped mid-turn to ask for something;
+#   * Notification — it stopped mid-turn to ask for something, or (idle_prompt)
+#     is telling us again about the turn that already ended;
 #   * UserPromptSubmit / SessionEnd — you answered, or the session is over.
 #
 # PLUGIN (opencode) is agent-config/opencode/plugins/attention.js, overlaid
@@ -58,6 +59,13 @@
 # long enough (DELAY) — so "and I hadn't noticed" is a host-side policy that
 # can change without touching a container, and the agent's own idle threshold
 # is left alone.
+#
+# What the file says is a wait's whole identity on the host side: its mtime is
+# when the wait started, and its one line is why. A wait whose reason changes
+# is a new question and aiab.monitor_tui weighs it up afresh — which is why
+# recording is idempotent (see _record), so an agent repeating itself about a
+# wait already recorded does not restart its countdown or forget that you have
+# already dealt with it.
 
 from __future__ import annotations
 
@@ -101,16 +109,24 @@ DROP_IN_PATH = f"{_DROP_IN_DIR}/50-aiab-attention.json"
 _WAITING_FOR_PROMPT = "Waiting for your next prompt"
 _WAITING_FOR_ANSWER = "Waiting for a response"
 
-# Notification types worth interrupting for: the agent has stopped and needs
-# something from you. Matched as a regex against the notification's type, so
-# the quieter ones (auth_success, agent_completed) are left out.
+# Notification types that mean the agent stopped mid-turn and needs an answer
+# before it can go on. Matched as a regex against the notification's type, so
+# the quieter ones (auth_success, agent_completed) are left out — and so
+# worker_permission_prompt is covered by the substring already here.
 _NOTIFY_TYPES = (
     "permission_prompt",
-    "idle_prompt",
     "elicitation_dialog",
     "elicitation_url_dialog",
     "agent_needs_input",
 )
+
+# Claude's own nudge that you have been sitting at an idle prompt for a while
+# (a minute, at the time of writing). It is not a question: it is the turn
+# that already ended saying so again, so it records the same reason Stop did,
+# which _record then makes a no-op. Recorded at all only because it also
+# covers the wait nobody announced — a session you attached to and never
+# typed at, where no Stop of ours ever ran.
+_IDLE_TYPE = "idle_prompt"
 
 
 def attention_dir(directory: StrPath) -> Path:
@@ -152,9 +168,19 @@ def _file(key: str) -> str:
 
 
 def _record(key: str, reason: str) -> str:
-    """A shell command recording that `key` is waiting, for `reason`."""
+    """A shell command recording that `key` is waiting, for `reason`.
+
+    A wait already recorded for the same reason is left exactly as it is. The
+    file's mtime is *since when*, and the host reads a change as a new
+    question (see the module comment), but an agent will happily say the same
+    thing twice about one wait — Claude's idle nudge on top of the Stop that
+    already recorded it, a permission prompt raised again. Rewriting the file
+    then would restart the countdown to a notification and lose the fact that
+    you had already looked.
+    """
     return (
-        f"mkdir -p {shlex.quote(_CONTAINER_DIR)} && "
+        f"mkdir -p {shlex.quote(_CONTAINER_DIR)}; "
+        f'[ "$(cat {_file(key)} 2>/dev/null)" = {shlex.quote(reason)} ] || '
         f"printf '%s\\n' {shlex.quote(reason)} > {_file(key)}"
     )
 
@@ -177,7 +203,8 @@ def drop_in(key: str) -> str:
         "hooks": {
             "Stop": [_hook(_record(key, _WAITING_FOR_PROMPT))],
             "Notification": [
-                _hook(_record(key, _WAITING_FOR_ANSWER), "|".join(_NOTIFY_TYPES))
+                _hook(_record(key, _WAITING_FOR_ANSWER), "|".join(_NOTIFY_TYPES)),
+                _hook(_record(key, _WAITING_FOR_PROMPT), _IDLE_TYPE),
             ],
             "UserPromptSubmit": [_hook(_clear(key))],
             "SessionEnd": [_hook(_clear(key))],
@@ -221,6 +248,22 @@ def env(key: str, mechanism: str) -> dict[str, str]:
     if mechanism != PLUGIN:
         return {}
     return {ENV_VAR: f"{_CONTAINER_DIR}/{key}"}
+
+
+def is_ask(reason: str) -> bool:
+    """Whether a wait is the agent stopped for an answer, not just finished.
+
+    The difference is worth having because looking settles one and not the
+    other: a turn that has ended has nothing more to say, so seeing it is the
+    end of it, while a question you looked at and walked away from is still a
+    question (see monitor_tui.MonitorApp._check_attention).
+
+    Anything not recognisably the end of a turn counts as an ask, so a reason
+    this host doesn't know — an older container's wording, or the generic one
+    waiting() falls back to for a file caught half-written — errs towards
+    saying something rather than towards silence.
+    """
+    return reason != _WAITING_FOR_PROMPT
 
 
 def summary(key: str) -> str:

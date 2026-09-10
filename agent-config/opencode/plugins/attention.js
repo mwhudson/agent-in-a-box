@@ -16,7 +16,7 @@
 // awaiting it (packages/opencode/src/plugin/index.ts), so a rejection would
 // surface in the user's session as an unhandled one.
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 const FILE = process.env.AIAB_ATTENTION
@@ -29,7 +29,15 @@ const WAITING_FOR_ANSWER = "Waiting for a response"
 export const AiabAttention = async ({ client, directory }) => {
   if (!FILE) return {}
 
+  // A wait already recorded for the same reason is left alone: its mtime is
+  // *since when*, and the host reads a change as a new question, so repeating
+  // ourselves would restart its countdown to a notification and lose the fact
+  // that you had already looked. opencode does repeat itself — a permission
+  // is updated more than once for one prompt.
   const record = (reason) => {
+    try {
+      if (readFileSync(FILE, "utf8").trim() === reason) return
+    } catch {}
     try {
       mkdirSync(dirname(FILE), { recursive: true })
       writeFileSync(FILE, reason + "\n")

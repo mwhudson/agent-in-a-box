@@ -4,6 +4,8 @@
 
 import json
 import shlex
+import subprocess
+import time
 from typing import Any
 
 import pytest
@@ -48,8 +50,42 @@ def _commands(key, event):
 
 def test_turn_end_and_prompts_record_a_wait():
     for event in ("Stop", "Notification"):
-        (command,) = _commands("claude", event)
-        assert command.endswith("> /aiab/attention/claude")
+        for command in _commands("claude", event):
+            assert command.endswith("> /aiab/attention/claude")
+
+
+def test_recording_the_same_wait_again_leaves_the_file_alone(tmp_path):
+    # The mtime is *since when*, and an agent will say the same thing twice
+    # about one wait, so a repeat must not touch it. Run for real: this is a
+    # shell command, and it is the shell that has to get it right.
+    adir = tmp_path / "attention"
+    adir.mkdir()
+    path = adir / "claude"
+
+    def run(reason):
+        command = attention._record("claude", reason)
+        subprocess.run(
+            ["sh", "-c", command.replace(attention._CONTAINER_DIR, str(adir))],
+            check=True,
+        )
+
+    run(attention._WAITING_FOR_PROMPT)
+    first = path.stat().st_mtime_ns
+    time.sleep(0.01)
+
+    run(attention._WAITING_FOR_PROMPT)
+    assert path.stat().st_mtime_ns == first
+    assert path.read_text() == attention._WAITING_FOR_PROMPT + "\n"
+
+    # A different reason is a new question, and does move it.
+    run(attention._WAITING_FOR_ANSWER)
+    assert path.stat().st_mtime_ns != first
+    assert path.read_text() == attention._WAITING_FOR_ANSWER + "\n"
+
+    # And a wait that was cleared is recorded afresh.
+    path.unlink()
+    run(attention._WAITING_FOR_PROMPT)
+    assert path.read_text() == attention._WAITING_FOR_PROMPT + "\n"
 
 
 def test_answering_and_ending_clear_the_wait():
@@ -58,12 +94,29 @@ def test_answering_and_ending_clear_the_wait():
 
 
 def test_only_waiting_notifications_are_matched():
-    (entry,) = json.loads(attention.drop_in("claude"))["hooks"]["Notification"]
-    types = entry["matcher"].split("|")
+    entries = json.loads(attention.drop_in("claude"))["hooks"]["Notification"]
+    types = [t for entry in entries for t in entry["matcher"].split("|")]
     assert "permission_prompt" in types
     # Not every notification means the agent stopped for you.
     assert "auth_success" not in types
     assert "agent_completed" not in types
+
+
+def test_the_idle_nudge_records_the_wait_that_was_already_there():
+    # Claude's "still waiting for input" is the ended turn saying so again,
+    # not a new question — so it records what Stop did, which _record then
+    # makes a no-op.
+    entries = json.loads(attention.drop_in("claude"))["hooks"]["Notification"]
+    (idle,) = [e for e in entries if e["matcher"] == attention._IDLE_TYPE]
+    assert attention._WAITING_FOR_PROMPT in idle["hooks"][0]["command"]
+    assert not attention.is_ask(attention._WAITING_FOR_PROMPT)
+
+
+def test_a_question_is_told_from_a_finished_turn():
+    assert attention.is_ask(attention._WAITING_FOR_ANSWER)
+    assert not attention.is_ask(attention._WAITING_FOR_PROMPT)
+    # A reason this host doesn't recognise errs towards saying something.
+    assert attention.is_ask("Waiting for something a later aiab knows about")
 
 
 def test_a_profile_session_gets_its_own_file():

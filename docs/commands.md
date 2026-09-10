@@ -497,7 +497,11 @@ How the agent is made to record it is the agent's own mechanism:
 
 The 15 seconds is aiab's own, not the agent's idle threshold — the container
 side only records *when* the wait started, and the monitor decides when that
-has gone on long enough.
+has gone on long enough. An agent repeating itself about a wait already
+recorded — Claude's own "still waiting for your input" a minute after the turn
+ended, a permission prompt raised again — changes nothing: the record stands
+as it was, so the countdown is not restarted and neither is anything you had
+already done about it.
 
 Looking at the agent counts as noticing it. Neither Claude's hooks nor
 opencode's plugin events can say when you focus a terminal or press a key —
@@ -509,10 +513,14 @@ received input. From that:
 
 - a wait you are already looking at is never announced;
 - a notification that is up is withdrawn the moment you look at the window;
-- looking away again with the agent still waiting starts the 15 seconds over —
-  a glance is not an answer — **unless** you pressed a key while you were
-  there, which is taken as you dealing with it in your own time, and that wait
-  is not raised again.
+- what looking is worth after that depends on what the agent is waiting for.
+  A turn that has merely **ended** has nothing further to say, so seeing it is
+  the end of the matter and it is never raised again. A **question** — a
+  permission prompt, an elicitation — is not answered by being looked at, so
+  walking away from one still unanswered starts the 15 seconds over, a glance
+  not being an answer. That one exception aside: if you pressed a key while
+  you were there, you are dealing with it in your own time, and it is not
+  raised again either.
 
 This needs tmux's `focus-events`, which is off by default: with it off tmux
 never asks the terminal to report focus and every client looks permanently

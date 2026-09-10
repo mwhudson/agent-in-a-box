@@ -408,9 +408,9 @@ def test_looking_at_the_terminal_withdraws_the_notification(work_dir):
     asyncio.run(scenario())
 
 
-def test_looking_away_again_re_arms_the_wait(work_dir, monkeypatch):
-    # A glance is not an answer: the agent is still waiting, so once you are
-    # gone again the countdown starts over.
+def test_looking_away_again_re_arms_a_question(work_dir, monkeypatch):
+    # A glance is not an answer: the agent is still blocked on one, so once
+    # you are gone again the countdown starts over.
     monkeypatch.setattr(attention, "DELAY", 0.05)
 
     async def scenario():
@@ -418,7 +418,7 @@ def test_looking_away_again_re_arms_the_wait(work_dir, monkeypatch):
         app = _new_app(work_dir, looking=looking)
         notifier = app._notifier = _FakeNotifier()
         async with app.run_test() as pilot:
-            _record_wait(work_dir, "claude", age=1.0)
+            _record_wait(work_dir, "claude", reason="Waiting for a response", age=1.0)
             app._poll()
             await pilot.pause()
             assert notifier.raised == []
@@ -436,7 +436,38 @@ def test_looking_away_again_re_arms_the_wait(work_dir, monkeypatch):
     asyncio.run(scenario())
 
 
-def test_a_key_pressed_while_looking_settles_it(work_dir, monkeypatch):
+def test_looking_at_a_finished_turn_settles_it(work_dir, monkeypatch):
+    # Nothing is being asked of you: the agent has stopped, and seeing that is
+    # the whole of what the notification had to say.
+    monkeypatch.setattr(attention, "DELAY", 0.05)
+
+    async def scenario():
+        looking = _FakeFocus(focused=False)
+        app = _new_app(work_dir, looking=looking)
+        notifier = app._notifier = _FakeNotifier()
+        async with app.run_test() as pilot:
+            _record_wait(work_dir, "claude", age=attention.DELAY + 1)
+            app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 1
+
+            looking.focused = True
+            app._poll()
+            await pilot.pause()
+            assert notifier.closed == [notifier.raised[0][0]]
+
+            # Away again, still waiting, and this time it stays quiet.
+            looking.focused = False
+            time.sleep(attention.DELAY * 2)
+            for _ in range(3):
+                app._poll()
+            await pilot.pause()
+            assert len(notifier.raised) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_key_pressed_while_looking_settles_a_question(work_dir, monkeypatch):
     # You saw it and did something about it, in your own time. Walking away
     # from that is not worth interrupting you over again.
     monkeypatch.setattr(attention, "DELAY", 0.05)
@@ -446,7 +477,7 @@ def test_a_key_pressed_while_looking_settles_it(work_dir, monkeypatch):
         app = _new_app(work_dir, looking=looking)
         notifier = app._notifier = _FakeNotifier()
         async with app.run_test() as pilot:
-            _record_wait(work_dir, "claude", age=1.0)
+            _record_wait(work_dir, "claude", reason="Waiting for a response", age=1.0)
             looking.typed = True
             app._poll()
             await pilot.pause()

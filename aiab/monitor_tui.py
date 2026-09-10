@@ -109,17 +109,17 @@ class _Wait:
     """One waiting session, as this pane is keeping track of it.
 
     `armed` is when its countdown to a notification started, which is not
-    always when the wait itself did: looking at the window and then away
+    always when the wait itself did: looking at a question and then away
     starts it again. `seen` is whether the window has had your attention since
-    then, and `typed` whether you pressed a key while it did — see
-    MonitorApp._check_attention for what each of those buys.
+    then. `done` is a wait that has had all the notification it is getting —
+    see MonitorApp._check_attention for what earns that.
     """
 
     since: float
     armed: float
     shown: bool = False
     seen: bool = False
-    typed: bool = False
+    done: bool = False
 
 
 def _read_listening_ports(init_pid: int) -> set[int]:
@@ -763,13 +763,16 @@ class MonitorApp(App[None]):
 
         So does looking: aiab.focus says when the agent's window has your
         attention, and a banner about something you are looking at is noise.
-        Looking away again re-arms it, on the grounds that a glance is not an
-        answer and the agent is still sitting there — unless you pressed a key
-        while you were there, which is you dealing with it in your own time
-        and not something to interrupt you about twice. Where focus cannot be
-        established at all (no tmux, a terminal that doesn't report it) every
-        wait behaves as it did before any of this: announced once, DELAY after
-        it started.
+        What looking is worth afterwards depends on what the agent is waiting
+        for (attention.is_ask). A turn that has merely ended has nothing more
+        to say, so seeing it is the end of the matter and it is never raised
+        again. A question is not answered by being looked at, so leaving it
+        unanswered re-arms the countdown — a glance is not an answer and the
+        agent is still sitting there — unless you pressed a key while you were
+        there, which is you dealing with it in your own time and not something
+        to interrupt you about twice. Where focus cannot be established at all
+        (no tmux, a terminal that doesn't report it) every wait behaves as it
+        did before any of this: announced once, DELAY after it started.
 
         Nothing is asked of tmux while no agent is waiting, which is nearly
         all the time.
@@ -791,7 +794,11 @@ class MonitorApp(App[None]):
                 wait = self._waits[key] = _Wait(since=since, armed=since)
             if look.focused:
                 wait.seen = True
-                wait.typed = wait.typed or look.typed
+                if look.typed or not attention.is_ask(reason):
+                    # A key pressed while you were there is you dealing with
+                    # it; and a wait that is only "your turn" is dealt with by
+                    # being seen.
+                    wait.done = True
                 if wait.shown:
                     self._notifier.close(_ATTENTION_PREFIX + key)
                     wait.shown = False
@@ -801,7 +808,7 @@ class MonitorApp(App[None]):
                 # still waiting: start the clock over.
                 wait.seen = False
                 wait.armed = now
-            if wait.shown or wait.typed or now - wait.armed < attention.DELAY:
+            if wait.shown or wait.done or now - wait.armed < attention.DELAY:
                 continue
             wait.shown = True
             self._notifier.notify(
