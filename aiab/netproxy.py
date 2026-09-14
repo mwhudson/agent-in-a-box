@@ -32,6 +32,12 @@
 # Denied requests get a 403 naming the host, and are logged to stderr (which
 # `aiab run` redirects to a per-container log file).
 #
+# Allowing a name is not the last word: because the proxy dials out from the
+# *host*, an allowed name that resolves to loopback, the LAN or a link-local
+# address would hand the container a route to things the masked NIC exists to
+# keep away from it. So the resolved address is checked too, and the
+# connection goes to the address that was checked — see connect_external().
+#
 # A host in neither list is normally refused too — but while an `aiab monitor`
 # session is attached (it holds a lock file in --pending-dir, see
 # watcher_attached), the request is instead *parked*: the proxy drops a pending
@@ -48,6 +54,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import ipaddress
 import os
 import re
 import signal
@@ -139,6 +146,82 @@ def evaluate(
             best = score
             verdict = kind
     return verdict
+
+
+def is_external_address(addr: str) -> bool:
+    """Is this resolved address one that genuinely leaves this machine?
+
+    Policy is matched on the *name*, but the proxy connects from the host, so
+    a name the policy allowed that resolves inward would reach the host's own
+    loopback services or the user's LAN — neither of which the container can
+    otherwise touch, its NIC being masked. Anything not routable off-box is
+    therefore refused regardless of how the name was allowed.
+
+    Unparseable addresses are refused too: this is the last check before a
+    connection, so the safe answer to "I don't recognise this" is no.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    # ::ffff:127.0.0.1 is loopback wearing an IPv6 costume; judge the v4 address
+    # it actually denotes.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local  # includes 169.254.169.254, the cloud metadata host
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+class InternalAddress(Exception):
+    """Raised when every address a host resolves to points back inward."""
+
+    def __init__(self, host: str, addresses: list[str]) -> None:
+        super().__init__(host)
+        self.host = host
+        self.addresses = addresses
+
+
+def connect_external(host: str, port: int) -> socket.socket:
+    """Connect to host:port, refusing addresses that don't leave the machine.
+
+    Deliberately not socket.create_connection(): the address has to be vetted
+    *and then* connected to, rather than the name being resolved a second time
+    once the check has passed. Otherwise a name answering differently on the
+    second lookup walks straight past the check.
+
+    Addresses are tried in resolution order, skipping the ones that fail
+    is_external_address(). InternalAddress is raised only when nothing
+    survived the filter, so a host with a mix of addresses still reaches its
+    external ones rather than failing on a stray inward answer.
+    """
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    blocked: list[str] = []
+    last: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        addr = str(sockaddr[0])
+        if not is_external_address(addr):
+            blocked.append(addr)
+            continue
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(_CONNECT_TIMEOUT)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            sock.close()
+            last = exc
+    if last is not None:
+        raise last
+    if blocked:
+        raise InternalAddress(host, blocked)
+    raise OSError(f"no addresses for {host}")
 
 
 # The marker an `aiab monitor` holds while attached to a pending dir. Its name
@@ -297,7 +380,21 @@ class _Handler(socketserver.StreamRequestHandler):
 
         _log(f"ALLOW {method} {host}:{port}")
         try:
-            upstream = socket.create_connection((host, port), timeout=_CONNECT_TIMEOUT)
+            upstream = connect_external(host, port)
+        except InternalAddress as exc:
+            # Allowed by name, but it points back at the host or the LAN. A 403
+            # rather than a 502, because this is a policy refusal and not a
+            # network failure: the name resolved fine.
+            addresses = ", ".join(exc.addresses)
+            _log(f"DENY {method} {host}:{port}: internal address ({addresses})")
+            self._respond(
+                403,
+                "Forbidden",
+                f"aiab: {host} resolves to {addresses}, which is not reachable "
+                f"from a container; allowing a name does not grant access to "
+                f"the host or its network",
+            )
+            return
         except OSError as exc:
             _log(f"FAIL {method} {host}:{port}: {exc}")
             self._respond(502, "Bad Gateway", f"could not reach {host}:{port}: {exc}")

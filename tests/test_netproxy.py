@@ -1,9 +1,11 @@
 # Tests for aiab.netproxy.evaluate — the pure policy-matching core of the
-# filtering proxy. The socket/parking machinery around it is exercised
-# manually; this covers the verdict logic.
+# filtering proxy — and for is_external_address, the check that stands between
+# an allowed *name* and an address pointing back at the host. The
+# socket/parking machinery around them is exercised manually; this covers the
+# verdict logic.
 
 import aiab.state as state
-from aiab.netproxy import ALLOW, ASK, DENY, evaluate
+from aiab.netproxy import ALLOW, ASK, DENY, evaluate, is_external_address
 
 
 def _policy(mode=state.MODE_RESTRICTED, allow=(), deny=()):
@@ -140,3 +142,50 @@ def test_proxy_decide_honors_per_agent_rules(tmp_path, monkeypatch):
     finally:
         opencode.server_close()
         claude.server_close()
+
+
+# is_external_address: the second gate, on the resolved address rather than
+# the name. Policy allowing a name must not become a route to the host.
+
+
+def test_public_addresses_are_external():
+    assert is_external_address("93.184.216.34")
+    assert is_external_address("2606:2800:220:1:248:1893:25c8:1946")
+
+
+def test_loopback_refused():
+    assert not is_external_address("127.0.0.1")
+    assert not is_external_address("127.1.2.3")
+    assert not is_external_address("::1")
+
+
+def test_private_ranges_refused():
+    assert not is_external_address("10.0.0.1")
+    assert not is_external_address("172.16.5.4")
+    assert not is_external_address("192.168.1.1")
+    assert not is_external_address("fd00::1")  # IPv6 unique-local
+
+
+def test_link_local_refused():
+    # 169.254.169.254 is the cloud metadata host, the classic SSRF target.
+    assert not is_external_address("169.254.169.254")
+    assert not is_external_address("fe80::1")
+
+
+def test_ipv4_mapped_loopback_refused():
+    # ::ffff:127.0.0.1 must be judged as the v4 address it denotes, not waved
+    # through as an unremarkable IPv6 address.
+    assert not is_external_address("::ffff:127.0.0.1")
+    assert not is_external_address("::ffff:10.0.0.1")
+
+
+def test_unspecified_and_multicast_refused():
+    assert not is_external_address("0.0.0.0")
+    assert not is_external_address("::")
+    assert not is_external_address("224.0.0.1")
+
+
+def test_unparseable_address_refused():
+    # Fail closed: this is the last check before a connection is made.
+    assert not is_external_address("not-an-address")
+    assert not is_external_address("")
