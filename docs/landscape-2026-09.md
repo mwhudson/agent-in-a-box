@@ -15,6 +15,7 @@ survey found already stale in our own docs.
 - [Canonical Workshop](#canonical-workshop)
 - [Docker Sandboxes](#docker-sandboxes)
 - [Everything else worth naming](#everything-else-worth-naming)
+- [Notifications and attention](#notifications-and-attention)
 - [Open questions this leaves for IDEAS.md](#open-questions-this-leaves-for-ideasmd)
 - [What was not verified](#what-was-not-verified)
 
@@ -263,6 +264,66 @@ integration for VS Code and Cursor.
   has no answer to "the ecosystem has moved on", which is the sentence that
   will get asked about.
 
+## Notifications and attention
+
+A different axis from isolation, and the one where aiab turns out to have the
+most that is actually unlike anything else: telling you, on the host, that
+something in the box wants you. Surveyed because the recent `aiab.attention` /
+`aiab.notify` / `aiab.focus` work looked like obvious parity catch-up and on
+inspection mostly is not.
+
+**The agent-waiting half is well-trodden.** Both agents ship it. Claude Code
+has `preferredNotifChannel` (`auto`, `terminal_bell`, `iterm2`,
+`iterm2_with_bell`, `kitty`, `ghostty`, `notifications_disabled`) plus the
+`Notification` hook, which fires with type `permission_prompt` when it needs
+approval and `idle_prompt` when it is done and waiting; desktop notifications
+are native only in Ghostty, Kitty and iTerm2. opencode emits `session.idle`,
+permission, question and error events, and has at least five community
+notification plugins. So aiab reimplements something that exists — but once,
+from outside, for three agents, instead of three plugins with three different
+ideas of what an event is. The managed-settings drop-in is also a better
+citizen than most of those plugins, which write into the user's own settings;
+hook lists concatenate across sources, so aiab's can neither displace the
+user's nor be displaced by them.
+
+**Focus-aware suppression: no prior art found.** The nearest neighbour is
+`claude-tmux-focus`, which on a `Notification` event switches to the tmux
+window, focuses the pane, highlights it and notifies — the *inverse* of
+`aiab.focus`, using tmux to pull you toward the agent rather than to decide
+whether to interrupt you, and it notifies unconditionally either way.
+
+`focus.py`'s reasoning for why neither agent can answer this checks out
+independently: Claude's hook events stop at `UserPromptSubmit`, opencode's at
+`chat.message`, and Claude's own focus tracking never leaves its TUI. Claude
+Code issue #72067 is worth knowing about here — their tmux focus-events
+integration is actively awkward (focus-out forces a TUI re-render, users
+disable focus-events to stop it, Claude then nags them to re-enable it).
+Reading `#{client_flags}` from tmux on the host sidesteps that entirely, and
+is only available to aiab *because* it is the thing wrapping the terminal.
+
+**Parked network decisions: no prior art found, and this is the novel one.**
+Docker Sandboxes is the only other tool here with a deny-by-default egress
+allowlist, and its model is strictly pre-authorisation: three presets (Open,
+Balanced, Locked Down), `sbx policy allow network` to add rules, `sbx policy
+check network <domain>` to verify a domain *before* running, `sbx policy log`
+to audit afterwards. Nothing in its policy documentation describes a live
+prompt when a request is refused — it is blocked, logged, and you go add a
+rule and retry. aiab parks the request, notifies with action buttons, and
+releases it on the answer.
+
+By IDEAS.md's own Scope test this is unimpeachable box work: no agent can ask
+you to widen a boundary it cannot see, and the boundary exists only because
+aiab imposed it.
+
+**Where everyone else is ahead: getting off the desktop.** Omnara,
+AgentsRoom, Pushary, Forge Remote and Onepilot all let an agent's prompt be
+answered from a phone; Agent Orchestrator pairs a desktop daemon with a mobile
+app over LAN or Tailscale and shows a "Needs you" column for blocked sessions.
+aiab is desktop-only through `notify-send` and, as `notify.py` says, goes
+silent over ssh with no session bus — which is exactly the situation where the
+notification would be worth most. Several of those tools also offer a fleet
+view across repos, where `aiab monitor` is per-directory by design.
+
 ## Open questions this leaves for IDEAS.md
 
 1. **Rewrite the Scope section's "no upstream competitor" line.** The
@@ -295,6 +356,19 @@ integration for VS Code and Cursor.
 5. Smaller: the structured network audit log already in IDEAS.md now has a
    shipped reference implementation to compare against (`sbx policy log`), and
    an MCP gateway is a gap aiab has not considered at all.
+6. **The notification work splits awkwardly across the Scope test.** The
+   parked-host notification is unambiguous box work. The agent-waiting
+   notification is harness work by the strict test — every agent ships one —
+   *except* that its focus-awareness is only answerable from the host, where
+   aiab already is. So it is a parity feature whose best version is
+   box-shaped, and the Scope section's binary has no slot for that today. It
+   is a better worked example than the ones currently listed, because the
+   honest answer is neither "cut it" nor "keep it" but "keep the half that
+   only works from out here".
+7. **Notifications die exactly when they are worth most.** `notify-send` needs
+   a session bus, so an ssh session gets nothing. Everyone doing remote
+   approval does it from a phone. Nothing here argues aiab should grow a
+   mobile app, but the gap is real and currently unacknowledged.
 
 ## What was not verified
 
@@ -304,6 +378,10 @@ integration for VS Code and Cursor.
   from reading those two pages. Workshop may have agent-specific controls not
   visible from outside.
 - Whether Docker parks an in-flight request pending a decision, or fails it.
+  Its policy documentation describes only pre-authorisation (presets, `sbx
+  policy allow network`, `sbx policy check network`) and after-the-fact
+  auditing (`sbx policy log`), and never mentions a live prompt — but that is
+  absence of evidence, not a documented "no".
 - Whether `sbxenv.yaml`'s single `agent:` key can be overridden per run to get
   aiab's cross-agent mount replay.
 - The proxy fix was exercised against names resolving inward (`localhost`,
