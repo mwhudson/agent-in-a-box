@@ -202,18 +202,57 @@ One consequence worth acting on rather than just recording:
     passwordless sudo is far too useful (`/setup-container` installs
     toolchains with it) to trade away for a threat outside the stated model.
     Decided against.
-  - *`chattr +i` on the host paths* (what code-on-incus does) is the one thing
-    that would defend even against container root: the immutable flag can't be
-    cleared or bypassed from the container, since that check lands in the
-    initial user namespace. But it needs host root on every run, it makes the
-    paths immutable *for the host user too* while a session is open (so
-    host-side `git config`/`git remote add` fail), on a directory it only
-    blocks create/delete/rename rather than edits to existing files, and a
-    crash leaves flags set that need root to clear. Not worth it here.
+  - *Restricting sudo rather than removing it doesn't work either.* A policy
+    that blocks `umount` while keeping the reason sudo exists here — installing
+    toolchains — still hands out root, and root reaches the same place by other
+    spellings: `apt-get -o DPkg::Pre-Invoke::="umount ..." install`, a write to
+    `/etc/sudoers.d`, `sudo install`, any interpreter in the image. An allowlist
+    tight enough to stop those can't run `/setup-container`. Worse than useless,
+    in fact, because a sudo wrapper reads as a boundary while only being a speed
+    bump — the `agent-config` warning that `.git/config` is read-only is the
+    honest version of that speed bump, and costs nothing.
+  - *`umount` isn't the only spelling*, which sinks any defence aimed at the
+    syscall by name: a non-recursive `mount --bind /work/<proj>/.git /mnt/x`
+    doesn't replicate submounts, so `/mnt/x/hooks` is the host's real hooks dir,
+    read-write, with nothing unmounted.
+  - *`chattr +i` on the host paths* (what code-on-incus does) would defend even
+    against container root: the immutable flag can't be cleared or bypassed
+    from the container, since that check lands in the initial user namespace.
+    But it needs host root on every run, it makes the paths immutable *for the
+    host user too* while a session is open (so host-side `git config`/`git
+    remote add` fail), on a directory it only blocks create/delete/rename
+    rather than edits to existing files, and a crash leaves flags set that need
+    root to clear. Not worth it here.
+  - *AppArmor is the one ceiling that keeps the "needs no privilege" property.*
+    LXD stacks a per-container profile on the host — from inside the container
+    `/proc/self/attr/current` reads `unconfined`, but that's the container's own
+    apparmor namespace view; the host-level stack still applies and isn't
+    reachable from in there — and `raw.apparmor` appends to it:
+    `deny umount /work/**,` plus `deny mount /work/** -> /**,` for the bind case
+    above (deny rules beat the profile's existing allows). Setting it is an `lxc
+    config set`, so unlike overlayfs or `chattr +i` it costs no host root. Four
+    things to check before believing it: whether `aiab mount`'s hotplug into a
+    running container is mediated by the container's profile or the LXD daemon's
+    (if the former, these rules break `mount`/`unmount`/`--add-mount-rw`); that
+    `raw.apparmor` only takes effect at container start, so existing sessions
+    need a restart; that the kernel mediates the new mount API
+    (`fsopen`/`move_mount`) and not just the classic syscalls; and that nothing
+    nested — docker with a volume under `/work` — needs to mount there.
+  - *Detecting beats preventing, for the threat actually modelled.* A wandering
+    agent never types `umount`, and aiab already holds the originals:
+    `_reseed_file` / `_reseed_tree` (`cli.py:129`) copy the host's real
+    `.git/hooks` and `config` into the sidecars on every run. Comparing the host
+    paths against those seeds — at session end, or at the start of the next
+    run — turns a silent bypass into a loud one, catches every other route to
+    writing them rather than only the predicted one, and needs no privilege and
+    no kernel feature. A false positive is "you edited your own hooks between
+    runs", which is worth a line of output anyway.
   So: accepted, and `concepts.md` now says so plainly rather than claiming it
-  would take a kernel escape. Worth revisiting only if aiab ever grows a mode
-  aimed at deliberately hostile code rather than a wandering agent — that mode
-  would want the no-sudo container, and the guard question answers itself.
+  would take a kernel escape. The drift check is the one piece here worth
+  building on its own merits, because it fits the wandering-agent model that
+  prevention doesn't. Worth revisiting the rest only if aiab ever grows a mode
+  aimed at deliberately hostile code — that mode would want the apparmor denies
+  or the no-sudo container, and the guard question answers itself.
 - **A FUSE view of the work dir, for per-operation policy** — mount the
   project directory through a host-side FUSE daemon instead of binding it in
   directly, so every filesystem operation passes a decision point. It works
