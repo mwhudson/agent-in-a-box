@@ -1,17 +1,21 @@
 # Landscape survey, October 2026
 
-A pass over **Gondolin** (<https://github.com/earendil-works/gondolin>), taken
-2026-10-06 from its published docs, commit log and issue tracker. The previous
-pass was [September](landscape-2026-09.md), 2026-09-14.
+Begun as a pass over **Gondolin** (<https://github.com/earendil-works/gondolin>)
+on 2026-10-06, then widened to the user-facing tool that consumes it (**pi**)
+and to two tools reached from there (**NVIDIA OpenShell**, and
+**agentbox** + **webterm**). All of it from published docs, commit logs and
+issue trackers; nothing was installed or run. The previous pass was
+[September](landscape-2026-09.md), 2026-09-14.
 
 **Deliberately unlinked** from [docs/README.md](README.md), for the same reason
 as its predecessor: working material, not user documentation, kept out of
 IDEAS.md so that file stays reasoning-about-aiab rather than
 reasoning-about-everyone-else.
 
-A single-subject pass, prompted by the security page rather than by a sweep of
-the field. It earned its keep anyway: Gondolin's blocked-range list named a
-range ours does not block.
+It started as a single-subject pass prompted by a security page, and earned its
+keep twice over. Gondolin's blocked-range list named a range ours does not
+block. And following it to its consumers turned up the thing September got
+wrong: an interactive approval loop for denied egress, shipped, by NVIDIA.
 
 - [What the survey changed](#what-the-survey-changed)
 - [Where Gondolin sits](#where-gondolin-sits)
@@ -19,6 +23,10 @@ range ours does not block.
 - [Secrets: the fourth implementation](#secrets-the-fourth-implementation)
 - [SSH egress: a design IDEAS.md does not have](#ssh-egress-a-design-ideasmd-does-not-have)
 - [Filesystem, images, and the cost of a microVM](#filesystem-images-and-the-cost-of-a-microvm)
+- [pi: the consumer, and its silence about all of this](#pi-the-consumer-and-its-silence-about-all-of-this)
+- [OpenShell: the approval loop we thought was ours](#openshell-the-approval-loop-we-thought-was-ours)
+- [agentbox and webterm](#agentbox-and-webterm)
+- [On-the-fly mount mutation, across five tools](#on-the-fly-mount-mutation-across-five-tools)
 - [Re-checked and still true](#re-checked-and-still-true)
 - [Open questions this leaves for IDEAS.md](#open-questions-this-leaves-for-ideasmd)
 - [What was not verified](#what-was-not-verified)
@@ -340,6 +348,213 @@ a `manifest.json` carrying SHA-256 checksums, verifiable with
 aiab's templates are LXD images plus apt, with the agent installers trusted
 transitively.
 
+## pi: the consumer, and its silence about all of this
+
+Gondolin is a component, so the UX question belongs to whatever ships on top.
+That is **pi** (<https://github.com/earendil-works/pi>), the same org's
+flagship and by a wide margin — 112.9k stars to Gondolin's 2.2k — a TypeScript
+"minimal, extensible agent harness that you can make your own": unified LLM
+API, agent loop, TUI with differential rendering, extensions, skills, prompt
+templates, themes, an RPC control surface and a TypeScript SDK. A second
+consumer, `pi-chat`, bridges Discord and Telegram to a sandboxed session, each
+channel getting its own Gondolin micro-VM with a persistent workspace.
+
+Interaction design is most of pi's pitch. None of it reaches the sandbox.
+
+`packages/coding-agent/docs/containerization.md` presents isolation as a flat
+menu of four — plain Docker, Docker Sandboxes, OpenShell, Gondolin — and
+Gondolin's entry is a single line, `pi -e ~/.pi/agent/extensions/gondolin`,
+against an extension installed by hand. In that whole document there is **no
+network policy syntax for any of the four**, which is remarkable given that
+programmable egress is the entire reason Gondolin exists. No interactive
+approval. No description of what the user sees when something is blocked.
+Mounts static per invocation. Where plain Docker's persistence is spelled out
+(a named `pi-agent-home` volume keeping "container-local settings, credentials,
+and sessions between runs"), Gondolin's is not stated at all.
+
+What sharpens this: **pi has no permission system.** The README says it "runs
+with the permissions of the user and process that launched it", with no
+approval gates, and points at containerization as the answer. `concepts.md`
+frames aiab's sandbox as the thing that makes it *safe to disable* permission
+prompts. For pi there is nothing to disable — the sandbox is the only control
+that exists, and it is opt-in, manually installed, one of four, and documented
+without a policy language.
+
+The consequence is visible in the wild. A Hacker News thread
+(<https://news.ycombinator.com/item?id=47144838>) asks whether anyone has
+managed to run pi fully sandboxed. The answers: one person tinkering with
+Gondolin, one running agentbox plus webterm, and one who **had pi write them a
+sandbox** — hooks on read/write/edit/bash with "temporary and permanent
+override prompts". Someone hand-rolled parked decisions because nothing they
+could install shipped one. That is about as direct a validation of the
+`aiab monitor` design as a survey is going to produce.
+
+The thread's main friction point validates the other half of `concepts.md`.
+Restricting an agent to just the working directory fails because "pretty much
+every linux application needs to be able to read from `/usr` and `/etc`", so
+people end up with bwrap plus ACLs and a growing list of extra directories for
+git and rust. That is the subtract-from-the-host shape losing in practice,
+which is the argument `concepts.md` makes from first principles.
+
+## OpenShell: the approval loop we thought was ours
+
+Reached from pi's menu, and the most consequential find in this pass:
+**NVIDIA OpenShell** (<https://github.com/NVIDIA/OpenShell>,
+docs at <https://docs.nvidia.com/openshell/>). September concluded that parked
+network decisions had "no prior art found, and this is the novel one". That
+conclusion does not survive.
+
+The architecture is a **gateway** (control plane: sandbox lifecycle, providers,
+policies, credential store) and a **sandbox** (data plane). Policy is YAML,
+passed at creation — `openshell sandbox create --name my-sandbox --policy
+./policy.yaml` — and "injected from the gateway at sandbox creation and cannot
+be modified by the agent at runtime". Filesystem access is read-only and
+read-write path sets enforced by **Landlock LSM** in the kernel.
+
+The egress policy is more expressive than aiab's on two axes at once:
+
+```
+network_policies:
+  [rule_name]:
+    binary: [path]
+    endpoints: [host:port:access:protocol:mode]
+```
+
+— for example `api.github.com:443:read-only:rest:enforce`. So a rule names a
+**binary**, and the proxy "matches every outbound connection to the binary that
+opened it"; the endpoint carries port, an access preset, a protocol, and an
+enforcement mode. Against that, aiab's policy is host-only and, as this pass
+found, port-blind. `read-only` on a `rest` endpoint implies method-level
+filtering, and `enforce` implies there is a non-enforcing mode to iterate in.
+
+### The Policy Advisor, which is the part that matters
+
+When OpenShell blocks a connection it **drafts a rule for it**, in every
+sandbox, each draft allowing one binary to reach one host and port. The agent
+inside can also ask: a **`policy.local` HTTP API**, reachable from inside the
+sandbox and needing no network rules, lets it "read the current policy and
+recent denials, submit proposals, and wait for decisions", with a `/wait`
+endpoint that confirms when the sandbox has loaded a new rule. Outside, the
+developer reviews a queue:
+
+```
+openshell rule get my-agent --status pending
+openshell rule approve my-agent --chunk-id <chunk-id>
+openshell rule reject my-agent --chunk-id <chunk-id> --reason "<explanation>"
+```
+
+A **prover** gates the review by comparing what the sandbox can reach with and
+without the proposed rule, reporting four finding types: link-local reach,
+uninspectable traffic bypass, credential expansion, capability expansion. An
+opt-in auto mode approves without a human only when the prover delta is empty
+and the destination is unflagged (private IPs, wildcard hosts, high ports,
+database ports). Approved network rules **hot-reload into the running
+sandbox** — and more than that, `openshell policy update` network changes "take
+effect immediately. The sandbox loads new rules and closes previous
+connections."
+
+Set against aiab honestly:
+
+- **aiab parks; OpenShell fails and retries.** The advisor docs are explicit:
+  "The blocked request stays denied, so retry it after OpenShell approves the
+  draft and loads the new rule." aiab holds the connection open in
+  `_await_decision` and releases it on the answer, so the agent never sees a
+  failure. That difference is real and still aiab's, and it is the better
+  experience for the agent.
+- **But the approval loop as a concept is not novel, and OpenShell's is
+  richer.** Per-binary granularity, a drafted rule rather than "go write one
+  yourself", a reviewed queue with reasons, a prover that reasons about
+  reachability deltas, a documented auto-approve policy, and an audit trail.
+  aiab has a notification with action buttons and a `monitor` tab.
+- **OpenShell closes existing connections on a policy change; aiab does not.**
+  Noted earlier in this pass as a limitation inherent to tunnels. It is not
+  inherent — someone else does it.
+- **`policy.local` breaks a premise in IDEAS.md.** The Scope section argues
+  parked decisions are unimpeachable box work partly because "no agent can ask
+  you to widen a boundary it cannot see". OpenShell deliberately hands the
+  agent exactly that channel — see your denials, propose a rule, explain why,
+  wait for the answer. The box-work *conclusion* survives untouched (only the
+  thing imposing a boundary can lift it) but that particular supporting clause
+  is now false in a shipped tool, and it is a capability aiab could add: today
+  the agent gets a 403 whose text addresses the human, and has no way to
+  attach a justification.
+- **Where aiab is still ahead on this axis:** aiab's decision reaches the
+  human where they already are — a desktop notification with buttons, focus-
+  aware, next to a live monitor — rather than requiring them to notice a
+  pending queue and run two CLI commands.
+
+And the loop is not smooth in practice, which is the other half of the story.
+Issue #2752: "approved + reloaded draft chunks still reject matching traffic
+and keep re-drafting the same rule". Issue #2841 asks to "preflight the exact
+effective candidate before proposal review". Issue #4035 asks for "a command
+to check a policy file before creating a sandbox". Three requests in a row for
+*knowing whether the policy you wrote will work before you find out the hard
+way* — the friction of policy iteration showing up as feature requests.
+
+Two structural differences worth recording. Credentials live in a gateway
+credential store and are sent "only to" the provider host, which is a
+per-destination scoping like Gondolin's per-secret allowlist and unlike an
+env-var handoff. And OpenShell is gateway-oriented with explicit transfers —
+pi's doc shows `openshell sandbox upload`/`download` moving a working folder in
+and out — so there is no live host working tree, which is presumably why the
+filesystem half of the policy can afford to be creation-time only.
+
+## agentbox and webterm
+
+The low-ceremony end of the field, and the pairing the HN thread actually
+recommends.
+
+**agentbox** — note the name collides with at least six unrelated projects, so
+a future pass should be specific. The one in question is
+<https://github.com/rcarmo/agentbox>: "Contain your coding agents
+(literally)." Docker, a Debian Trixie dev environment, project mounted with
+`-v $(pwd):/workspace`, agents preinstalled (Copilot CLI, Codex, pi, with
+opencode, Gemini CLI and others behind Makefile targets), services off unless
+switched on by env var (`ENABLE_DOCKER`, `ENABLE_SSH`, `ENABLE_RDP`), a `:gui`
+tag with XFCE/XRDP/VS Code, and `docker-compose.override.yml` for overrides.
+**No egress filtering at all** — the README has nothing on it and "network
+isolation options" sit on the roadmap. So: aiab's filesystem story without its
+network story, in a Dockerfile.
+
+**webterm** (<https://github.com/rcarmo/webterm>) is the interesting half, and
+it is not a sandbox. Go, terminal sessions over HTTP/WebSocket, a Ghostty
+WebAssembly rendering engine, and a **dashboard of live tiles — screenshots of
+every session, refreshed over SSE, with CPU sparklines, Docker watch mode, and
+mobile/touch support with a virtual keyboard**.
+
+That is both of the gaps September recorded, in one small Go binary:
+a **fleet view** across sessions where `aiab monitor` is per-directory by
+design, and **getting off the desktop**, where `notify.py` goes silent over
+ssh for want of a session bus. It does it without an app, an account or a
+protocol — just render the terminals to a web page. Worth knowing before any
+mobile-notification idea gets designed: the cheap version of "see all my
+agents from my phone" is a web page showing the terminals.
+
+## On-the-fly mount mutation, across five tools
+
+Worth stating plainly now that there are five data points, because it is the
+one place aiab looks not merely ahead but alone.
+
+| | Changing the mount set | Changing network policy |
+| --- | --- | --- |
+| aiab | **in place on a running container** (`add_device` reconciles `readonly` via `lxc config device set`) | per-request policy re-read; established tunnels unaffected |
+| Workshop | committed YAML, relaunch | no egress policy exists |
+| Docker Sandboxes | **sandbox destroyed and recreated** | pre-authorise, or dashboard |
+| Gondolin | creation-time `vfs` config; no runtime API documented | per-request hooks (sync allow, async `onRequest`) |
+| OpenShell | **creation-time only** — "filesystem, Landlock, and process settings take effect only when a sandbox starts, so changing them requires a new sandbox" | **immediate, and closes existing connections** |
+
+Two things fall out. aiab is the only one of the five that can add a reference
+checkout, or flip one read-write, without destroying the environment the agent
+has built — and for a tool whose premise is a persistent machine with the live
+working tree, that is not a convenience, it is the premise holding. Everyone
+else either has no live tree (OpenShell uploads, Gondolin defaults to memory
+providers) or treats the sandbox as cheap to rebuild (Docker), and both
+positions make creation-time mounts affordable in a way they are not here.
+
+But on the *network* side the table runs the other way, and OpenShell is ahead
+of us on the narrow point of tearing down connections an updated policy no
+longer permits.
+
 ## Re-checked and still true
 
 Prompted by specific Gondolin failures, and all the better for having been
@@ -439,6 +654,43 @@ files.
    engine being separable from the product is a structural idea worth noticing,
    and it is the mirror of September's question 4 about aiab's confinement layer
    belonging in Workshop.
+9. **Rewrite the Scope section's parked-decision argument.** It currently rests
+   partly on "no agent can ask you to widen a boundary it cannot see", and
+   OpenShell's `policy.local` gives the agent exactly that. The conclusion
+   (parked decisions are box work) is untouched — only the thing that imposed
+   the boundary can lift it — but the supporting clause has to go, and
+   September's "no prior art found, and this is the novel one" needs replacing
+   with the narrower true claim: aiab holds the request open where everyone
+   else fails it and asks you to retry.
+10. **Let the agent attach a reason to a denial.** Today it gets a 403 whose
+    text addresses the human (`run 'aiab net allow' on the host`), and the
+    pending file carries only a timestamp. OpenShell's `policy.local` lets the
+    agent read its recent denials, propose a rule, say why, and wait. The cheap
+    version here is one line of context in the pending file surfacing in
+    `aiab monitor` alongside the host — the agent already knows what it was
+    trying to do, and the human deciding currently does not. Weigh against the
+    obvious objection: the justification is written by the thing being
+    confined, so it informs the human without being evidence.
+11. **Close established tunnels when policy narrows.** `aiab net deny` takes
+    effect for the next request and not for a tunnel already up. This pass
+    first recorded that as inherent to tunnels; OpenShell does it ("the sandbox
+    loads new rules and closes previous connections"), so it is a choice, not a
+    constraint. The proxy owns both sockets and could drop them.
+12. **Should the egress policy know about binaries, not just hosts?**
+    OpenShell pairs each rule with the binary that opened the connection, so
+    `curl` and the agent can have different reach. aiab cannot see this — the
+    container's processes are behind a unix socket and `SO_PEERCRED` gives a
+    pid, which would need resolving against the container's namespace, and
+    the agent can run anything anyway. Probably a no; worth recording as
+    considered, because it is the most expressive egress policy the three
+    passes have seen.
+13. **A fleet view and an off-desktop view are the same feature, and webterm
+    shows the cheap version.** September recorded both gaps separately
+    (`aiab monitor` is per-directory; `notify-send` dies over ssh). A dashboard
+    of live terminal tiles over HTTP answers both without an app, an account or
+    a push protocol. No position taken on whether aiab should grow one — but
+    if it ever does, this is the shape, and it is smaller than the mobile-app
+    designs September was looking at.
 
 ## What was not verified
 
@@ -473,15 +725,56 @@ files.
   semantics: await a human, then proceed or refuse. So an embedder can build
   parking on Gondolin, on the mediated HTTP/TLS path only; the SSH and
   mapped-TCP paths are pre-authorisation with a sync hook, and Gondolin has no
-  CONNECT to park. Still nothing *ships* a parked decision, so aiab remains
-  alone in having built one — but the claim "no human in its loop by
-  construction" was wrong, and the correct claim is narrower: no human in its
-  loop by default, with the extension point to add one on one of its three
-  egress paths.
+  CONNECT to park. So "no human in its loop by construction" was wrong; the
+  correct claim is narrower — no human in its loop by default, with the
+  extension point to add one on one of its three egress paths. For what ships
+  rather than what is possible, see
+  [OpenShell](#openshell-the-approval-loop-we-thought-was-ours): aiab is not
+  alone in having built a human into the denial path, only in holding the
+  request open rather than failing it.
 - **Read at reference level only**, not exercised or deeply checked:
   `--disable-websockets`, the ingress gateway (`--listen`, `sandboxingress`),
   snapshot/resume, the libkrun backend, and `openTcpStream()`'s loopback-only
   restriction on guest-side backchannels.
-- **Nothing was run.** Gondolin was not installed; every claim about it comes
-  from its published documentation, commit log and issue titles as of
-  2026-10-06.
+- **Gondolin's runtime VFS is undocumented, not documented as absent.**
+  `docs/vfs.md` describes provider configuration at `VM.create()` and no
+  runtime API, and a `vm.fs` interface is referenced in a commit subject
+  (`fix(examples): use vm.fs in pi example and stop forwarding host env`)
+  without appearing on the page read. So the mount-mutation row in the table
+  above is "not documented" for Gondolin, where it is a quoted "requires a new
+  sandbox" for OpenShell. Worth settling against the source before the
+  comparison is leaned on.
+- **OpenShell's policy schema was not read.** The management page points at a
+  "Policy Schema Reference" that was not fetched, so the
+  `host:port:access:protocol:mode` endpoint shape and the one worked example
+  (`api.github.com:443:read-only:rest:enforce`) are from a management page,
+  not the schema. The `access` presets, the protocol values and the
+  enforcement modes were never enumerated — in particular, that `enforce`
+  implies a non-enforcing mode is inference from the word.
+- **OpenShell's credential handling has two incompatible accounts in the
+  sources** and this pass did not resolve them: one secondary description says
+  the gateway "injects your API keys as environment variables", while the
+  quickstart says OpenShell "stores its value in the credential store and
+  sends it only to `openrouter.ai`". The second implies proxy-side injection
+  and fits the `credential_endpoint_mismatch` response code; the first is a
+  much weaker guarantee. Settle this before citing OpenShell either way on
+  credentials.
+- **Whether OpenShell's gateway is local or remote was not established.** The
+  quickstart does not say. That `openshell sandbox upload`/`download` move a
+  working folder rather than bind-mounting it comes from *pi's*
+  containerization doc, not from OpenShell's own, and the inference that this
+  is why its filesystem policy can be creation-time only is mine.
+- **pi's Gondolin extension source was not read**, only pi's containerization
+  doc. "Mounts static per invocation" is that doc's framing; whether the
+  extension itself can remount is unknown.
+- **The Hacker News thread was read as a summary**, not comment by comment, so
+  the three approaches attributed to it are the substance rather than a
+  faithful census.
+- **agentbox and webterm were read at README level only.** And "agentbox" names
+  at least seven unrelated projects — the one here is `rcarmo/agentbox`,
+  identified because that author also wrote webterm and the HN reply paired
+  them. A different agentbox may have been meant.
+- **Nothing was run, and nothing was installed.** Every claim about Gondolin,
+  pi, OpenShell, agentbox and webterm comes from published documentation,
+  commit logs, issue titles and README text as of 2026-10-06. Star counts are
+  from that date.
