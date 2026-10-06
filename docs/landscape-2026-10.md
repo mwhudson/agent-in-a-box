@@ -27,6 +27,7 @@ wrong: an interactive approval loop for denied egress, shipped, by NVIDIA.
 - [OpenShell: the approval loop we thought was ours](#openshell-the-approval-loop-we-thought-was-ours)
 - [agentbox and webterm](#agentbox-and-webterm)
 - [On-the-fly mount mutation, across five tools](#on-the-fly-mount-mutation-across-five-tools)
+- [Addendum: a sweep for movement (2026-10-06)](#addendum-a-sweep-for-movement-2026-10-06)
 - [Re-checked and still true](#re-checked-and-still-true)
 - [Open questions this leaves for IDEAS.md](#open-questions-this-leaves-for-ideasmd)
 - [What was not verified](#what-was-not-verified)
@@ -532,28 +533,131 @@ agents from my phone" is a web page showing the terminals.
 
 ## On-the-fly mount mutation, across five tools
 
-Worth stating plainly now that there are five data points, because it is the
-one place aiab looks not merely ahead but alone.
+Worth stating plainly now that there are five data points — and worth stating
+*carefully*, because the first version of this table was already out of date
+when it was written. See [the addendum](#addendum-a-sweep-for-movement-2026-10-06)
+for how Docker's row changed.
 
 | | Changing the mount set | Changing network policy |
 | --- | --- | --- |
 | aiab | **in place on a running container** (`add_device` reconciles `readonly` via `lxc config device set`) | per-request policy re-read; established tunnels unaffected |
 | Workshop | committed YAML, relaunch | no egress policy exists |
-| Docker Sandboxes | **sandbox destroyed and recreated** | pre-authorise, or dashboard |
+| Docker Sandboxes | **dynamic, as of v0.45.0/v0.46.0** — mounts persist across restarts and `sbx umount` works on a stopped sandbox. September's "changing the mount set destroys the sandbox" is stale. | pre-authorise, or dashboard |
 | Gondolin | creation-time `vfs` config; no runtime API documented | per-request hooks (sync allow, async `onRequest`) |
 | OpenShell | **creation-time only** — "filesystem, Landlock, and process settings take effect only when a sandbox starts, so changing them requires a new sandbox" | **immediate, and closes existing connections** |
 
-Two things fall out. aiab is the only one of the five that can add a reference
-checkout, or flip one read-write, without destroying the environment the agent
-has built — and for a tool whose premise is a persistent machine with the live
-working tree, that is not a convenience, it is the premise holding. Everyone
-else either has no live tree (OpenShell uploads, Gondolin defaults to memory
-providers) or treats the sandbox as cheap to rebuild (Docker), and both
-positions make creation-time mounts affordable in a way they are not here.
+So aiab is *not* alone here, and the claim this section was written to make does
+not stand. Docker closed the gap between September's pass and this one, which
+is the second time in two passes that `sbx` has shipped the thing an aiab
+survey had just finished calling a differentiator. The narrower true statement:
+aiab and Docker Sandboxes can both change mounts without rebuilding, and the
+two tools with no live host working tree (OpenShell uploads; Gondolin defaults
+to memory providers) cannot — which suggests the capability tracks *having a
+live tree to mutate*, not any cleverness about devices.
 
-But on the *network* side the table runs the other way, and OpenShell is ahead
-of us on the narrow point of tearing down connections an updated policy no
-longer permits.
+On the network side the table still runs the other way, and OpenShell remains
+ahead of us on the narrow point of tearing down connections an updated policy
+no longer permits.
+
+## Addendum: a sweep for movement (2026-10-06)
+
+A deliberately quick pass over the previously-surveyed tools, looking only for
+what changed. It turned up one new aiab finding, one stale claim of our own
+(above), and a reminder that `sbx` moves faster than these surveys do.
+
+### sandbox-runtime 0.0.77 and 0.0.78
+
+Two releases since the 0.0.76 that prompted September's proxy fix, and 0.0.77
+is dense with hardening. Three items are worth holding against aiab:
+
+- **"A `/` write root (Linux) or read root (macOS) no longer switches off the
+  denies beneath it."** A broad grant silently disabling narrower denies —
+  the same bug shape as an allow for `x.com` swallowing a deny for
+  `api.x.com`. aiab is clean here by construction: `evaluate()` decides on the
+  longest matching rule across both lists, so specificity wins in either
+  direction, and `tests/test_netproxy.py` covers it.
+- **"Default write paths obey a read deny, and interior path spellings are
+  canonicalised."** Checked: aiab resolves work-directory and mount paths
+  through `Path.resolve()` (`cli.py:102`, `state.py:165`, and the batch paths
+  at `cli.py:1244`/`1290`), so a symlinked or non-canonical spelling cannot
+  make the recorded path and the guarded path diverge.
+- **"violations: sanitize forged attribution keys."** The sandboxed process
+  forging entries in the supervisor's own audit output. **This one we do not
+  handle** — see below.
+
+### The log-injection finding
+
+`_log(f"DENY {method} {host}:{port}")` interpolates two attacker-controlled
+strings. `method` is `request_line.split(maxsplit=2)[0]`, so any non-whitespace
+bytes; `host` on the ALLOW/DENY path is whatever the request line carried
+(`_SAFE_HOST_RE.fullmatch` gates only the *parking* path, not logging). Those
+lines go two places: the per-container file under `~/.local/share/aiab/proxy/`,
+and `aiab monitor`'s `RichLog` pane, which tails it (`monitor_tui.py:687`).
+
+Measured rather than assumed, because Rich does strip some control characters:
+
+```
+input :  'DENY GET\x1b[31m\x1b[2Jevil\x07 host:443'
+stored:  'DENY GET\x1b[31m\x1b[2Jevil host:443'
+```
+
+Rich's `Text` removes `BEL` but **keeps `ESC`**, so ANSI sequences survive into
+the rendered line. Textual's `RichLog` defaults to `markup=False` (checked on
+textual 2.1.2), so Rich *markup* like `[red]` is inert — but escape sequences
+are a different channel and are not. For the plain log file the hazard is
+unambiguous: `cat` or `tail` it and the escapes execute in the user's terminal.
+For the TUI pane, corruption is likely but was not demonstrated headlessly.
+
+Severity is low — display corruption, not an escape — but it is the exact class
+sandbox-runtime just closed, it is cheap to fix, and the surface it corrupts is
+the pane the user makes allow/deny decisions in.
+
+### Docker Sandboxes: v0.38.0 → v0.46.0
+
+Eight releases in two months, and the one that matters is the mount change
+already folded into the table above. Also worth recording:
+
+- **v0.45.0: "network access now fails closed with accurate errors" when policy
+  evaluation fails or a request is malformed**, and **reverse-DNS lookups
+  restricted to destination IPs already authorised by policy**. The second is a
+  neat generalisation of the same family as our loopback problem — an
+  unconstrained lookup as a side channel around a policy decision.
+- **v0.45.0: experimental outbound UDP now follows sandbox network policy.** So
+  Docker is growing a UDP story; aiab has no UDP at all by construction.
+- **v0.45.0 fixed a credential-revocation bug** that "left running proxies
+  authorized until sandbox recreation", and **v0.43.0 strengthened an OAuth
+  gate to stop third-party kits inheriting built-in agent trust**. Both are
+  consequences of credential injection — costs of the feature September
+  weighed, now visible as shipped bugs.
+- **v0.46.0 breaking change:** secret commands execute from a fresh temporary
+  directory, so `./credential-helper`-style relative paths no longer resolve
+  from the project directory. A path-resolution hole closed.
+- Still no live denial prompt anywhere in the release notes.
+
+### Canonical Workshop: no movement found
+
+Nothing located between the 2026-05-27 announcement (v0.9.0) and today. The
+September findings stand unchanged, including the two pages behind
+readthedocs authentication. Absence of search results is weak evidence, but it
+is the same weak evidence in both passes.
+
+### The category around us has consolidated into hosted platforms
+
+Not competitors, but worth naming so the shape of the field is recorded.
+E2B (Firecracker microVMs per sandbox, own kernel and segmented network
+namespace), Modal (gVisor with syscall interception), Northflank, Blaxel,
+Firecrawl, plus sandbox features from Cloudflare, Vercel and Ramp, and
+**LangSmith Sandboxes** in private preview on hardware-virtualised microVMs.
+All of them are *remote code execution for agent-generated code* — no live host
+working tree, no host credentials to defend, nothing on the user's machine.
+They occupy the opposite corner from aiab on the axis that has organised three
+passes now: configuration and execution both live with the vendor.
+
+Also noted, as reading rather than as findings: two arXiv papers that bear on
+the Scope argument — "Harness Engineering: Anatomy, Architecture, and Evolution
+of Coding Agents — A Source-Code Study of Eleven Systems" (2609.00006) and
+"Steerability via constraints: a substrate for scalable oversight of coding
+agents" (2607.02389). Neither was read.
 
 ## Re-checked and still true
 
@@ -684,7 +788,12 @@ files.
     the agent can run anything anyway. Probably a no; worth recording as
     considered, because it is the most expressive egress policy the three
     passes have seen.
-13. **A fleet view and an off-desktop view are the same feature, and webterm
+13. **Sanitise `method` and `host` before logging them.** Strip or escape
+    non-printable bytes in `_log()`, or validate `method` against the HTTP
+    token grammar and reuse `_SAFE_HOST_RE` on the logging path as well as the
+    parking path. Low severity, two lines, and it protects the pane the user
+    decides in. sandbox-runtime shipped the equivalent in 0.0.77.
+14. **A fleet view and an off-desktop view are the same feature, and webterm
     shows the cheap version.** September recorded both gaps separately
     (`aiab monitor` is per-directory; `notify-send` dies over ssh). A dashboard
     of live terminal tiles over HTTP answers both without an app, an account or
@@ -774,6 +883,28 @@ files.
   at least seven unrelated projects — the one here is `rcarmo/agentbox`,
   identified because that author also wrote webterm and the HN reply paired
   them. A different agentbox may have been meant.
+- **Which sandbox-runtime version shipped the loopback fix is now in doubt.**
+  September recorded "refuse allow-listed hostnames that resolve to loopback,
+  link-local or configured private ranges" as 0.0.76 (2026-09-10); the release
+  listing read today attributes that same sentence to 0.0.77, and rendered the
+  dates in 2024, which cannot be right given 0.0.76's known date. The
+  `CHANGELOG.md` fetch 404'd. The *content* of the fix is not in question and
+  a52da9b stands either way, but do not cite a version number from this pass
+  without re-checking.
+- **Docker's release notes were read as a summary of v0.38.0 onward**, not
+  release by release, so "eight releases in two months" is counted from version
+  numbers rather than from a list, and items are attributed to the version the
+  summary named.
+- **The TUI half of the log-injection finding was not demonstrated.** That Rich
+  keeps `ESC` in `Text.plain` and that `RichLog` defaults to `markup=False`
+  were both measured here; that an escape sequence then corrupts a running
+  Textual pane is inference. The log-file half needs no demonstration.
+- **"No movement found" for Workshop is absence of search results**, not a
+  checked changelog. Its repository releases were not fetched this pass.
+- **The hosted-platform list is from search summaries only.** No vendor
+  documentation was read for E2B, Modal, Northflank, Blaxel, Firecrawl or
+  LangSmith Sandboxes; they are recorded as the shape of the field, and no
+  claim here should be relied on.
 - **Nothing was run, and nothing was installed.** Every claim about Gondolin,
   pi, OpenShell, agentbox and webterm comes from published documentation,
   commit logs, issue titles and README text as of 2026-10-06. Star counts are
