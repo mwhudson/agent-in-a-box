@@ -461,12 +461,23 @@ files.
   available with a TCG fallback implies it degrades rather than refuses inside
   a VM, which is better than Docker Sandboxes — but that is inference from the
   acceleration page, not a documented statement.
-- **No interactive approval path was found**, and that is absence of evidence
-  rather than a documented no. Everything in the CLI and SDK is
-  pre-authorisation (`--allow-host`, `isRequestAllowed`, `execPolicy`), with no
-  sign of a request being held open while someone is asked. Consistent with
-  being a library — there is no human in its loop by construction — so parked
-  network decisions remain without prior art after a fourth tool.
+- **No interactive approval path is shipped — but one is implementable, which
+  is a weaker result than "no prior art".** Checked in `docs/sdk-network.md`
+  after the fact, because the hook signatures decide it. The allow-checks are
+  synchronous and so cannot hold a request open:
+  `isRequestAllowed: (req: Request) => boolean`,
+  `isIpAllowed: ({ ip }) => boolean`, and `execPolicy: (req) => { allow: boolean }`
+  for SSH. But `onRequest` is async —
+  `async (req: Request) => Request | Response | undefined` — and returning a
+  `Response` short-circuits the request. That is precisely aiab's parking
+  semantics: await a human, then proceed or refuse. So an embedder can build
+  parking on Gondolin, on the mediated HTTP/TLS path only; the SSH and
+  mapped-TCP paths are pre-authorisation with a sync hook, and Gondolin has no
+  CONNECT to park. Still nothing *ships* a parked decision, so aiab remains
+  alone in having built one — but the claim "no human in its loop by
+  construction" was wrong, and the correct claim is narrower: no human in its
+  loop by default, with the extension point to add one on one of its three
+  egress paths.
 - **Read at reference level only**, not exercised or deeply checked:
   `--disable-websockets`, the ingress gateway (`--listen`, `sandboxingress`),
   snapshot/resume, the libkrun backend, and `openTcpStream()`'s loopback-only
