@@ -17,6 +17,19 @@ keep twice over. Gondolin's blocked-range list named a range ours does not
 block. And following it to its consumers turned up the thing September got
 wrong: an interactive approval loop for denied egress, shipped, by NVIDIA.
 
+Two things about the shape of this file, since it grew past the usual pass.
+Everything up to and including [Re-checked and still
+true](#re-checked-and-still-true) is survey — what other tools do, and what
+checking our code against them turned up, on 2026-10-06. The four sections
+after it are **analysis dated 2026-10-07**, worked out against the code but
+not against anyone else's tool: whether aiab could sit on Gondolin, how fast
+`sbx` is converging, what a VM port would cost subsystem by subsystem, and
+whether the git guard wants FUSE. They are reasoning-about-aiab, which
+normally belongs in IDEAS.md — they are parked here because they are
+*conclusions this survey produced*, and splitting them from their evidence
+would make both halves harder to use. The open questions are where they go to
+IDEAS.md.
+
 - [What the survey changed](#what-the-survey-changed)
 - [Where Gondolin sits](#where-gondolin-sits)
 - [The egress models, compared properly](#the-egress-models-compared-properly)
@@ -29,6 +42,10 @@ wrong: an interactive approval loop for denied egress, shipped, by NVIDIA.
 - [On-the-fly mount mutation, across five tools](#on-the-fly-mount-mutation-across-five-tools)
 - [Addendum: a sweep for movement (2026-10-06)](#addendum-a-sweep-for-movement-2026-10-06)
 - [Re-checked and still true](#re-checked-and-still-true)
+- [Could aiab be built on top of this?](#could-aiab-be-built-on-top-of-this)
+- [Docker Sandboxes: the convergence tally](#docker-sandboxes-the-convergence-tally)
+- [What a VM port would cost, by subsystem](#what-a-vm-port-would-cost-by-subsystem)
+- [Shadow versus FUSE, and two gaps in the git guard](#shadow-versus-fuse-and-two-gaps-in-the-git-guard)
 - [Open questions this leaves for IDEAS.md](#open-questions-this-leaves-for-ideasmd)
 - [What was not verified](#what-was-not-verified)
 
@@ -708,6 +725,281 @@ thing being spammed, and prompt fatigue is a path to a bad decision being
 clicked through. Low severity, and the fix is a cap plus a ceiling on pending
 files.
 
+## Could aiab be built on top of this?
+
+Asked because Gondolin is the first tool in three passes that looks like a
+*layer* rather than a rival, and the tempting reading is that it could replace
+`lxd.py` and `netproxy.py`. Fair for one of those, not the other, and the
+blocker is in neither.
+
+**`netproxy.py` (566 lines) genuinely dissolves.** `is_external_address()`
+becomes `blockInternalRanges` — which, per the top of this survey, is better
+than ours. The CONNECT relay becomes frame-level mediation, and with it
+`mask_profile_devices()` and `profile_nic_names()` disappear entirely, since
+there is no NAT to mask. `evaluate()` survives as *our* logic transcribed into
+`isRequestAllowed`, and parking survives on async `onRequest`. The mechanism
+goes; the policy semantics move languages.
+
+**`lxd.py` (881 lines) does not.** Lifecycle maps over — `create`, `start`,
+`stop`, `exec`, `apply_limits` all have equivalents, and `init_pid`, the
+project machinery and the `lxc query` caching are LXD bookkeeping that would
+simply go. But the mount and overlay half (`add_device`,
+`set_device_source`, `add_config_overlay`, `add_config_dir`) has no clean
+home: Gondolin's VFS is documented at `VM.create()` time with no runtime API,
+which is the gap tabulated above. And `mount_wayland` is lost outright.
+
+**The blocker is in neither module.** Gondolin's guest is Alpine-only,
+deliberately minimal, and extra packages mean building a new image. aiab's
+premise is a real Ubuntu where `/setup-container` runs `apt install`, Docker
+works inside, and `aiab base` tracks a release — that is `provision.py`,
+`release.py`, `agents.py` and the base machinery, none of which has anywhere
+to live. The swap takes out the two most mechanical modules and the product
+with them.
+
+The language mismatch is a wall rather than a detail. The hooks are SDK-only:
+the CLI has no config file, no per-project state, and no way to express a
+policy callback. So aiab could not shell out to `gondolin` and keep its own
+brain — it would have to *be* the Node program. Against a tool that is
+stdlib-only but for `textual`, with no `[build-system]` on purpose and run
+from a checkout, that is not a port.
+
+The number worth keeping: `lxd.py` + `netproxy.py` is 1,447 of 8,394 lines,
+about 17%. `cli.py` (2,328), `monitor_tui.py` (1,254), `state.py` (796),
+`agents.py` (419) and the attention/focus/notify/netwatch group (978) are the
+bulk, and nothing in Gondolin's scope touches any of it — per-directory state
+keyed by host path, three agents' homes and credentials, `_guard_git_repo`,
+the monitor TUI, focus-aware suppression, lifecycle reaping, tmux. Even in the
+best case Gondolin replaces the bottom sixth.
+
+Which is its own answer, and the one worth carrying to IDEAS.md: **aiab is
+mostly not a sandbox. It is a per-directory agent manager that happens to own
+one.** That is the Scope section's anxiety arriving from a new direction.
+
+So the counterfactual needs restating. The world where aiab-on-Gondolin works
+is three changes deep — TypeScript, a disposable Alpine microVM instead of a
+persistent Ubuntu machine, no Wayland, no apt — and at that point it is a
+different tool wearing the name. The *slightly* different world is narrower and
+more interesting: one where Gondolin's policy engine were a library independent
+of its VM. Then `netproxy.py` is duplication, you keep LXD, and you consume an
+egress policy someone else maintains full-time.
+
+That is the separation Gondolin did not make, and could not: it owns the VM
+precisely so it can own the frames. Which cuts against September's question 4
+in a useful way — Gondolin is evidence the confinement layer is separable as a
+*project*, and evidence against it being separable as a *library you bolt onto
+someone else's container runtime*.
+
+## Docker Sandboxes: the convergence tally
+
+Stated plainly because three passes now point the same way: `sbx` is the only
+tool surveyed that is converging on aiab's *answers* while having started from
+the opposite premise, and it is doing it by attrition — a paid product whose
+users keep hitting the same walls — rather than by reasoning.
+
+Matching as of September: wraps the agent from outside, needs nothing in the
+repo, per-workspace sandbox reused across runs, filesystem as an allowlist,
+deny-by-default egress through a host-side proxy with wildcard domain rules,
+seven agents, port forwarding, a real OS with sudo and Docker inside.
+
+Added since: **dynamic mounts** (v0.45.0/v0.46.0, closing the differentiator
+this very pass had just finished naming), reverse-DNS lookups restricted to
+already-authorised IPs, failing closed when policy evaluation fails, and
+outbound UDP under policy — which is further than aiab goes, having no UDP at
+all.
+
+Three things cannot converge, and they are structural rather than roadmap:
+
+- **KVM on bare metal**, documented as not working inside a VM. aiab runs
+  wherever LXD runs. That follows from choosing a microVM, and reversing it
+  would mean adding a container mode.
+- **Config beside the project** (`sbxenv.yaml`), which forecloses an
+  `aiab mount --for DIR` equivalent: once config is a file next to each
+  checkout, addressing another project's config is a path you have to know.
+  This is the axis that has organised three passes.
+- **The git guard is a chosen position, not a gap.** They document
+  agent-modifiable git hooks in direct-mount mode as a limitation and answer it
+  with clone mode — solving it by giving up the live working tree. The thing
+  aiab protects, they decided not to have.
+
+One thing is a release away. **Parked decisions are the last clear
+differentiator in the egress space, and `sbx` already has most of the
+machinery** — a dashboard with live monitoring and allowlisting. Three passes
+with no live prompt says it is not a priority; OpenShell shipping an approval
+loop says the idea is now in circulation. Treat the gap as borrowed time, not
+a moat.
+
+And the cadence matters: eight minor versions in two months against one survey
+pass.
+
+**The reframing this suggests for IDEAS.md.** The Scope section argues the
+harness half is "where upstream moves fastest" while the sandbox half "still
+has no upstream competitor", and that asymmetry is load-bearing for cutting the
+first and keeping the second. Three passes say **both halves are contested,
+just by different people**: agents compete on the harness half, sandbox tools
+on the sandbox half, and `sbx` closes distance faster than these surveys run.
+The remaining defensible combination is narrow and mostly structural — LXD
+including inside a VM, nothing in or near the repo plus `--for DIR`, the git
+guard on a live tree, GPL and no vendor account — with parked decisions as the
+one contingent item. That is an argument from *combination*, not from absence,
+and it is not the argument the Scope section currently makes.
+
+## What a VM port would cost, by subsystem
+
+Worked out because the microVM tools keep coming up, and answered against the
+code rather than in the abstract. The three subsystems land in completely
+different places.
+
+**Notifications: nearly free, and by design.** Three of four pieces never
+cross the boundary. `notify.py` is host-side `notify-send`, action buttons
+included. `focus.py` is host-side tmux, reading `#{client_flags}`. Parking and
+`netwatch` are two host processes sharing a host directory. Only
+`attention.py` crosses, and it crosses via *files*: the agent writes
+`STATE_MOUNT/attention/<session>` into the directory's state dir, shared at
+`cli.py:735`. LXD VMs share host directories over virtiofs or 9p, so that
+survives as-is — with two caveats to check rather than assume, that ownership
+and idmap behave differently through virtiofs than through a container
+bind-mount, and that LXD issue #13677 reports mount flags not being passed to
+`lxd-agent` for *hotplugged* VM directory shares. Worth noting
+`attention.py`'s own comment gets validated structurally: it keeps the host's
+D-Bus session bus outside the container deliberately, and in a VM you could
+not hand it over if you wanted to.
+
+**netproxy: the policy is portable, the plumbing is not.** Unchanged:
+`evaluate()`, `is_external_address()`, `connect_external()`,
+`_await_decision`, `watcher_attached`, the per-request policy re-read, the
+logging, the 403 bodies — all of it works on a parsed request and the host's
+own network stack. Three things break:
+
+1. **The delivery device is unavailable, not degraded.** Today it is
+   `add_proxy_device(listen="tcp:127.0.0.1:3128", connect="unix:<abstract>",
+   bind="instance")`. LXD implements that by setting up a host listener and
+   then entering the container's network namespace to connect to loopback —
+   exactly what it documents it cannot do for a VM, which runs its own kernel.
+   Proxy devices in VMs are **NAT mode only**: DNAT rules, which cannot target
+   a unix socket and presuppose the guest has a working NIC. aiab masks the
+   NIC.
+2. **The abstract socket goes, and so does its rationale.** It is abstract
+   because snap-confined LXD cannot dial filesystem paths under `$HOME`;
+   abstract sockets are per-netns kernel objects and do not exist across a VM
+   boundary. Both the hack and the reason for it evaporate.
+3. **`SO_PEERCRED` dies.** `verify_request` accepts uid 0 or our own uid, and
+   its docstring is explicit that this peer-credential check is what stands in
+   for socket file permissions. No shared kernel, no peer uid.
+
+Two replacements, with different security character. **vsock plus a small
+guest-side relay** (HTTP_PROXY TCP → `AF_VSOCK`) keeps "no NIC at all", keeps
+fail-closed by construction, and authenticates by CID — at the cost of a guest
+component aiab does not have. **A host-only bridge** with the proxy on the
+bridge address and nftables denying the rest needs no guest component, but the
+guarantee changes in kind, from "there is no network device" to "the firewall
+rules are correct" — weaker in character even where equivalent in effect, and
+effectively code-on-incus's model.
+
+**Clipboard: this one actually breaks.** It is not a module. Clipboard is
+`mount_wayland` (`lxd.py:799`) bind-mounting the host's Wayland socket at the
+identical path inside, plus `wl-clipboard` in the guest (`agents.py:217-294`)
+because Claude shells out to `wl-copy`/`wl-paste` for image paste-in and
+copy-out. A unix socket is a kernel object rather than file content, so no
+amount of virtiofs makes it connectable from a guest kernel. The options are a
+Wayland proxy on both sides — the `wayland-proxy-virtwl`/sommelier family,
+which exists precisely because VMs cannot do this — or a replacement.
+
+The replacement is the interesting answer, because it is narrower *and*
+better. What is used is clipboard get and set, not a compositor. A small
+host-side service doing get/set over vsock with `wl-copy`/`wl-paste` shims in
+the guest is less code than Wayland forwarding, and it replaces handing over
+the entire compositor socket to obtain clipboard access — over-broad by the
+same reasoning Workshop uses for declining to auto-connect
+`system:ssh-agent`. So the VM move would force a narrowing that is arguably
+correct on a container too.
+
+**The rule underneath.** Everything host-side-only ports for free. Everything
+crossing via *files* ports cheaply, over virtiofs. Everything crossing via
+*kernel objects* — unix sockets, netns entry, `SO_PEERCRED` — breaks. All
+three breakages are one fact in different clothes: a VM has its own kernel.
+That is also the one-sentence reason Gondolin ships four daemons inside its
+guest and aiab ships none.
+
+**And the two destinations are not the same size.** An **LXD VM** keeps
+`lxc exec` (via lxd-agent), disk devices, config, limits and snapshots, so
+most of `lxd.py`'s lifecycle half survives and the damage concentrates in the
+three subsystems above. A **Firecracker/Gondolin-style microVM** means owning
+exec, filesystem sharing and networking yourself — a guest agent of your own,
+which is the rewrite the layering section describes.
+
+The fourth casualty is the git guard, which needs its own section.
+
+## Shadow versus FUSE, and two gaps in the git guard
+
+First what the guard *is*, because it is easy to describe wrongly and the
+wrong description changes the conclusion. `_guard_git_repo` (`cli.py`) does not
+mount the real files read-only. It copies the repo's `.git/hooks` into a
+**host-side sidecar** under `state.git_guard_dir()` and overlays that at
+`{container_path}/.git/hooks` **writable**; `.git/config` gets the same sidecar
+treatment with `readonly=True`. `_reseed_tree`/`_reseed_file` refresh the
+sidecars in place at setup — in place rather than by rename, deliberately, so
+a sidecar already bind-mounted into a reused running container reflects the new
+contents.
+
+So hooks the agent plants land in a host directory outside the repo, never fire
+on the host, and are wiped at the next setup. **That is Gondolin's
+`ShadowProvider(writeMode: "tmpfs")` implemented with bind-mounts** — already,
+today, for one of the two guarded paths. Which reframes the question of
+whether aiab should "go full FUSE": it is further along that road than the
+mechanism suggests.
+
+Two gaps, both current behaviour rather than speculation:
+
+1. **`.git/config` is read-only where it could be a shadow.** This is the wart
+   359e4b7 had to document, and the thing IDEAS.md's PAT plan routes around —
+   the `insteadOf` rewrite is forced into the container's *global* git config
+   because `.git/config` is read-only. A writable sidecar would let the
+   container write its own config with the host's copy untouched, and the
+   semantics are already understood from hooks. A constraint becomes a
+   feature.
+2. **Repos whose `.git` is a gitfile are unguarded.** The docstring says so: a
+   no-op "when its `.git` is a gitfile rather than a directory (e.g. a linked
+   worktree or submodule checkout mounted directly) — there the `.git/hooks`
+   and `.git/config` paths don't live where we'd mount them". The skip is
+   correct given the mechanism, but the hole is real: a submodule checkout
+   mounted read-write gets no guard at all today.
+
+**What full FUSE would buy.** Predicates instead of enumerated paths, which is
+the general form of gap 2 — a provider could follow the gitfile wherever it
+points, where a bind-mount must resolve and enumerate each case. Per-operation
+policy: allow-with-logging, deny `chmod` while allowing writes, merged views.
+And mount count stops scaling with guarded paths.
+
+**What it costs, with Gondolin as the evidence.** Its last release window
+shipped five VFS correctness fixes — a TOCTOU in `RealFSProvider` path
+validation (#143, closed by serialising fs-rpc), truncate coherence for
+`MemoryProvider` handles, serialising concurrent guest file operations,
+shadowed `mkdir` under backend-only parents, and forwarding guest `chmod` to
+providers. Write the layer, own its bugs; the same pattern as their userspace
+TCP stack. Two objections are specific to aiab:
+
+- **Performance runs into the premise.** Gondolin can afford FUSE because its
+  guest has no host filesystem by default and the advice is `MemoryProvider`
+  for scratch, with RPC payloads capped at `MAX_RPC_DATA = 60 KiB`. aiab's
+  premise is a live working tree under active development — `git status` on a
+  large repo, builds, ripgrep, `node_modules` — which is the syscall-storm
+  workload FUSE is worst at.
+- **It is an enforcement downgrade.** A read-only bind-mount is enforced by
+  the kernel. A userspace predicate is a weaker primitive with a
+  check-then-use window, which is literally what #143 was.
+
+Plus a FUSE filesystem in the hot path of every file operation, in a tool that
+is stdlib-only apart from `textual`.
+
+**And the sequencing matters.** FUSE is not an alternative to solving the VM
+transport problem; it is built on top of it. A guest FUSE client has to talk to
+a host service — `sandboxfs` + virtio-serial + `FsRpcService`. Once there is a
+guest agent for the filesystem *and* a vsock relay for the proxy, Gondolin's
+architecture has been rebuilt in Python. So full FUSE earns its cost if and
+when a VM move makes host-mediated filesystem access mandatory rather than
+optional — not as a way to improve the guard on a container, where extending
+the shadow pattern already in the code is far cheaper.
+
 ## Open questions this leaves for IDEAS.md
 
 1. **Block `100.64.0.0/10` in `is_external_address()`, and decide the rule.**
@@ -793,7 +1085,31 @@ files.
     token grammar and reuse `_SAFE_HOST_RE` on the logging path as well as the
     parking path. Low severity, two lines, and it protects the pane the user
     decides in. sandbox-runtime shipped the equivalent in 0.0.77.
-14. **A fleet view and an off-desktop view are the same feature, and webterm
+14. **Make `.git/config` a writable sidecar, like `.git/hooks` already is.**
+    The mechanism exists and the semantics are proven; what changes is one
+    `readonly=True`. It removes the wart 359e4b7 documents and unblocks the
+    `insteadOf` rewrite the PAT plan currently pushes into the container's
+    global git config. Decide deliberately what is lost: config the agent
+    writes stops being visible on the host, and is discarded at the next
+    reseed.
+15. **Guard repos whose `.git` is a gitfile.** Linked worktrees and submodule
+    checkouts mounted read-write get no guard today, by a deliberate skip. The
+    fix within the current mechanism is to resolve the gitfile and overlay at
+    the real location; the general fix is a predicate, which is the FUSE
+    argument.
+16. **Rewrite the Scope section's competitive claim around *combination*, not
+    absence.** Supersedes the September carry-over in item 7. The sandbox half
+    now has four or five competitors and `sbx` is converging on our answers at
+    eight releases to our one survey; the harness half is contested too. What
+    is left is a narrow structural combination, and parked decisions are the
+    one contingent item in it.
+17. **If a VM port ever becomes live, the budget is three breakages and one
+    rewrite.** The proxy delivery device, the abstract socket and
+    `SO_PEERCRED` all go; the git guard needs a different mechanism entirely,
+    because sidecar overlays of a single file are a container trick. Decide
+    the destination first — an LXD VM keeps most of `lxd.py`, a bare microVM
+    keeps none of it.
+18. **A fleet view and an off-desktop view are the same feature, and webterm
     shows the cheap version.** September recorded both gaps separately
     (`aiab monitor` is per-directory; `notify-send` dies over ssh). A dashboard
     of live terminal tiles over HTTP answers both without an app, an account or
@@ -905,6 +1221,24 @@ files.
   documentation was read for E2B, Modal, Northflank, Blaxel, Firecrawl or
   LangSmith Sandboxes; they are recorded as the shape of the field, and no
   claim here should be relied on.
+- **The VM-port analysis is a desk exercise.** No LXD VM was launched and
+  nothing was measured. The LXD facts behind it — proxy devices in VMs being
+  NAT-mode only, host directory shares going over 9p/virtiofs, `lxc exec`
+  depending on lxd-agent — come from LXD documentation and forum text read on
+  2026-10-07, not from running any of it. Issue #13677 was read as a title.
+- **"A clipboard get/set service would be enough" is a design claim, not a
+  verified one.** What `wl-copy`/`wl-paste` actually need from the compositor
+  for Claude's image paste path (MIME negotiation, offers, multiple types) was
+  not checked.
+- **The FUSE performance argument is qualitative.** Nothing was benchmarked,
+  here or against Gondolin; it rests on the shape of the workload and on
+  Gondolin's own 60 KiB RPC cap and memory-provider-first advice.
+- **Gondolin's five VFS fixes are commit subjects and issue titles**, not
+  diffs. The TOCTOU characterisation of #143 follows from its title and the
+  fix that closed it.
+- **The 17% figure is `wc -l`**, which counts licence headers and this
+  project's unusually heavy comments. It measures bulk, not effort or
+  difficulty.
 - **Nothing was run, and nothing was installed.** Every claim about Gondolin,
   pi, OpenShell, agentbox and webterm comes from published documentation,
   commit logs, issue titles and README text as of 2026-10-06. Star counts are
