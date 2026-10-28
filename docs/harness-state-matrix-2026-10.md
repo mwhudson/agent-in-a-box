@@ -137,34 +137,105 @@ the git-push entry, already built, for auth. aiab is a host process that
 already owns a per-directory boundary; this is the hook for putting policy
 there.
 
-## 4. What the SDKs actually do
+## 4. What the SDKs do
 
-The short answer is that **they don't solve it differently — they just can't
-use the interactive path, so they lean on exactly these hooks.** From the
-Claude docs: "`apiKeyHelper`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_AUTH_TOKEN`
-apply to the CLI and the surfaces that wrap it, including the VS Code
-extension, the Agent SDK, and GitHub Actions."
+All four harnesses ship an SDK for driving them from someone else's code, and
+that is the closest published analogue to what aiab does: run the harness in
+an environment the embedder controls, with no interactive login available. So
+their embedding contract is worth reading as a design document.
 
-So there's no separate SDK credential system to borrow. What's informative is
-the *shape* the embedding case pushed them into, which is the host-managed
-protocol in §3: the embedding host owns the provider and the token, declares
-so with `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`, supplies the credential by
-file or named variable, and takes responsibility for refresh. The child never
-logs in and never holds a long-lived secret.
+They differ in how they attach:
 
-There is also first-party prior art for the containerised case: the binary
-carries a "byoc" flow that writes `.credentials.json` into a config dir, copies
-`.claude.json` alongside, and sets `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CONFIG_DIR`
-for the child (bin). That is close to what aiab does by hand, done by
-upstream — i.e. **per-session config dir + injected credential** is the
-pattern the vendor converged on, not bind-mounting pieces of a shared home.
+| SDK | Attaches by |
+|---|---|
+| Claude Agent SDK (`claude_agent_sdk`) | **spawns the CLI** — `cli_path`, `stderr` callback, POSIX `user` option (doc) |
+| Copilot SDK (`@github/copilot-sdk`, `github-copilot-sdk`) | JSON-RPC to the CLI; **does not spawn it**, and reads the CLI's stored credentials directly (doc) |
+| opencode SDK (`@opencode-ai/sdk`) | `createOpencode()` spawns a server, or `createOpencodeClient({baseUrl})` attaches to a running one (doc) |
+| Codex SDK (`@openai/codex-sdk`) | drives the CLI, with `cli_env` to control its environment (doc) |
 
-It also runs a scanner that knows where *other* harnesses keep config —
-`.codex/config.toml`, `.gemini/` — and distinguishes user-scope from
-project-scope, flagging when "the user-scope read or write root has been
-redirected" (bin). Someone upstream is solving the same problem across
-harnesses, which is mild reassurance that the config-dir-redirection approach
-is the expected one.
+### The convergent pattern
+
+Four vendors, independently, arrived at the same two-part split — and it is
+*precisely* the state/config split the audit argued for, expressed as API
+surface rather than as a directory layout:
+
+| | "which config to load" | "where the credential comes from" |
+|---|---|---|
+| Claude | `setting_sources=["user","project","local"]`, or `[]` for none; `settings=` inline JSON or a path | `env={...}` merged over the inherited environment |
+| Copilot | config dir / `COPILOT_HOME` | `GitHubToken`, a `GitHubTokenProvider` callback, env vars, or BYOK |
+| opencode | inline `config` overrides at instance creation | `client.auth.set({path:{id:"anthropic"}, body:{type:"api", key:...}})` |
+| Codex | `cli_env.CODEX_HOME` | `auth: "auto" | "chatgpt" | "api-key"`, or `apiKey` on the instance |
+
+Three things fall out of that table, all of them load-bearing for aiab.
+
+**1. Every one of them has a sealed mode — explicit credential, nothing
+ambient.** Copilot's is the most explicit: `UseLoggedInUser: false` "prevents
+fallback to stored credentials and environment variables — requires explicit
+token". Codex's is `auth: "api-key"`. Claude's is `setting_sources=[]` plus a
+credential in `env`. opencode's is `auth.set()` against a fresh server. This
+is exactly the posture a confined container wants, and it is a supported
+configuration rather than something to reverse-engineer.
+
+**2. Two of them make the host a token *service*, not a token *source*.**
+Copilot's `GitHubTokenProvider` is a callback receiving
+`{host, sessionId, reason}` and returning `{kind:"token", accessToken, expiresIn}`;
+the runtime calls it with `reason: "refresh"` when the current token has an
+hour or less left. Claude's equivalents are `apiKeyHelper` (doc) and
+`CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH` / `..._REFRESH_TIMEOUT_MS` (bin).
+
+That is the design IDEAS.md gropes toward in the git-push entry, twice over,
+from two vendors: **the long-lived secret stays with the host, and the child
+gets short-lived material on demand.** It also disposes of the renewal worry
+in §3 — a callback host doesn't care that a token lasts a year, because it
+isn't the token's custodian.
+
+**3. Redirecting the config dir carries the login with it — in Codex too.**
+The Codex SDK docs: if you override `cli_env.CODEX_HOME`, "that directory must
+contain a valid Codex login state for ChatGPT-authenticated runs." That is the
+same coupling the Claude docs describe for `CLAUDE_CONFIG_DIR`, in a different
+product. So §2's finding is not a claude quirk, it is **the norm**: the config
+directory *is* the credential's home, and a per-directory config dir implies a
+per-directory login unless the credential is injected.
+
+Which is the whole argument, arrived at independently: you get to choose
+per-directory config *or* a shared credential file, not both — so inject.
+
+### What the SDKs don't give us
+
+Worth being clear about the limits, because two of these are tempting:
+
+- **The Claude Agent SDK has no per-session config isolation.** "The SDK
+  always uses the user's Claude Code installation and configuration" (doc).
+  `setting_sources` gates *settings files* only — not `.claude.json`, not
+  credentials, not history. Isolation still means `CLAUDE_CONFIG_DIR` via
+  `env`, i.e. the same mechanism aiab would use anyway. The SDK is not a
+  shortcut around §2.
+- **The Copilot SDK reads the same mixed-kind file.** It doesn't spawn the
+  CLI; it reads the credentials the CLI stored — the system keychain where
+  there is one, and on headless Linux that is `copilotTokens` inside
+  `.copilot/config.json` (obs). So the SDK route does not get us out of
+  copilot's one-file problem; only `COPILOT_HOME` plus an injected
+  `COPILOT_GITHUB_TOKEN` does.
+- **opencode's SDK is the only one that can write a credential over an API**
+  (`auth.set`) rather than placing a file. Attractive — no secret on disk in
+  the container, no env var — but it needs the server model
+  (`opencode serve`), which is a different execution shape from what aiab runs
+  today, and the server's own auth is only HTTP basic
+  (`OPENCODE_SERVER_PASSWORD`).
+
+### First-party containerisation prior art
+
+Independently of the SDKs, the claude binary carries a "byoc" flow that writes
+`.credentials.json` into a config dir, copies `.claude.json` alongside, and
+sets `CLAUDE_CODE_OAUTH_TOKEN` + `CLAUDE_CONFIG_DIR` for the child (bin). It
+also runs a scanner that knows where *other* harnesses keep config
+(`.codex/config.toml`, `.gemini/`), distinguishes user-scope from
+project-scope, and flags when "the user-scope read or write root has been
+redirected" (bin).
+
+So: per-session config dir plus an injected credential, with the host aware
+that redirection has happened. Same conclusion as the SDKs, from the
+implementation side.
 
 ## 5. Two landmines this turned up
 
@@ -211,6 +282,20 @@ Which means the env-var question and the home-dir question are the same
 question, and §3 is the answer to both. The cost is the scope reduction in
 §3, and that's the thing worth deciding on before any of it gets built.
 
+§4 raises the ceiling on that, though. The vendors' own embedding contracts
+don't stop at "inject a credential" — two of them make the **host a token
+service with a refresh callback**, so the long-lived secret never enters the
+container at all and the renewal problem belongs to the host. aiab is already
+a host process that owns a per-directory boundary and already brokers egress
+through a proxy; `apiKeyHelper` pointed at an aiab-managed socket is the same
+shape as what it does for the network today.
+
+That is a bigger change than this audit set out to propose, and it's the first
+option seen here that is *better* than the status quo rather than merely
+tidier. It should be weighed on its own rather than smuggled in as part of a
+home-directory cleanup — but it is where the design wants to go, and both the
+`apiKeyHelper` and `ANTHROPIC_UNIX_SOCKET` hooks for it already exist.
+
 Still true that nothing here has been run. The audit's §7 checklist stands,
 minus the `CLAUDE_SECURESTORAGE_CONFIG_DIR` items, which the documented
 multi-account behaviour has now answered the other way.
@@ -220,6 +305,13 @@ multi-account behaviour has now answered the other way.
 - [Claude Code: Authentication](https://code.claude.com/docs/en/authentication)
 - [Claude Code: Environment variables](https://code.claude.com/docs/en/env-vars)
 - [Claude Code: Agent SDK reference (Python)](https://code.claude.com/docs/en/agent-sdk/python)
+- [Copilot SDK: Authentication](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate)
+  and [`docs/auth/authenticate.md`](https://github.com/github/copilot-sdk/blob/main/docs/auth/authenticate.md)
+- [github/copilot-sdk](https://github.com/github/copilot-sdk) ·
+  [`@github/copilot-sdk`](https://www.npmjs.com/package/@github/copilot-sdk) ·
+  [`github-copilot-sdk` (PyPI)](https://pypi.org/project/github-copilot-sdk/)
+- [opencode: SDK](https://opencode.ai/docs/sdk/) and [Server](https://opencode.ai/docs/server/)
+- [Codex SDK (TypeScript)](https://www.codex-docs.com/en/docs/security/sdk)
 - [Claude Code CLI environment variables (community gist)](https://gist.github.com/jedisct1/9627644cda1c3929affe9b1ce8eaf714)
 - [GitHub Copilot CLI configuration directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
 - [Authenticating GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)
