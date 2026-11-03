@@ -57,6 +57,7 @@ import fcntl
 import ipaddress
 import os
 import re
+import select
 import signal
 import socket
 import socketserver
@@ -476,9 +477,32 @@ class _Handler(socketserver.StreamRequestHandler):
             self.wfile.write(head + payload)
 
 
-def _pipe(src: socket.socket, dst: socket.socket) -> None:
+# How long one direction of a tunnel may sit silent *after the other has
+# finished* before the proxy gives up on it (see _relay). It is an idle
+# timeout in that half-closed state, not a cap on the tunnel: a byte in
+# either direction resets it, so a slow or streaming response survives as
+# long as it keeps saying something.
+_HALF_CLOSE_GRACE = 120.0
+
+
+def _pipe(src: socket.socket, dst: socket.socket, done: threading.Event) -> None:
+    """Shovel one direction of a tunnel, then half-close the far side.
+
+    Reads wait in poll() rather than in a blocking recv(), so a direction
+    whose peer has gone silent can still notice ``done`` — set by whichever
+    direction finishes first — and give up instead of blocking forever.
+    ``src`` itself stays a blocking socket, so the sendall() the other
+    direction does on it keeps its ordinary semantics (a settimeout() here
+    would make that one raise mid-stream after a slow reader).
+    """
+    poller = select.poll()
+    poller.register(src, select.POLLIN)
     try:
         while True:
+            if not poller.poll(_HALF_CLOSE_GRACE * 1000):
+                if done.is_set():
+                    return  # the other direction ended and this one is dead
+                continue  # an idle tunnel is fine while both ends are live
             data = src.recv(65536)
             if not data:
                 break
@@ -486,15 +510,27 @@ def _pipe(src: socket.socket, dst: socket.socket) -> None:
     except OSError:
         pass
     finally:
+        done.set()
         with contextlib.suppress(OSError):
             dst.shutdown(socket.SHUT_WR)
 
 
 def _relay(client: socket.socket, upstream: socket.socket) -> None:
-    """Shovel bytes both ways until both directions are closed."""
-    t = threading.Thread(target=_pipe, args=(client, upstream), daemon=True)
+    """Shovel bytes both ways until both directions are closed.
+
+    Either direction ending starts the clock on the other, because a tunnel
+    whose peer went away *without closing* — a killed client, a server that
+    holds an idle socket open — leaves the surviving direction blocked on a
+    read that will never return. That pins the client socket, the upstream
+    socket and two threads for the life of the proxy, which outlives the
+    session that opened the tunnel; enough of them and the proxy hits its
+    file-descriptor limit and starts failing every request, policy lookups
+    included.
+    """
+    done = threading.Event()
+    t = threading.Thread(target=_pipe, args=(client, upstream, done), daemon=True)
     t.start()
-    _pipe(upstream, client)
+    _pipe(upstream, client, done)
     t.join()
 
 

@@ -189,3 +189,73 @@ def test_unparseable_address_refused():
     # Fail closed: this is the last check before a connection is made.
     assert not is_external_address("not-an-address")
     assert not is_external_address("")
+
+
+# -- tunnel teardown --
+#
+# _relay keeps both directions of an established tunnel going. The cases below
+# are the ones that used to leak: a peer that goes away *without closing*
+# leaves the other direction blocked on a read that never returns, pinning two
+# sockets and two threads in a proxy that outlives the session.
+
+import socket  # noqa: E402
+import threading  # noqa: E402
+
+from aiab import netproxy  # noqa: E402
+from aiab.netproxy import _relay  # noqa: E402
+
+
+def _tunnel():
+    """A relay thread over two socketpairs, plus the two far ends.
+
+    Returns (thread, client_peer, upstream_peer): the relay shovels between
+    the inner halves, and the test plays both outer ends.
+    """
+    client_peer, client = socket.socketpair()
+    upstream, upstream_peer = socket.socketpair()
+    t = threading.Thread(target=_relay, args=(client, upstream), daemon=True)
+    t.start()
+    return t, client_peer, upstream_peer
+
+
+def test_relay_gives_up_when_the_client_vanishes(monkeypatch):
+    # The client closes; the upstream stays open and silent (a server with a
+    # long idle timeout). The upstream->client direction must not block forever.
+    monkeypatch.setattr(netproxy, "_HALF_CLOSE_GRACE", 0.2)
+    t, client_peer, upstream_peer = _tunnel()
+    client_peer.close()
+    t.join(10)
+    assert not t.is_alive()
+    upstream_peer.close()
+
+
+def test_relay_gives_up_when_the_upstream_vanishes(monkeypatch):
+    # The mirror image: the upstream closes while the client holds its end
+    # open without sending anything more.
+    monkeypatch.setattr(netproxy, "_HALF_CLOSE_GRACE", 0.2)
+    t, client_peer, upstream_peer = _tunnel()
+    upstream_peer.close()
+    t.join(10)
+    assert not t.is_alive()
+    client_peer.close()
+
+
+def test_relay_keeps_an_idle_tunnel_with_both_ends_live(monkeypatch):
+    # The grace is an idle timeout for the *half-closed* state only: while
+    # both ends are open, a tunnel that says nothing for a while (a long poll,
+    # a streaming response between chunks) has to survive and still carry
+    # traffic afterwards.
+    monkeypatch.setattr(netproxy, "_HALF_CLOSE_GRACE", 0.2)
+    t, client_peer, upstream_peer = _tunnel()
+    try:
+        t.join(0.6)  # several times the grace
+        assert t.is_alive()
+        client_peer.sendall(b"ping")
+        assert upstream_peer.recv(16) == b"ping"
+        upstream_peer.sendall(b"pong")
+        assert client_peer.recv(16) == b"pong"
+    finally:
+        client_peer.close()
+        upstream_peer.close()
+    t.join(10)
+    assert not t.is_alive()
