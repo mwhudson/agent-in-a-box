@@ -6,6 +6,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 - [aiab run](#aiab-run)
 - [aiab stop](#aiab-stop)
 - [aiab remove](#aiab-remove)
+- [aiab mv](#aiab-mv)
 - [aiab mount / aiab unmount](#aiab-mount--aiab-unmount)
 - [aiab net](#aiab-net)
 - [aiab base](#aiab-base)
@@ -78,9 +79,9 @@ DIR`) **without deleting it**: everything inside it survives, so the next
 `aiab run` starts it again rather than rebuilding it from the template.
 
 A container already stops itself a few minutes after its last session exits,
-so this is for stopping one *now* — to free its memory, or before moving the
-directory it belongs to. An isolated profile runs in its own container, so
-pass `--profile NAME` to stop that one.
+so this is for stopping one *now* — to free its memory, or before
+[`aiab mv`](#aiab-mv). An isolated profile runs in its own container, so pass
+`--profile NAME` to stop that one.
 
 It refuses while the container is in use, which means either of:
 
@@ -104,6 +105,70 @@ Deletes the session container for the directory (current directory, or `--for
 DIR`). The base/template container is left intact, so the next run clones a
 fresh one quickly. An isolated profile runs in its own container, so pass
 `--profile NAME` to remove that one.
+
+## aiab mv
+
+```
+aiab mv [--after] OLD NEW
+```
+
+Moves a project directory and takes its aiab records with it. Everything aiab
+records for a directory is keyed by the directory's **path** — mounts, network
+policy, base release, limits, environment, and the state dir holding the saved
+setup script and each agent's session history — so moving the directory with
+plain `mv` orphans all of it. Worse, the records then look like a deleted
+directory's, and [`aiab gc`](#aiab-gc) reclaims them, state dir included.
+
+`aiab mv` re-keys the lot instead:
+
+- the five per-directory JSON records (`mounts.json`, `network.json`,
+  `base.json`, `limits.json`, `env.json`);
+- the state dir (`dirstate/<basename>-<hash>/`), renamed to the new path's
+  slug with its contents — setup script, each agent's home for this directory
+  — and its `.source` marker updated;
+- mounts recorded **by other project directories** that point at the moved
+  directory, or into it. A sibling tree you `aiab mount`ed elsewhere keeps
+  working.
+
+The moved directory's session containers are **removed**, because both their
+name and their mounts derive from the old path. Nothing durable lives in them:
+the next `aiab run` clones a fresh one from the template, replays the recorded
+mounts, and `/setup-container` restores the dev environment from the saved
+script. Stop or exit any session there first — `aiab mv` refuses while a
+container is in use, on the same two conditions as
+[`aiab stop`](#aiab-stop).
+
+Which of the two things it does is inferred from what's on disk, because
+repairing records *after* a move you already made is the likelier way to reach
+this command:
+
+| `OLD` | `NEW` | what happens |
+| --- | --- | --- |
+| exists | doesn't | the directory is moved, then the records follow |
+| gone | exists | records only — the move already happened |
+| neither | | error: nothing to go on |
+| exists | exists | ambiguous: pass `--after` to mean records-only |
+
+`--after` always means records-only and never touches the filesystem. (It's
+spelled after `hg mv --after`; `git mv` has no such flag.) Neither directory
+has to exist for the repair, so a move made months ago is still fixable. If
+you no longer remember the old path, it is still recorded: `aiab list` shows
+it as a container's source dir, and each state dir's `.source` file names the
+directory it belongs to. Don't reach for `aiab gc` to find it — that's the
+command that *deletes* the orphans.
+
+If `NEW` already has aiab records of its own — you ran an agent there after
+moving it, say — `aiab mv` refuses rather than merge two directories' mounts,
+policies and session histories.
+
+> **The agent's own history is keyed separately.** Each agent keys its
+> per-project state (Claude Code's `~/.claude/projects/<path>/`, Copilot's
+> `trustedFolders` and tool approvals) by the path *inside* the container,
+> which is `/work/<basename>`. So moving a directory to a new parent keeps the
+> basename and leaves all of that intact, while **renaming** it starts the
+> agent's own history fresh. The old transcripts aren't lost — they're still
+> in the state dir that `aiab mv` just moved, under the old key — but the
+> agent won't offer them for `--continue`.
 
 ## aiab mount / aiab unmount
 
@@ -679,6 +744,11 @@ Removes every session container whose source directory no longer exists
 policies, base/limits/env records, and [state
 dirs](concepts.md#per-directory-state-and-the-setup-script-aiab) of deleted
 directories along with it. The base/template containers are never touched.
+
+A directory that was *moved* rather than deleted looks exactly like a deleted
+one from here, so `aiab gc` will reclaim its records — saved setup script and
+session history included. Use [`aiab mv`](#aiab-mv) to move a project
+directory, or to repair the records after moving one by hand.
 
 ## aiab lxc
 

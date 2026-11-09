@@ -16,6 +16,7 @@ from aiab import agents, attention, profiles, state
 
 from aiab.cli import (
     _agent_command,
+    _mv_moves_on_disk,
     _drop_stale_home_overlays,
     _guard_git_repo,
     _json_set,
@@ -406,10 +407,15 @@ def test_agent_containers_yields_isolated_profile_prefixes(monkeypatch, tmp_path
     conn = lxd.Lxd("aiab")
     result = list(_agent_containers(conn, tmp_path))
 
-    prefixes = [prefix for prefix, _ in result]
+    prefixes = [prefix for _agent, prefix, _container in result]
     assert "claude" in prefixes
     assert "claude-openrouter" in prefixes  # the built-in isolated profile
     assert prefixes == requested_prefixes
+    # An isolated profile's prefix doesn't name its agent, so the agent is
+    # yielded alongside it (aiab mv needs it to ask about background sessions).
+    assert ("claude", "claude-openrouter") in [
+        (agent, prefix) for agent, prefix, _container in result
+    ]
 
 
 def test_agent_containers_skips_containers_that_dont_exist(monkeypatch, tmp_path):
@@ -663,3 +669,76 @@ def test_overlays_outside_the_mounted_directories_are_left_alone(tmp_path):
     container: Any = FakeContainer({"/work/repo/.git/config": "cfg-gitguard"})
     _drop_stale_home_overlays(container, [(shared, f"{CONTAINER_HOME}/.copilot")])
     assert container.removed == []
+
+
+# ---------------------------------------------------------------------------
+# _mv_moves_on_disk
+# ---------------------------------------------------------------------------
+
+
+def test_mv_moves_the_directory_when_only_old_exists(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    assert _mv_moves_on_disk(old, tmp_path / "new", after=False) is True
+
+
+def test_mv_follows_a_move_already_made(tmp_path):
+    # The likely way in: renamed in a shell, then came looking for the repair.
+    new = tmp_path / "new"
+    new.mkdir()
+    assert _mv_moves_on_disk(tmp_path / "old", new, after=False) is False
+
+
+def test_mv_rejects_an_ambiguous_pair(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    with pytest.raises(click.UsageError, match="--after"):
+        _mv_moves_on_disk(old, new, after=False)
+
+
+def test_mv_after_resolves_the_ambiguous_pair(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    assert _mv_moves_on_disk(old, new, after=True) is False
+
+
+def test_mv_rejects_a_pair_with_nothing_on_disk(tmp_path):
+    with pytest.raises(click.UsageError, match="neither"):
+        _mv_moves_on_disk(tmp_path / "old", tmp_path / "new", after=False)
+
+
+def test_mv_after_needs_the_new_path_to_exist(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    with pytest.raises(click.UsageError, match="not a directory"):
+        _mv_moves_on_disk(old, tmp_path / "new", after=True)
+
+
+def test_mv_rejects_a_move_to_the_same_path(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    with pytest.raises(click.UsageError, match="same directory"):
+        _mv_moves_on_disk(old, old, after=False)
+
+
+def test_mv_will_not_move_onto_an_existing_file(tmp_path):
+    # NEW existing at all is the blocker, not NEW being a directory: renaming
+    # onto a file would fail, and --after onto one is incoherent.
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    new.write_text("in the way\n")
+    with pytest.raises(click.UsageError):
+        _mv_moves_on_disk(old, new, after=False)
+
+
+def test_mv_rejects_a_destination_whose_parent_is_missing(tmp_path):
+    # The rename would fail with ENOENT; say which path is wrong instead.
+    old = tmp_path / "old"
+    old.mkdir()
+    with pytest.raises(click.UsageError, match="not a directory"):
+        _mv_moves_on_disk(old, tmp_path / "nope" / "new", after=False)

@@ -20,6 +20,7 @@ Everything is driven by a single command, `aiab`, with a subcommand per task:
 aiab run <agent>            # run an agent in a container for the current dir
 aiab stop <agent>           # stop that container now, keeping it
 aiab remove <agent>         # delete that container
+aiab mv OLD NEW             # move a project dir, taking its aiab records along
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts
 aiab net ...                # restrict a dir's containers' network access

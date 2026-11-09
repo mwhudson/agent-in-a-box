@@ -869,3 +869,224 @@ def test_session_home_dir_is_stable(tmp_path):
     assert state.session_home_dir(project, "claude") == state.session_home_dir(
         project, "claude"
     )
+
+
+# ---------------------------------------------------------------------------
+# dir_records
+# ---------------------------------------------------------------------------
+
+
+def test_dir_records_empty_for_an_unknown_dir(tmp_path):
+    assert state.dir_records(tmp_path / "unknown") == []
+
+
+def test_dir_records_names_each_kind_present(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    state.set_mount(project, tmp_path / "src", readonly=True)
+    state.set_base(project, "22.04")
+    state.dir_state_dir(project)
+
+    assert state.dir_records(project) == ["mounts", "base", "state"]
+
+
+def test_dir_records_does_not_create_the_state_dir(tmp_path):
+    # It is the pre-flight for a move, so asking must not bring into being the
+    # very thing it reports on (hence dir_state_path, not dir_state_dir).
+    project = tmp_path / "project"
+    project.mkdir()
+    assert "state" not in state.dir_records(project)
+    assert not state.dir_state_path(project).exists()
+
+
+# ---------------------------------------------------------------------------
+# move_dir
+# ---------------------------------------------------------------------------
+
+
+def test_move_dir_rekeys_every_json_record(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    src = tmp_path / "src"
+    state.set_mount(old, src, readonly=True)
+    state.set_network_mode(old, state.MODE_OPEN)
+    state.set_base(old, "22.04")
+    state.set_limits(old, {"cpu": 2, "memory": "4GiB"})
+    state.set_env(old, state.ENV_ALL_AGENTS, "FOO", "bar")
+
+    moved = state.move_dir(old, new)
+
+    assert state.get_mounts(new) == [{"source": str(src), "readonly": True}]
+    assert state.get_network(new)["mode"] == state.MODE_OPEN
+    assert state.get_base(new) == "22.04"
+    assert state.get_limits(new) == {"cpu": 2, "memory": "4GiB"}
+    assert state.get_env(new, "claude") == {"FOO": "bar"}
+    for kind in ("mounts", "network", "base", "limits", "env"):
+        assert moved[kind] == [str(new)]
+
+
+def test_move_dir_leaves_nothing_under_the_old_key(tmp_path):
+    from aiab import release
+
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    state.set_mount(old, tmp_path / "src", readonly=False)
+    state.set_base(old, "22.04")
+
+    state.move_dir(old, new)
+
+    assert state.get_mounts(old) == []
+    # No record means the default, which is what an unknown directory gets.
+    assert state.get_base(old) == release.DEFAULT_BASE
+
+
+def test_move_dir_reports_nothing_for_an_unrecorded_dir(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+
+    moved = state.move_dir(old, new)
+
+    assert not any(moved.values())
+
+
+def test_move_dir_does_not_disturb_another_dirs_records(tmp_path):
+    old = tmp_path / "old"
+    other = tmp_path / "other"
+    old.mkdir()
+    other.mkdir()
+    state.set_base(old, "22.04")
+    state.set_base(other, "24.04")
+
+    state.move_dir(old, tmp_path / "new")
+
+    assert state.get_base(other) == "24.04"
+
+
+def test_move_dir_renames_the_state_dir_and_keeps_its_contents(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    old_state = state.dir_state_dir(old)
+    (old_state / "setup.sh").write_text("echo hi\n")
+    home = state.session_home_dir(old, "claude")
+    (home / "history").write_text("transcript\n")
+
+    moved = state.move_dir(old, new)
+
+    new_state = state.dir_state_path(new)
+    assert moved["state"] == [str(new_state)]
+    assert not old_state.exists()
+    assert (new_state / "setup.sh").read_text() == "echo hi\n"
+    assert (state.session_home_dir(new, "claude") / "history").read_text() == (
+        "transcript\n"
+    )
+
+
+def test_move_dir_rewrites_the_state_dirs_source_marker(tmp_path):
+    # .source is what prune_stale() reads to decide a state dir is dead, so a
+    # stale one here would have aiab gc delete the state it just moved.
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    state.dir_state_dir(old)
+
+    state.move_dir(old, new)
+    new.mkdir()
+
+    marker = state.dir_state_path(new) / state._SOURCE_FILE
+    assert marker.read_text().strip() == str(new)
+    assert state.prune_stale()["state"] == []
+
+
+def test_move_dir_without_a_state_dir(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    assert state.move_dir(old, tmp_path / "new")["state"] == []
+
+
+def test_move_dir_refuses_to_merge_two_state_dirs(tmp_path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    state.dir_state_dir(old)
+    state.dir_state_dir(new)
+
+    with pytest.raises(FileExistsError):
+        state.move_dir(old, new)
+
+
+def test_move_dir_repoints_a_mount_recorded_by_another_dir(tmp_path):
+    # The moved directory is mounted into another project's containers; the
+    # record over there names it by path and has to follow.
+    lib = tmp_path / "lib"
+    app = tmp_path / "app"
+    lib.mkdir()
+    app.mkdir()
+    state.set_mount(app, lib, readonly=True)
+
+    moved = state.move_dir(lib, tmp_path / "lib2")
+
+    assert state.get_mounts(app) == [
+        {"source": str(tmp_path / "lib2"), "readonly": True}
+    ]
+    assert moved["sources"] == [str(app)]
+
+
+def test_move_dir_repoints_a_mounted_subdirectory(tmp_path):
+    lib = tmp_path / "lib"
+    app = tmp_path / "app"
+    (lib / "sub").mkdir(parents=True)
+    app.mkdir()
+    state.set_mount(app, lib / "sub", readonly=False)
+
+    state.move_dir(lib, tmp_path / "lib2")
+
+    assert state.get_mounts(app)[0]["source"] == str(tmp_path / "lib2" / "sub")
+
+
+def test_move_dir_leaves_an_unrelated_mount_source_alone(tmp_path):
+    # A prefix match on the string alone would catch /work/libfoo while moving
+    # /work/lib; only whole path components count.
+    libfoo = tmp_path / "libfoo"
+    app = tmp_path / "app"
+    libfoo.mkdir()
+    app.mkdir()
+    state.set_mount(app, libfoo, readonly=True)
+
+    moved = state.move_dir(tmp_path / "lib", tmp_path / "lib2")
+
+    assert state.get_mounts(app)[0]["source"] == str(libfoo)
+    assert moved["sources"] == []
+
+
+def test_move_dir_repoints_a_dir_that_mounted_itself(tmp_path):
+    # Reached under the new key, because the re-key runs first.
+    project = tmp_path / "project"
+    project.mkdir()
+    state.set_mount(project, project, readonly=True)
+
+    state.move_dir(project, tmp_path / "moved")
+
+    assert state.get_mounts(tmp_path / "moved") == [
+        {"source": str(tmp_path / "moved"), "readonly": True}
+    ]
+
+
+def test_move_dir_needs_neither_directory_to_exist(tmp_path):
+    # The --after case: the move already happened, so the old path is gone and
+    # repair is pure string work.
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    state.set_base(old, "22.04")
+    state.dir_state_dir(old)
+    old.rename(new)
+
+    moved = state.move_dir(old, new)
+
+    assert state.get_base(new) == "22.04"
+    assert moved["state"] == [str(state.dir_state_path(new))]

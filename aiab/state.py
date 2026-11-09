@@ -75,6 +75,12 @@
 #                "allow": [str, ...]} }
 # See aiab.profiles for the shape and for the built-in profiles.
 #
+# Every record above that belongs to a directory is keyed by that directory's
+# path, so moving the directory orphans the lot -- and worse, leaves
+# prune_stale() treating it as deleted, which reclaims the state dir below
+# (saved setup script and per-directory agent homes included). move_dir()
+# re-keys every record to follow a move instead; `aiab mv` is its front end.
+#
 # Each directory also gets a persistent state *directory* (dirstate/<slug>/),
 # mounted read-write at STATE_MOUNT inside its session containers, for state
 # the agent itself maintains — notably the /setup-container setup script. A
@@ -163,6 +169,23 @@ def _load_mounts() -> MountState:
 # JSON stays human-readable and round-trips through json.load as plain str.
 def _key(path: StrPath) -> str:
     return str(Path(path).resolve())
+
+
+def _keyed_files() -> dict[str, Path]:
+    """The JSON state files keyed by project directory, by record-kind name.
+
+    The kind names are the vocabulary both move_dir() and prune_stale() report
+    in, and that aiab.cli labels for the user. Built per call rather than held
+    as a module constant so a test that redirects one of the path globals is
+    honoured.
+    """
+    return {
+        "mounts": _MOUNTS_PATH,
+        "network": _NET_PATH,
+        "base": _BASE_PATH,
+        "limits": _LIMITS_PATH,
+        "env": _ENV_PATH,
+    }
 
 
 def get_mounts(directory: StrPath) -> list[Mount]:
@@ -741,6 +764,126 @@ def git_guard_dir(directory: StrPath, source: StrPath | None = None) -> Path:
         d = d / dir_slug(source)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# -- moving a project directory --
+
+
+def dir_records(directory: StrPath) -> list[str]:
+    """The kinds of record that exist for a directory, in _keyed_files() order.
+
+    move_dir()'s pre-flight: a caller compares the two ends of a move, because
+    merging two directories' mounts, policies and session state is not
+    something it can do on its own authority. Deliberately read-only -- it uses
+    dir_state_path() rather than dir_state_dir(), so asking does not create the
+    state dir it is asking about.
+    """
+    key = _key(directory)
+    found = [kind for kind, path in _keyed_files().items() if key in _load_file(path)]
+    if dir_state_path(directory).is_dir():
+        found.append("state")
+    return found
+
+
+def _move_key(path: Path, old: str, new: str) -> bool:
+    """Re-key one directory-keyed JSON file. True if a record moved."""
+    with _locked_path(path):
+        data = _load_file(path)
+        if old not in data:
+            return False
+        data[new] = data.pop(old)
+        _save_file_unlocked(path, data)
+    return True
+
+
+def _repointed(source: str, old: str, new: str) -> str | None:
+    """`source` rebased from old onto new, or None if it isn't under old.
+
+    Path-string surgery rather than Path.relative_to, because neither end
+    needs to exist: a move that already happened is repaired the same way as
+    one this process is about to make.
+    """
+    if source == old:
+        return new
+    if source.startswith(old + "/"):
+        return new + source[len(old) :]
+    return None
+
+
+def _move_mount_sources(old: str, new: str) -> list[str]:
+    """Repoint recorded mount *sources* naming the moved directory.
+
+    A directory mounted into some *other* project's containers is recorded
+    there by path (see set_mount), so it has to follow the move too -- without
+    this, the next run there warns that the source is gone and comes up
+    without the mount. Covers subdirectories of the moved directory as well,
+    since those are what `aiab mount` is usually pointed at.
+
+    Returns the project directories whose records were rewritten.
+    """
+    touched: list[str] = []
+    with _locked_path(_MOUNTS_PATH):
+        data = _load_mounts()
+        for key, mounts in data.items():
+            for m in mounts:
+                moved = _repointed(m["source"], old, new)
+                if moved is not None:
+                    m["source"] = moved
+                    if key not in touched:
+                        touched.append(key)
+        if touched:
+            _save_file_unlocked(_MOUNTS_PATH, data)
+    return touched
+
+
+def _move_state_dir(old: str, new: str) -> list[str]:
+    """Rename a directory's state dir to the new slug and rewrite .source.
+
+    Returns [new path] if there was a state dir to move, [] otherwise. The
+    contents -- the saved setup script and the per-directory agent homes --
+    are carried along by the rename; only the name they live under changes,
+    since the slug is derived from the project directory's path.
+    """
+    src = _DIRSTATE_DIR / dir_slug(old)
+    dst = _DIRSTATE_DIR / dir_slug(new)
+    with _locked_path(_DIRSTATE_DIR):
+        if not src.is_dir():
+            return []
+        if dst != src:
+            # The caller pre-flights this with dir_records(), so a collision
+            # here is a race rather than the ordinary case -- but merging two
+            # directories' session state would be much worse than failing.
+            if dst.exists():
+                raise FileExistsError(f"state dir {dst} already exists")
+            src.rename(dst)
+        (dst / _SOURCE_FILE).write_text(new + "\n")
+    return [str(dst)]
+
+
+def move_dir(old: StrPath, new: StrPath) -> dict[str, list[str]]:
+    """Move every record belonging to a project directory from old to new.
+
+    Covers the directory-keyed JSON records, the state dir (renamed to the new
+    slug, .source marker and all), and recorded mount sources that name the
+    moved directory. Nothing here needs either directory to exist: the keys are
+    plain path strings and the slug is derived from one, so repairing records
+    after a move that already happened takes the same path as following one.
+
+    Returns what moved, keyed by record kind: the _keyed_files() kinds and
+    'state' each name their new location once (and are empty when the directory
+    had no record of that kind), while 'sources' lists the *other* project
+    directories whose recorded mount pointed into the moved directory.
+    """
+    old_key, new_key = _key(old), _key(new)
+    moved = {
+        kind: [new_key] if _move_key(path, old_key, new_key) else []
+        for kind, path in _keyed_files().items()
+    }
+    # After the re-key above, so a directory that had mounted itself (or a
+    # subdirectory of itself) is reached under its new key too.
+    moved["sources"] = _move_mount_sources(old_key, new_key)
+    moved["state"] = _move_state_dir(old_key, new_key)
+    return moved
 
 
 def _prune_json_file(path: Path, *, skip: tuple[str, ...] = ()) -> list[str]:

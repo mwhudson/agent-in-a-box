@@ -15,7 +15,7 @@
 #
 # aiab.cli - the `aiab` command-line front end.
 #
-# A Click group with a command per verb (run, stop, remove, mount, unmount,
+# A Click group with a command per verb (run, stop, remove, mv, mount, unmount,
 # net, upgrade-templates, list, gc, lxc). The LXD engine (Lxd/Container) lives in
 # aiab.lxd, provisioning in aiab.provision, the per-agent data in aiab.agents,
 # and the filtering-proxy/idle-stop plumbing in aiab.lifecycle; this module
@@ -1139,9 +1139,9 @@ def _session_for(
 def _busy_reason(session: lxd.Container, agent: str) -> str | None:
     """Why taking this container down now would interrupt something, or None.
 
-    `aiab stop` takes down a container the user did not just exit, so it asks
-    first. The two checks are the ones the idle-stopper itself makes (see
-    aiab.stopper): the per-container lock, held
+    `aiab stop` and `aiab mv` both have to stop a container that the user did
+    not just exit, so both ask first. The two checks are the ones the
+    idle-stopper itself makes (see aiab.stopper): the per-container lock, held
     shared by every live `aiab run`, and then the agent's own account of
     whether it left a session running in the background — Claude Code's
     /background keeps a conversation alive after the foreground process is
@@ -1277,25 +1277,166 @@ def remove(
 
 
 # --------------------------------------------------------------------------
+# mv
+# --------------------------------------------------------------------------
+
+# How each record kind that state.move_dir() and state.prune_stale() report
+# reads in this module's output.
+_RECORD_LABELS = {
+    "mounts": "mount record",
+    "network": "network record",
+    "base": "base record",
+    "limits": "limits record",
+    "env": "env record",
+    "state": "state dir",
+}
+
+
+def _mv_moves_on_disk(old: Path, new: Path, after: bool) -> bool:
+    """Whether `aiab mv` moves the directory itself, or only follows a move.
+
+    Repairing records after a move you already made is the likelier way to
+    reach this command — something broke, and that is why you went looking —
+    so it is inferred from what is on disk rather than demanded as a flag:
+
+        OLD exists, NEW doesn't   move the directory, then follow it
+        OLD gone, NEW exists      records only; the move already happened
+        neither exists            nothing to go on
+        both exist                ambiguous, so --after has to say
+
+    --after always means records-only, and never touches the filesystem.
+    """
+    if old == new:
+        raise click.UsageError("OLD and NEW name the same directory")
+    if after:
+        if not new.is_dir():
+            raise click.UsageError(f"{new} is not a directory")
+        return False
+    if old.is_dir() and new.exists():
+        raise click.UsageError(
+            f"{new} already exists; pass --after if OLD was already moved there"
+        )
+    if old.is_dir():
+        if not new.parent.is_dir():
+            raise click.UsageError(f"{new.parent} is not a directory")
+        return True
+    if new.is_dir():
+        return False
+    raise click.UsageError(f"neither {old} nor {new} is a directory")
+
+
+@main.command()
+@click.option(
+    "--after",
+    is_flag=True,
+    help="OLD has already been moved to NEW; only update the records",
+)
+@click.argument("old", type=_DIR)
+@click.argument("new", type=_DIR)
+@click.pass_obj
+def mv(conn: lxd.Lxd, after: bool, old: str, new: str) -> None:
+    """Move a project directory, taking its aiab records with it.
+
+    Everything aiab records for a directory — mounts, network policy, base
+    release, limits, environment, and the state dir holding the saved setup
+    script and each agent's session history — is keyed by the directory's
+    path, so moving it with plain `mv` orphans the lot. Worse, the records
+    then look like a deleted directory's, and `aiab gc` reclaims them.
+
+    This moves the directory (or just follows a move already made, see
+    --after) and re-keys every record to match. Mounts recorded *by other
+    project directories* that point into this one are repointed too.
+
+    The directory's session containers are removed, because their name and
+    their mounts both derive from the old path; the next `aiab run` rebuilds
+    one from the template. Nothing durable lives in them — the setup script
+    and the agents' session state are in the state dir this command moves, and
+    /setup-container restores the dev environment from the saved script.
+    """
+    old_dir, new_dir = _realdir(old), _realdir(new)
+    move_on_disk = _mv_moves_on_disk(old_dir, new_dir, after)
+
+    # Refuse rather than merge: both ends having a record of the same kind
+    # means two directories' mounts, policies or session histories would have
+    # to be reconciled, and only the user can say how.
+    at_new = set(state.dir_records(new_dir))
+    clash = [kind for kind in state.dir_records(old_dir) if kind in at_new]
+    if clash:
+        kinds = ", ".join(_RECORD_LABELS[kind] for kind in clash)
+        raise click.ClickException(
+            f"{new_dir} already has aiab records of its own ({kinds}); "
+            "move it somewhere else, or clear the records at that path first."
+        )
+
+    # Every guard before any change, so a refusal leaves nothing half-done.
+    sessions = list(_agent_containers(conn, old_dir))
+    for agent, _prefix, session in sessions:
+        reason = _busy_reason(session, agent)
+        if reason:
+            raise click.ClickException(
+                f"not moving {old_dir}: {reason} ('{session.name}'). "
+                "Exit the session first."
+            )
+
+    if move_on_disk:
+        try:
+            old_dir.rename(new_dir)
+        except OSError as exc:
+            # Across filesystems this is EXDEV, and copying a project tree is
+            # not something to do behind the user's back.
+            raise click.ClickException(
+                f"could not move {old_dir} to {new_dir}: {exc}. "
+                "Move it yourself, then re-run with --after."
+            ) from exc
+        print(f"Moved {old_dir} -> {new_dir}", file=sys.stderr)
+
+    for _agent, _prefix, session in sessions:
+        print(f"Removing session container '{session.name}' ...", file=sys.stderr)
+        _destroy_session(session)
+
+    moved = state.move_dir(old_dir, new_dir)
+    for kind, where in moved.items():
+        if kind == "sources":
+            for directory in where:
+                print(f"Repointed the mount recorded for {directory}", file=sys.stderr)
+        elif where:
+            print(f"Moved {_RECORD_LABELS[kind]} -> {where[0]}", file=sys.stderr)
+    if not any(moved.values()):
+        print(f"No aiab records for {old_dir}.", file=sys.stderr)
+    if sessions:
+        count = len(sessions)
+        print(
+            f"Removed {count} session container{'s' if count != 1 else ''}; "
+            "the next `aiab run` rebuilds from the template.",
+            file=sys.stderr,
+        )
+
+
+# --------------------------------------------------------------------------
 # mount / unmount
 # --------------------------------------------------------------------------
 
 
 def _agent_containers(
     conn: lxd.Lxd, for_dir: Path
-) -> Iterator[tuple[str, lxd.Container]]:
-    """Yield (prefix, Container) for every existing session container of a dir.
+) -> Iterator[tuple[str, str, lxd.Container]]:
+    """Yield (agent, prefix, Container) for a dir's existing session containers.
 
     Covers isolated-profile containers as well as plain agent containers
     (via profiles.session_prefixes) — otherwise mount/unmount would silently
     skip a running `claude-openrouter` session, and unmount in particular
     would leave a stale device on it since nothing else would ever remove it.
+
+    The agent comes back alongside the prefix because a caller that means to
+    *stop* a container has to ask the agent whether it left a session running
+    in the background (see _busy_reason), and the prefix alone doesn't say
+    which agent an isolated profile's container belongs to.
     """
     for agent in agents.AGENT_NAMES:
         for prefix in profiles.session_prefixes(agent):
             container = conn.container_for_dir(for_dir, prefix)
             if container.exists():
-                yield prefix, container
+                yield agent, prefix, container
 
 
 def _apply_recorded_mounts(
@@ -1354,7 +1495,7 @@ def mount(
         state.set_mount(target, path, readonly=readonly)
 
     found = False
-    for prefix, container in _agent_containers(conn, target):
+    for _agent, prefix, container in _agent_containers(conn, target):
         found = True
         print(f"=== {prefix} ({container.name}) ===", file=sys.stderr)
         if container.status() != "RUNNING":
@@ -1399,7 +1540,7 @@ def unmount(conn: lxd.Lxd, for_dir: str | None, dirs: tuple[str, ...]) -> None:
         if not state.remove_mount(target, path):
             print(f"Not recorded: {path}", file=sys.stderr)
 
-    for prefix, container in _agent_containers(conn, target):
+    for _agent, prefix, container in _agent_containers(conn, target):
         print(f"=== {prefix} ({container.name}) ===", file=sys.stderr)
         for path in paths:
             if container.remove_dir_device(path):
@@ -2345,17 +2486,6 @@ def list_(conn: lxd.Lxd, for_dir: str | None) -> None:
 # gc
 # --------------------------------------------------------------------------
 
-# How each state.prune_stale() record kind reads in the "Pruned ... for DIR"
-# line below.
-_PRUNE_LABELS = {
-    "mounts": "mount record",
-    "network": "network record",
-    "base": "base record",
-    "state": "state dir",
-    "limits": "limits record",
-    "env": "env record",
-}
-
 
 @main.command()
 @click.pass_obj
@@ -2408,7 +2538,7 @@ def gc(conn: lxd.Lxd) -> None:
 
     for kind, dirs in state.prune_stale().items():
         for d in dirs:
-            print(f"Pruned {_PRUNE_LABELS[kind]} for {d}", file=sys.stderr)
+            print(f"Pruned {_RECORD_LABELS[kind]} for {d}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

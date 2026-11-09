@@ -168,6 +168,12 @@ state dir's `.source` file records the project directory it belongs to).
 [`aiab gc`](commands.md#aiab-gc) removes a directory's state dir (setup script
 included) along with its other records once the directory itself is gone.
 
+Because the state dir is named for the project directory's path — as are the
+container names and every other record in this section — moving the project
+directory orphans all of it, and leaves `aiab gc` treating it as deleted.
+[`aiab mv`](commands.md#aiab-mv) moves a project directory with its records,
+and repairs them after a move already made.
+
 ## Protecting the host repo (the git guard)
 
 The working directory is mounted **read-write**, so an off-the-rails agent can
