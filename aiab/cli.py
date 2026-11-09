@@ -15,8 +15,8 @@
 #
 # aiab.cli - the `aiab` command-line front end.
 #
-# A Click group with a command per verb (run, remove, mount, unmount, net,
-# upgrade-templates, list, lxc). The LXD engine (Lxd/Container) lives in
+# A Click group with a command per verb (run, stop, remove, mount, unmount,
+# net, upgrade-templates, list, gc, lxc). The LXD engine (Lxd/Container) lives in
 # aiab.lxd, provisioning in aiab.provision, the per-agent data in aiab.agents,
 # and the filtering-proxy/idle-stop plumbing in aiab.lifecycle; this module
 # just parses arguments and orchestrates. The Lxd connection is built once
@@ -1109,18 +1109,134 @@ def run(
 
 
 # --------------------------------------------------------------------------
-# remove
+# stop / remove
 # --------------------------------------------------------------------------
+
+
+def _session_for(
+    conn: lxd.Lxd, agent: str, for_dir: str | None, profile_name: str | None
+) -> lxd.Container:
+    """Resolve the one session container a --for/--profile pair names.
+
+    Shared by `aiab stop` and `aiab remove`, which both act on a single
+    existing container rather than starting one. A non-isolated profile shares
+    the plain agent's container, so naming one selects nothing extra — said out
+    loud rather than silently ignored.
+    """
+    profile = _resolve_profile(profile_name, agent)
+    isolated = bool(profile.get("isolated")) if profile else False
+    if profile_name and not isolated:
+        print(
+            f"Note: profile '{profile_name}' is not isolated; targeting the "
+            f"shared {agent} container.",
+            file=sys.stderr,
+        )
+    return conn.container_for_dir(
+        _realdir(for_dir), profiles.container_prefix(agent, profile_name, isolated)
+    )
+
+
+def _busy_reason(session: lxd.Container, agent: str) -> str | None:
+    """Why taking this container down now would interrupt something, or None.
+
+    `aiab stop` takes down a container the user did not just exit, so it asks
+    first. The two checks are the ones the idle-stopper itself makes (see
+    aiab.stopper): the per-container lock, held
+    shared by every live `aiab run`, and then the agent's own account of
+    whether it left a session running in the background — Claude Code's
+    /background keeps a conversation alive after the foreground process is
+    gone, and stopping the container would kill it.
+    """
+    if lifecycle.session_in_use(session.name):
+        return "a session is still using it"
+    if lifecycle.has_live_background_session(session, agent):
+        return f"{agent} has a session running in the background in it"
+    return None
+
+
+def _stop_session(session: lxd.Container) -> None:
+    """Stop a session container and its proxy, leaving the container in place.
+
+    Teardown order matches aiab.stopper's: the host-side proxy and its device
+    go first, so neither can hold up a clean guest shutdown. Both halves run
+    even on an already-stopped container, where they reap whatever a crashed
+    session left behind.
+    """
+    lifecycle.stop_proxy(session.name)
+    session.remove_device("netproxy")
+    if session.status() == "RUNNING":
+        session.stop(timeout=30)
 
 
 def _destroy_session(session: lxd.Container) -> None:
     """Tear down a session container and its proxy (e.g. to rebuild it)."""
-    if session.status() == "RUNNING":
-        lifecycle.stop_proxy(session.name)
-        session.remove_device("netproxy")
-        session.stop(timeout=30)
+    _stop_session(session)
     session.delete()
-    lifecycle.stop_proxy(session.name)
+
+
+@main.command()
+@click.argument("agent", type=AGENT_CHOICE)
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    type=_DIR,
+    default=None,
+    help="target the container for DIR (default: current directory)",
+)
+@click.option(
+    "--profile",
+    "profile_name",
+    metavar="NAME",
+    default=None,
+    help="target the container the named profile runs in",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="stop even if a session is still using the container",
+)
+@click.pass_obj
+def stop(
+    conn: lxd.Lxd,
+    agent: str,
+    for_dir: str | None,
+    profile_name: str | None,
+    force: bool,
+) -> None:
+    """Stop the session container for a directory, keeping it.
+
+    A container stops itself a few minutes after its last session exits, so
+    this is for stopping one now — to free its memory, or before moving the
+    directory it belongs to. Everything in the container survives, so the next
+    run starts it again rather than rebuilding it; `aiab remove` deletes it
+    instead.
+
+    Refuses while a session is using the container, or while the agent has a
+    session running in the background there; --force stops it anyway.
+    """
+    session = _session_for(conn, agent, for_dir, profile_name)
+    if not session.exists():
+        print(f"No container '{session.name}' to stop.", file=sys.stderr)
+        return
+    # Asked before the status check, not after: `aiab run` takes the session
+    # lock before it starts the container, so "stopped" and "in use" overlap
+    # for as long as a run takes to bring one up.
+    reason = None if force else _busy_reason(session, agent)
+    if reason:
+        raise click.ClickException(
+            f"not stopping '{session.name}': {reason}. "
+            "Exit the session first, or pass --force."
+        )
+    if session.status() != "RUNNING":
+        print(f"Container '{session.name}' is not running.", file=sys.stderr)
+        # Still worth a teardown pass: a crashed session can leave the proxy
+        # running and its device attached on a container that is already down.
+        _stop_session(session)
+        return
+    print(f"Stopping container '{session.name}' ...", file=sys.stderr)
+    _stop_session(session)
+    print(f"Stopped '{session.name}'.", file=sys.stderr)
 
 
 @main.command()
@@ -1150,18 +1266,7 @@ def remove(
     one quickly. An isolated profile runs in its own container, so removing
     that one needs --profile.
     """
-    work_dir = _realdir(for_dir)
-    profile = _resolve_profile(profile_name, agent)
-    isolated = bool(profile.get("isolated")) if profile else False
-    if profile_name and not isolated:
-        print(
-            f"Note: profile '{profile_name}' is not isolated; removing the "
-            f"shared {agent} container.",
-            file=sys.stderr,
-        )
-    session = conn.container_for_dir(
-        work_dir, profiles.container_prefix(agent, profile_name, isolated)
-    )
+    session = _session_for(conn, agent, for_dir, profile_name)
     if not session.exists():
         print(f"No container '{session.name}' to remove.", file=sys.stderr)
         return

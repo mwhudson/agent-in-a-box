@@ -18,6 +18,7 @@ Everything is driven by a single command, `aiab`, with a subcommand per task:
 
 ```
 aiab run <agent>            # run an agent in a container for the current dir
+aiab stop <agent>           # stop that container now, keeping it
 aiab remove <agent>         # delete that container
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts

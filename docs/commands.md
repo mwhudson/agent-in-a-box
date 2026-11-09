@@ -4,6 +4,7 @@ Run `aiab run`, `aiab remove`, etc. from inside the project directory you want
 the agent to work in (or use `--for DIR` on the commands that accept it).
 
 - [aiab run](#aiab-run)
+- [aiab stop](#aiab-stop)
 - [aiab remove](#aiab-remove)
 - [aiab mount / aiab unmount](#aiab-mount--aiab-unmount)
 - [aiab net](#aiab-net)
@@ -65,6 +66,33 @@ aiab run --profile openrouter claude
 On first use it prompts for your OpenRouter API key and writes it to
 `~/.local/share/aiab/claude@openrouter/home/.claude/settings.json`. See
 [`aiab profile`](#aiab-profile).
+
+## aiab stop
+
+```
+aiab stop <agent> [--for DIR] [--profile NAME] [--force]
+```
+
+Stops the session container for the directory (current directory, or `--for
+DIR`) **without deleting it**: everything inside it survives, so the next
+`aiab run` starts it again rather than rebuilding it from the template.
+
+A container already stops itself a few minutes after its last session exits,
+so this is for stopping one *now* — to free its memory, or before moving the
+directory it belongs to. An isolated profile runs in its own container, so
+pass `--profile NAME` to stop that one.
+
+It refuses while the container is in use, which means either of:
+
+- another `aiab run` is still in a session there (it holds a lock on the
+  container for the duration of the session);
+- the agent has a session running in the **background** — Claude Code's
+  `/background` keeps a conversation alive after the foreground process exits,
+  and stopping the container would kill it. This is the same case the
+  idle-stopper refuses to reap.
+
+`--force` stops it anyway. Use [`aiab remove`](#aiab-remove) to delete the
+container instead of stopping it.
 
 ## aiab remove
 
