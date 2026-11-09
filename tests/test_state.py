@@ -1090,3 +1090,84 @@ def test_move_dir_needs_neither_directory_to_exist(tmp_path):
 
     assert state.get_base(new) == "22.04"
     assert moved["state"] == [str(state.dir_state_path(new))]
+
+
+# ---------------------------------------------------------------------------
+# forget_dir
+# ---------------------------------------------------------------------------
+
+
+def test_forget_dir_removes_every_record(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    state.set_mount(project, tmp_path / "src", readonly=True)
+    state.set_network_mode(project, state.MODE_OPEN)
+    state.set_base(project, "22.04")
+    state.set_limits(project, {"cpu": 2, "memory": "4GiB"})
+    state.set_env(project, state.ENV_ALL_AGENTS, "FOO", "bar")
+    project_state = state.dir_state_dir(project)
+
+    removed = state.forget_dir(project)
+
+    assert state.dir_records(project) == []
+    assert not project_state.exists()
+    for kind in ("mounts", "network", "base", "limits", "env", "state"):
+        assert removed[kind], kind
+
+
+def test_forget_dir_reports_nothing_for_an_unknown_dir(tmp_path):
+    assert not any(state.forget_dir(tmp_path / "unknown").values())
+
+
+def test_forget_dir_leaves_another_dirs_records_alone(tmp_path):
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    state.set_base(project, "22.04")
+    state.set_base(other, "24.04")
+    other_state = state.dir_state_dir(other)
+
+    state.forget_dir(project)
+
+    assert state.get_base(other) == "24.04"
+    assert other_state.is_dir()
+
+
+def test_forget_dir_keeps_the_global_network_policy(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    state.add_network_allow(None, "example.com", expires=None, global_=True)
+    state.set_network_mode(project, state.MODE_OPEN)
+
+    state.forget_dir(project)
+
+    assert [a["domain"] for a in state.get_global_network()["allow"]] == [
+        "example.com"
+    ]
+
+
+def test_forget_dir_leaves_a_mount_recorded_by_another_dir(tmp_path):
+    # app's record is app's business, and the directory it names still exists.
+    lib = tmp_path / "lib"
+    app = tmp_path / "app"
+    lib.mkdir()
+    app.mkdir()
+    state.set_mount(app, lib, readonly=True)
+
+    state.forget_dir(lib)
+
+    assert state.get_mounts(app) == [{"source": str(lib), "readonly": True}]
+
+
+def test_forget_dir_works_on_a_deleted_directory(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    state.set_base(project, "22.04")
+    state.dir_state_dir(project)
+    project.rmdir()
+
+    removed = state.forget_dir(project)
+
+    assert removed["base"] == [str(project)]
+    assert removed["state"]

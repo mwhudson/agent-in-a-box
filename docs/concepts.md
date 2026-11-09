@@ -172,7 +172,9 @@ Because the state dir is named for the project directory's path — as are the
 container names and every other record in this section — moving the project
 directory orphans all of it, and leaves `aiab gc` treating it as deleted.
 [`aiab mv`](commands.md#aiab-mv) moves a project directory with its records,
-and repairs them after a move already made.
+and repairs them after a move already made;
+[`aiab forget`](commands.md#aiab-forget) deletes them without waiting for the
+directory to go away.
 
 ## Protecting the host repo (the git guard)
 

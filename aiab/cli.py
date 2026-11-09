@@ -15,12 +15,12 @@
 #
 # aiab.cli - the `aiab` command-line front end.
 #
-# A Click group with a command per verb (run, stop, remove, mv, mount, unmount,
-# net, upgrade-templates, list, gc, lxc). The LXD engine (Lxd/Container) lives in
-# aiab.lxd, provisioning in aiab.provision, the per-agent data in aiab.agents,
-# and the filtering-proxy/idle-stop plumbing in aiab.lifecycle; this module
-# just parses arguments and orchestrates. The Lxd connection is built once
-# per invocation and passed to commands via ctx.obj.
+# A Click group with a command per verb (run, stop, remove, mv, forget, mount,
+# unmount, net, upgrade-templates, list, gc, lxc). The LXD engine
+# (Lxd/Container) lives in aiab.lxd, provisioning in aiab.provision, the
+# per-agent data in aiab.agents, and the filtering-proxy/idle-stop plumbing in
+# aiab.lifecycle; this module just parses arguments and orchestrates. The Lxd
+# connection is built once per invocation and passed to commands via ctx.obj.
 
 from __future__ import annotations
 
@@ -1365,7 +1365,8 @@ def mv(conn: lxd.Lxd, after: bool, old: str, new: str) -> None:
         kinds = ", ".join(_RECORD_LABELS[kind] for kind in clash)
         raise click.ClickException(
             f"{new_dir} already has aiab records of its own ({kinds}); "
-            "move it somewhere else, or clear the records at that path first."
+            f"move it somewhere else, or clear those with "
+            f"`aiab forget --for {new_dir}` first."
         )
 
     # Every guard before any change, so a refusal leaves nothing half-done.
@@ -1410,6 +1411,81 @@ def mv(conn: lxd.Lxd, after: bool, old: str, new: str) -> None:
             "the next `aiab run` rebuilds from the template.",
             file=sys.stderr,
         )
+
+
+# --------------------------------------------------------------------------
+# forget
+# --------------------------------------------------------------------------
+
+
+@main.command()
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    type=_DIR,
+    default=None,
+    help="forget DIR instead of the current directory",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="skip the confirmation prompt",
+)
+@click.pass_obj
+def forget(conn: lxd.Lxd, for_dir: str | None, assume_yes: bool) -> None:
+    """Delete everything aiab records for a directory.
+
+    What `aiab gc` reclaims once a directory is gone, for one that is still
+    here: the directory's session containers, its mount/network/base/limits/env
+    records, and its state dir — which holds the saved setup script and each
+    agent's session history for this directory. The directory itself is not
+    touched, and neither is anything shared between directories (the agents'
+    credentials, the global network policy, your profiles).
+
+    Use it to clear the way for `aiab mv`, or to drop a directory you are done
+    with without waiting to delete it.
+    """
+    target = _realdir(for_dir)
+    sessions = list(_agent_containers(conn, target))
+    for agent, _prefix, session in sessions:
+        reason = _busy_reason(session, agent)
+        if reason:
+            raise click.ClickException(
+                f"not forgetting {target}: {reason} ('{session.name}'). "
+                "Exit the session first."
+            )
+
+    records = state.dir_records(target)
+    if not records and not sessions:
+        print(f"Nothing recorded for {target}.", file=sys.stderr)
+        return
+
+    # The only command here that destroys data for a directory you may still
+    # be working in — `aiab gc` only ever touches directories that are gone —
+    # so it says what will go and asks first.
+    if not assume_yes:
+        print(f"This will delete, for {target}:", file=sys.stderr)
+        for _agent, _prefix, session in sessions:
+            print(f"  - session container '{session.name}'", file=sys.stderr)
+        for kind in records:
+            detail = (
+                " (saved setup script, each agent's session history)"
+                if kind == "state"
+                else ""
+            )
+            print(f"  - its {_RECORD_LABELS[kind]}{detail}", file=sys.stderr)
+        click.confirm("Go ahead?", abort=True, err=True)
+
+    for _agent, _prefix, session in sessions:
+        print(f"Removing session container '{session.name}' ...", file=sys.stderr)
+        _destroy_session(session)
+
+    for kind, where in state.forget_dir(target).items():
+        if where:
+            print(f"Forgot {_RECORD_LABELS[kind]} for {target}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

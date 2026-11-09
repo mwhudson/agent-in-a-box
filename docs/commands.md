@@ -7,6 +7,7 @@ the agent to work in (or use `--for DIR` on the commands that accept it).
 - [aiab stop](#aiab-stop)
 - [aiab remove](#aiab-remove)
 - [aiab mv](#aiab-mv)
+- [aiab forget](#aiab-forget)
 - [aiab mount / aiab unmount](#aiab-mount--aiab-unmount)
 - [aiab net](#aiab-net)
 - [aiab base](#aiab-base)
@@ -159,7 +160,8 @@ command that *deletes* the orphans.
 
 If `NEW` already has aiab records of its own — you ran an agent there after
 moving it, say — `aiab mv` refuses rather than merge two directories' mounts,
-policies and session histories.
+policies and session histories. [`aiab forget`](#aiab-forget) clears the ones
+at `NEW` if they're not worth keeping.
 
 > **The agent's own history is keyed separately.** Each agent keys its
 > per-project state (Claude Code's `~/.claude/projects/<path>/`, Copilot's
@@ -169,6 +171,35 @@ policies and session histories.
 > agent's own history fresh. The old transcripts aren't lost — they're still
 > in the state dir that `aiab mv` just moved, under the old key — but the
 > agent won't offer them for `--continue`.
+
+## aiab forget
+
+```
+aiab forget [--for DIR] [--yes]
+```
+
+Deletes everything aiab records for the directory (current directory, or
+`--for DIR`): its session containers, its mount/network/base/limits/env
+records, and its [state
+dir](concepts.md#per-directory-state-and-the-setup-script-aiab) — the saved
+setup script and each agent's session history for this directory.
+
+This is what [`aiab gc`](#aiab-gc) does for a directory that no longer exists,
+for one that is still here. Use it to clear the way for
+[`aiab mv`](#aiab-mv), or to drop a project you're done with without waiting
+to delete the directory itself.
+
+The directory is **not** touched, and neither is anything shared between
+directories: the agents' credentials (`~/.local/share/aiab/<agent>/home`), the
+global network policy, your profiles, and the base/template containers all
+stay. Mounts that *other* project directories recorded pointing into this one
+are left alone too — they're those directories' records, and the directory
+they name still exists.
+
+Because it destroys session history for a directory you may still be working
+in, it lists what will go and asks first. `--yes` (`-y`) skips the prompt. It
+refuses while a container is in use, on the same two conditions as
+[`aiab stop`](#aiab-stop).
 
 ## aiab mount / aiab unmount
 
@@ -748,7 +779,9 @@ directories along with it. The base/template containers are never touched.
 A directory that was *moved* rather than deleted looks exactly like a deleted
 one from here, so `aiab gc` will reclaim its records — saved setup script and
 session history included. Use [`aiab mv`](#aiab-mv) to move a project
-directory, or to repair the records after moving one by hand.
+directory, or to repair the records after moving one by hand. To reclaim one
+directory's records while the directory is still there, use
+[`aiab forget`](#aiab-forget).
 
 ## aiab lxc
 

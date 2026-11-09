@@ -886,6 +886,55 @@ def move_dir(old: StrPath, new: StrPath) -> dict[str, list[str]]:
     return moved
 
 
+# -- forgetting a project directory --
+
+
+def _drop_key(path: Path, key: str) -> bool:
+    """Delete one directory's record from a JSON state file. True if present."""
+    with _locked_path(path):
+        data = _load_file(path)
+        if key not in data:
+            return False
+        del data[key]
+        _save_file_unlocked(path, data)
+    return True
+
+
+def _remove_state_dir(key: str) -> list[str]:
+    """Delete a directory's state dir. Returns [its path] if there was one."""
+    d = _DIRSTATE_DIR / dir_slug(key)
+    with _locked_path(_DIRSTATE_DIR):
+        if not d.is_dir():
+            return []
+        shutil.rmtree(d)
+    return [str(d)]
+
+
+def forget_dir(directory: StrPath) -> dict[str, list[str]]:
+    """Delete every record this module keeps for a project directory.
+
+    What prune_stale() would reclaim for a directory that had been deleted,
+    for one that is still there: the directory-keyed JSON records and the
+    state dir, setup script and per-directory agent homes included. `aiab
+    forget` is the front end, and the reason it exists is that until now
+    nothing could clear a live directory's records -- which left `aiab mv`
+    with no advice to give when both ends of a move had records of their own.
+
+    Mounts recorded by *other* directories that point into this one are
+    deliberately left alone: they are those directories' records, and the
+    directory they name still exists.
+
+    Returns what was removed, keyed by record kind, like move_dir().
+    """
+    key = _key(directory)
+    removed = {
+        kind: [key] if _drop_key(path, key) else []
+        for kind, path in _keyed_files().items()
+    }
+    removed["state"] = _remove_state_dir(key)
+    return removed
+
+
 def _prune_json_file(path: Path, *, skip: tuple[str, ...] = ()) -> list[str]:
     """Drop keys naming a directory that no longer exists from a state file.
 

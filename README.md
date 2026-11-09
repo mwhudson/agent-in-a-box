@@ -21,6 +21,7 @@ aiab run <agent>            # run an agent in a container for the current dir
 aiab stop <agent>           # stop that container now, keeping it
 aiab remove <agent>         # delete that container
 aiab mv OLD NEW             # move a project dir, taking its aiab records along
+aiab forget                 # delete everything recorded for a dir
 aiab mount DIR ...          # mount extra directories into a dir's containers
 aiab unmount DIR ...        # remove those mounts
 aiab net ...                # restrict a dir's containers' network access
