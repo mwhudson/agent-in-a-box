@@ -275,7 +275,7 @@ AGENTS: dict[str, Agent] = {
                     "--",
                     "bash",
                     "-c",
-                    "curl -fsSL https://opencode.ai/install | bash",
+                    "curl -fsSL https://opencode.ai/v2/install | bash",
                 ],
             ),
             (
@@ -291,7 +291,10 @@ AGENTS: dict[str, Agent] = {
             ),
         ],
         # Re-running the installer is enough to upgrade; no need to reinstall
-        # wl-clipboard, which apt dist-upgrade already covers.
+        # wl-clipboard, which apt dist-upgrade already covers. The /v2/ URL
+        # matters: the old installer only ever installs opencode 1 (it refuses
+        # a 2.x version outright), so a template upgraded through it stays on
+        # the newest 1.x while opencode itself keeps offering the major.
         upgrade_cmds=[
             (
                 "Updating opencode ...",
@@ -302,7 +305,7 @@ AGENTS: dict[str, Agent] = {
                     "--",
                     "bash",
                     "-c",
-                    "curl -fsSL https://opencode.ai/install | bash",
+                    "curl -fsSL https://opencode.ai/v2/install | bash",
                 ],
             ),
         ],
@@ -312,9 +315,16 @@ AGENTS: dict[str, Agent] = {
         attention=attention.PLUGIN,
         prepare=_ensure_opencode_permissive_config,
         # opencode.ai for auth/updates, models.dev for its model catalogue,
-        # anthropic.com for the default provider. Using a different provider
-        # in restricted mode needs an `aiab net allow` for its API domain.
-        api_domains=["opencode.ai", "models.dev", "anthropic.com"],
+        # anthropic.com for the default provider, registry.npmjs.org because
+        # that is where the installer (and `opencode plugin add`) fetches from.
+        # Using a different provider in restricted mode needs an `aiab net
+        # allow` for its API domain.
+        api_domains=[
+            "opencode.ai",
+            "models.dev",
+            "anthropic.com",
+            "registry.npmjs.org",
+        ],
         overlays=_overlays(
             (
                 "agent-config/opencode/AGENTS.md",
