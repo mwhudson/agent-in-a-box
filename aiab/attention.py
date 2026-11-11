@@ -49,10 +49,12 @@
 #
 # PLUGIN (opencode) is agent-config/opencode/plugins/attention.js, overlaid
 # into opencode's global plugin directory like the rest of the versioned config
-# this repo ships (see aiab.agents). It watches the same three moments —
-# session.idle, permission.updated, chat.message/dispose — but because it is
-# one static file serving every session of that agent, the file it writes is
-# named by ENV_VAR rather than baked in.
+# this repo ships (see aiab.agents). It watches the same three moments — the
+# turn ending, a mid-turn ask, and you answering — but because it is one static
+# file serving every session of that agent, the file it writes is named by
+# ENV_VAR rather than baked in. It carries an entrypoint for each opencode
+# major, which name those moments differently and will not run each other's
+# plugins; see the file for which is which.
 #
 # Nothing on the container side waits 15 seconds. The hooks only record *since
 # when* the agent has been waiting, and the host decides when that has gone on

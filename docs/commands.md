@@ -615,9 +615,12 @@ How the agent is made to record it is the agent's own mechanism:
   plugin directory alongside the `AGENTS.md` and slash commands this repo
   ships. It is overlaid as a single file, so plugins of your own in
   `~/.config/opencode/plugins/` are still loaded. It watches `session.idle`
-  for the end of a turn and `permission.updated` for a mid-turn ask, and
+  for the end of a turn and a permission being asked for a mid-turn ask, and
   ignores a subagent's session going idle — that is the middle of the turn you
-  are watching, not a wait on you.
+  are watching, not a wait on you. opencode 2 rewrote the plugin API and will
+  not run an opencode 1 plugin (or vice versa), so the file carries an
+  entrypoint for each: one template serves both, and upgrading a container
+  across the major does not cost you notifications.
 
 The 15 seconds is aiab's own, not the agent's idle threshold — the container
 side only records *when* the wait started, and the monitor decides when that

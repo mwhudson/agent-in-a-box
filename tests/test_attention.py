@@ -205,6 +205,20 @@ def test_plugin_reports_the_same_reasons_the_monitor_shows():
     assert attention.ENV_VAR in source
 
 
+def test_plugin_carries_an_entrypoint_for_both_opencode_majors():
+    # opencode 2 rewrote the plugin API and runs no opencode 1 plugin; one
+    # file serves both by default-exporting an object each major picks from
+    # (opencode 1 calls server(), opencode 2 reads id and calls setup()).
+    # Losing either half silently halves the agents this works for — and a
+    # missing server() is worse than silent, because opencode 1 detects the
+    # shape from the id and then raises a TypeError without it.
+    plugin = agents.REPO_ROOT / "agent-config/opencode/plugins/attention.js"
+    source = plugin.read_text()
+    assert "export default { id:" in source
+    assert "async function server(" in source
+    assert "async function setup(" in source
+
+
 # ---------------------------------------------------------------------------
 # reading the waits back
 # ---------------------------------------------------------------------------
