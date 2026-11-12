@@ -45,9 +45,16 @@
 # decision lands or the wait times out. Concurrent requests for the same host
 # all poll the same policy, so one answer releases them all.
 #
+# Every byte of an allowed request also passes through _pipe(), which makes
+# this the one place that can see how much traffic a session is actually
+# moving. The tunnel counts its two directions into a _UsageMeter, keyed by
+# host, which periodically writes the totals to --usage-file for `aiab
+# monitor` to display (see aiab.netwatch.read_usage). Like the pending queue,
+# that file is the whole channel between the two processes.
+#
 # Run as:
 #   python3 -m aiab.netproxy --socket PATH --dir DIR --agent NAME
-#       [--pending-dir DIR] [--profile NAME]
+#       [--pending-dir DIR] [--profile NAME] [--usage-file PATH]
 
 from __future__ import annotations
 
@@ -55,6 +62,7 @@ import argparse
 import contextlib
 import fcntl
 import ipaddress
+import json
 import os
 import re
 import select
@@ -66,6 +74,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -97,10 +106,20 @@ _ASK_TIMEOUT = 60.0
 # oddity) from a malicious request line must not reach the filesystem.
 _SAFE_HOST_RE = re.compile(r"[a-z0-9.-]+")
 
+# How often a transferring tunnel's byte counters are written out. The file
+# is also written when a tunnel ends and when the proxy exits, so this only
+# bounds how stale a *live* transfer's numbers can look in `aiab monitor`.
+_USAGE_FLUSH_INTERVAL = 2.0
+
 # evaluate() verdicts.
 ALLOW = "allow"
 DENY = "deny"
 ASK = "ask"
+
+
+def host_matches(host: str, domain: str) -> bool:
+    """Does host fall under domain -- as the domain itself, or a subdomain?"""
+    return host == domain or host.endswith("." + domain)
 
 
 def evaluate(
@@ -127,7 +146,7 @@ def evaluate(
         return ALLOW
 
     def matches(domain: str) -> bool:
-        return host == domain or host.endswith("." + domain)
+        return host_matches(host, domain)
 
     if any(matches(d) for d in api_domains):
         return ALLOW
@@ -259,6 +278,82 @@ def watcher_attached(pending_dir: Path) -> bool:
     return False
 
 
+def usage_path(container_name: str) -> Path:
+    """Where a container's proxy writes its byte counters.
+
+    Alongside the .log and .pid files `aiab run` maintains for the same
+    proxy, and named the same way, so `aiab monitor` can find all three from
+    a container name it reconstructs itself (see aiab.netwatch).
+    """
+    return PROXY_DIR / f"{container_name}.bytes"
+
+
+class _UsageMeter:
+    """Per-host byte counters for one proxy, published to a file.
+
+    Counts what the tunnels actually carried, which for a CONNECT is
+    ciphertext: the figure is bytes on the wire (TLS framing and all), and it
+    can only ever be attributed to a host, never to a URL within it.
+
+    Hosts matching the agent's own API domains are flagged, because the
+    interesting traffic is usually the *other* kind -- apt, npm, pip, a git
+    clone -- and an agent streaming completions all day would otherwise bury
+    it in the total.
+
+    Counters live for the proxy's lifetime, which is the session's: a new
+    `aiab run` starts a new file. Writing is rate-limited by
+    _USAGE_FLUSH_INTERVAL and done under the lock, so the handler threads
+    doing the counting share one small file rather than one write each.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        # host -> [bytes up, bytes down, is an api domain]
+        self._hosts: dict[str, list[int]] = {}
+        self._last_write = 0.0
+
+    def count(self, host: str, api: bool, *, up: int = 0, down: int = 0) -> None:
+        """Add bytes in one direction for a host, flushing if it's time."""
+        if self.path is None:
+            return
+        with self._lock:
+            entry = self._hosts.setdefault(host, [0, 0, int(api)])
+            entry[0] += up
+            entry[1] += down
+            self._maybe_write(time.time() >= self._last_write + _USAGE_FLUSH_INTERVAL)
+
+    def flush(self) -> None:
+        """Write the counters out now (at the end of a tunnel, or at exit)."""
+        if self.path is None:
+            return
+        with self._lock:
+            self._maybe_write(True)
+
+    def _maybe_write(self, due: bool) -> None:
+        """Publish the counters if due. Caller holds the lock."""
+        if not due or self.path is None:
+            return
+        self._last_write = time.time()
+        payload = {
+            "hosts": {
+                host: {"up": up, "down": down, "api": bool(api)}
+                for host, (up, down, api) in self._hosts.items()
+            }
+        }
+        # Written whole and renamed into place: a monitor polling the file
+        # must never catch a half-written one and read it as "no traffic".
+        # A failure here is not worth disturbing a working session for --
+        # the numbers are a readout, not part of enforcement.
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload))
+            os.replace(tmp, self.path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+
 def _log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{stamp} {message}", file=sys.stderr, flush=True)
@@ -276,6 +371,7 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         agent: str,
         pending_dir: Path | None = None,
         profile: str | None = None,
+        usage_file: Path | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.agent = agent
@@ -292,7 +388,17 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
                 defaults = defaults + list(entry.get("allow", []))
         self.api_domains = [d.lower() for d in defaults]
         self.pending_dir = pending_dir
+        self.usage = _UsageMeter(usage_file)
         super().__init__(socket_path, _Handler)
+
+    def is_api_domain(self, host: str) -> bool:
+        """Is this host one of the agent's own API endpoints?
+
+        Matched the same way evaluate() matches them, so what the meter
+        labels 'agent traffic' is exactly what the policy waves through.
+        """
+        host = host.lower().rstrip(".")
+        return any(host_matches(host, d) for d in self.api_domains)
 
     def decide(self, host: str) -> str:
         return evaluate(
@@ -401,14 +507,28 @@ class _Handler(socketserver.StreamRequestHandler):
             self._respond(502, "Bad Gateway", f"could not reach {host}:{port}: {exc}")
             return
 
+        # Meter what the tunnel carries, so `aiab monitor` can show where a
+        # session's traffic is going (the host is as fine-grained as this
+        # gets: a CONNECT body is ciphertext).
+        meter = self.server.usage
+        api = self.server.is_api_domain(host)
+
+        def count_up(n: int) -> None:
+            meter.count(host, api, up=n)
+
+        def count_down(n: int) -> None:
+            meter.count(host, api, down=n)
+
         with upstream:
             upstream.settimeout(None)
             if upstream_head:
                 upstream.sendall(upstream_head)
+                count_up(len(upstream_head))
             else:
                 self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 self.wfile.flush()
-            _relay(self.connection, upstream)
+            _relay(self.connection, upstream, count_up, count_down)
+        meter.flush()  # the tunnel's final numbers, without waiting for a tick
 
     def _await_decision(self, host: str) -> str:
         """Park an undecided request while a watch session asks the user.
@@ -485,8 +605,16 @@ class _Handler(socketserver.StreamRequestHandler):
 _HALF_CLOSE_GRACE = 120.0
 
 
-def _pipe(src: socket.socket, dst: socket.socket, done: threading.Event) -> None:
+def _pipe(
+    src: socket.socket,
+    dst: socket.socket,
+    done: threading.Event,
+    count: Callable[[int], None] | None = None,
+) -> None:
     """Shovel one direction of a tunnel, then half-close the far side.
+
+    ``count``, when given, is told the size of each chunk forwarded -- this
+    being the one point every proxied byte passes through (see _UsageMeter).
 
     Reads wait in poll() rather than in a blocking recv(), so a direction
     whose peer has gone silent can still notice ``done`` — set by whichever
@@ -507,6 +635,8 @@ def _pipe(src: socket.socket, dst: socket.socket, done: threading.Event) -> None
             if not data:
                 break
             dst.sendall(data)
+            if count is not None:
+                count(len(data))
     except OSError:
         pass
     finally:
@@ -515,7 +645,12 @@ def _pipe(src: socket.socket, dst: socket.socket, done: threading.Event) -> None
             dst.shutdown(socket.SHUT_WR)
 
 
-def _relay(client: socket.socket, upstream: socket.socket) -> None:
+def _relay(
+    client: socket.socket,
+    upstream: socket.socket,
+    count_up: Callable[[int], None] | None = None,
+    count_down: Callable[[int], None] | None = None,
+) -> None:
     """Shovel bytes both ways until both directions are closed.
 
     Either direction ending starts the clock on the other, because a tunnel
@@ -528,9 +663,11 @@ def _relay(client: socket.socket, upstream: socket.socket) -> None:
     included.
     """
     done = threading.Event()
-    t = threading.Thread(target=_pipe, args=(client, upstream, done), daemon=True)
+    t = threading.Thread(
+        target=_pipe, args=(client, upstream, done, count_up), daemon=True
+    )
     t.start()
-    _pipe(upstream, client, done)
+    _pipe(upstream, client, done, count_down)
     t.join()
 
 
@@ -559,6 +696,11 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="profile in force; its allow list joins the always-allowed defaults",
     )
+    parser.add_argument(
+        "--usage-file",
+        default=None,
+        help="file to publish per-host byte counters to for 'aiab monitor'",
+    )
     args = parser.parse_args(argv)
 
     # An abstract socket (@name) lives in the network namespace rather than
@@ -582,7 +724,10 @@ def main(argv: list[str] | None = None) -> None:
         pending_dir = Path(args.pending_dir)
         pending_dir.mkdir(parents=True, exist_ok=True)
 
-    server = ProxyServer(address, Path(args.dir), args.agent, pending_dir, args.profile)
+    usage_file = Path(args.usage_file) if args.usage_file else None
+    server = ProxyServer(
+        address, Path(args.dir), args.agent, pending_dir, args.profile, usage_file
+    )
     if not abstract:
         os.chmod(address, 0o600)
     _log(
@@ -593,6 +738,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         server.serve_forever()
     finally:
+        # SIGTERM lands here (_terminate raises SystemExit): publish the final
+        # counters before going away, so a session's last transfer isn't lost
+        # between flush intervals.
+        server.usage.flush()
         server.server_close()
         if not abstract:
             Path(address).unlink(missing_ok=True)

@@ -2,6 +2,8 @@
 # it is covered in test_monitor_tui.py). This covers decision recording and
 # the pending-queue helpers.
 
+import json
+
 import pytest
 
 import aiab.netproxy as netproxy
@@ -14,6 +16,9 @@ def isolated_state(tmp_path, monkeypatch):
     """Redirect policy and pending-queue I/O to a temporary directory."""
     monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
     monkeypatch.setattr(netwatch, "_PENDING_BASE", tmp_path / "pending")
+    proxy_dir = tmp_path / "proxy"
+    proxy_dir.mkdir()
+    monkeypatch.setattr(netproxy, "PROXY_DIR", proxy_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -113,3 +118,118 @@ def test_attached_needs_no_cleanup_after_a_crash(tmp_path):
         pass
     assert (pdir / netproxy.WATCHER_LOCK).exists()
     assert netproxy.watcher_attached(pdir) is False
+
+
+# ---------------------------------------------------------------------------
+# read_usage: the per-host byte counters, read back from what the proxies
+# publish (one file per session container; see netproxy._UsageMeter)
+# ---------------------------------------------------------------------------
+
+
+def _publish(work_dir, hosts, which=0):
+    """Write one session container's counters, as its proxy would.
+
+    `which` picks among the containers the directory could be running, so a
+    test can put traffic in two of them at once.
+    """
+    name, _label = netwatch.session_containers(work_dir)[which]
+    netproxy.usage_path(name).write_text(json.dumps({"hosts": hosts}))
+
+
+def test_read_usage_with_nothing_published(tmp_path):
+    # The ordinary case outside a restricted session: no proxy has run, so
+    # there are no files and no traffic — not an error.
+    assert netwatch.read_usage(tmp_path).hosts == {}
+
+
+def test_read_usage_reports_a_hosts_counts(tmp_path):
+    _publish(tmp_path, {"registry.npmjs.org": {"up": 10, "down": 2000, "api": False}})
+    usage = netwatch.read_usage(tmp_path)
+    assert usage.hosts["registry.npmjs.org"] == netwatch.HostBytes(10, 2000, False)
+
+
+def test_read_usage_sums_across_session_containers(tmp_path):
+    # apt fetching in two of a directory's containers is the same traffic to
+    # the same place; the directory's figure is the total.
+    _publish(tmp_path, {"deb.example": {"up": 1, "down": 100, "api": False}}, which=0)
+    _publish(tmp_path, {"deb.example": {"up": 2, "down": 200, "api": False}}, which=1)
+    usage = netwatch.read_usage(tmp_path)
+    assert usage.hosts["deb.example"] == netwatch.HostBytes(3, 300, False)
+
+
+def test_read_usage_survives_a_damaged_file(tmp_path):
+    # A truncated or hand-edited file must not take the monitor down: this is
+    # a readout, and a session is not worth interrupting over it.
+    name, _label = netwatch.session_containers(tmp_path)[0]
+    netproxy.usage_path(name).write_text("{not json")
+    assert netwatch.read_usage(tmp_path).hosts == {}
+
+
+def test_read_usage_skips_unreadable_host_entries(tmp_path):
+    # One malformed entry loses that host's figure, not the whole file's.
+    _publish(
+        tmp_path,
+        {
+            "good.example": {"up": 1, "down": 2, "api": False},
+            "bad.example": {"up": "lots"},
+        },
+    )
+    usage = netwatch.read_usage(tmp_path)
+    assert set(usage.hosts) == {"good.example"}
+
+
+def test_totals_split_agent_traffic_from_the_rest(tmp_path):
+    # The split the header relies on: an agent streaming completions must not
+    # bury what else the container is doing.
+    _publish(
+        tmp_path,
+        {
+            "api.anthropic.com": {"up": 1000, "down": 90000, "api": True},
+            "registry.npmjs.org": {"up": 10, "down": 500, "api": False},
+            "deb.example": {"up": 5, "down": 300, "api": False},
+        },
+    )
+    usage = netwatch.read_usage(tmp_path)
+    assert usage.totals(api=True) == netwatch.HostBytes(1000, 90000, True)
+    assert usage.totals(api=False) == netwatch.HostBytes(15, 800, False)
+
+
+def test_under_covers_a_rule_and_its_subdomains(tmp_path):
+    # A rule for github.com is what allowed codeload.github.com, so the row
+    # for that rule accounts for it.
+    _publish(
+        tmp_path,
+        {
+            "codeload.github.com": {"up": 1, "down": 5000, "api": False},
+            "github.com": {"up": 2, "down": 100, "api": False},
+            "nothub.com": {"up": 9, "down": 9, "api": False},
+        },
+    )
+    usage = netwatch.read_usage(tmp_path)
+    assert usage.under("github.com") == netwatch.HostBytes(3, 5100, False)
+    assert usage.under("codeload.github.com") == netwatch.HostBytes(1, 5000, False)
+    assert usage.under("absent.example") == netwatch.HostBytes(0, 0, False)
+
+
+# ---------------------------------------------------------------------------
+# format_bytes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "count,expected",
+    [
+        (0, "0"),
+        (999, "999"),
+        (1000, "1.0k"),
+        (9999, "10.0k"),
+        (10_000, "10k"),
+        (812_345, "812k"),
+        (1_200_000, "1.2M"),
+        (48_000_000, "48M"),
+        (3_400_000_000, "3.4G"),
+    ],
+)
+def test_format_bytes_fits_a_one_line_header(count, expected):
+    assert netwatch.format_bytes(count) == expected
+    assert len(netwatch.format_bytes(count)) <= 5

@@ -15,11 +15,29 @@ from types import SimpleNamespace
 from typing import Any
 
 from aiab import lifecycle
+from aiab import netproxy
 
 
 def _lock_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(lifecycle, "LOCK_DIR", tmp_path)
     return tmp_path
+
+
+def test_stop_proxy_drops_the_byte_counters(monkeypatch, tmp_path):
+    # The counters are scoped to the session that produced them: leaving them
+    # behind would show a later `aiab monitor` traffic nothing is moving. The
+    # log, by contrast, is kept — denials are worth reading after the fact.
+    monkeypatch.setattr(netproxy, "PROXY_DIR", tmp_path)
+    monkeypatch.setattr(lifecycle, "proxy_pid", lambda name: None)  # no process
+    usage = netproxy.usage_path("claude-proj-abc123")
+    usage.write_text('{"hosts": {}}')
+    log = tmp_path / "claude-proj-abc123.log"
+    log.write_text("DENY GET nope.example:443\n")
+
+    lifecycle.stop_proxy("claude-proj-abc123")
+
+    assert not usage.exists()
+    assert log.exists()
 
 
 def test_session_in_use_false_without_a_lock_file(monkeypatch, tmp_path):

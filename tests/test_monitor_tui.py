@@ -4,6 +4,7 @@
 # rather than error when the import fails.
 
 import asyncio
+import json
 import os
 import time
 
@@ -962,5 +963,125 @@ def test_a_tmux_refusal_is_reported_not_raised(work_dir, monkeypatch):
             assert any(
                 "not inside a tmux session" in line for line in _log_lines(app)
             ), _log_lines(app)
+
+    asyncio.run(scenario())
+
+
+# -- network usage --
+#
+# What the proxies metered (aiab.netwatch.read_usage) shows up in two places:
+# totalled in the header, and per rule on the Domains tab.
+
+
+def _publish_usage(work_dir, hosts):
+    """Write a session container's byte counters, as its proxy would."""
+    name, _label = netwatch.session_containers(work_dir)[0]
+    path = netproxy.usage_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"hosts": hosts}))
+
+
+def _header(app):
+    return app.query_one("#policy", monitor_tui.Static).renderable
+
+
+def _usage_shown(app):
+    """The byte column of each Domains row, by domain."""
+    return {
+        row.domain: str(row.query_one(".bytes", monitor_tui.Static).renderable)
+        for row in app.query(monitor_tui.DecisionRow)
+    }
+
+
+def test_header_totals_traffic_apart_from_the_agents_own(work_dir):
+    state.set_network_mode(work_dir, state.MODE_RESTRICTED)
+    _publish_usage(
+        work_dir,
+        {
+            "api.anthropic.com": {"up": 1_200_000, "down": 48_000_000, "api": True},
+            "registry.npmjs.org": {"up": 10_000, "down": 31_000_000, "api": False},
+        },
+    )
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            app._refresh_usage()
+            await pilot.pause()
+            assert "net ↑10k ↓31M" in _header(app)
+            assert "agent ↑1.2M ↓48M" in _header(app)
+
+    asyncio.run(scenario())
+
+
+def test_header_omits_the_agent_segment_until_there_is_agent_traffic(work_dir):
+    state.set_network_mode(work_dir, state.MODE_RESTRICTED)
+    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            app._refresh_usage()
+            await pilot.pause()
+            assert "net ↑5 ↓300" in _header(app)
+            assert "· agent " not in _header(app)
+
+    asyncio.run(scenario())
+
+
+def test_header_shows_no_figures_in_open_mode(work_dir):
+    # There is no proxy in open mode, so there is nothing to meter: a zero
+    # would read as "nothing happened" rather than "not measured". Stale
+    # counters from an earlier restricted session must not show either.
+    state.set_network_mode(work_dir, state.MODE_OPEN)
+    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            app._refresh_usage()
+            await pilot.pause()
+            assert "net " not in _header(app)
+            assert "mode: open" in _header(app)
+
+    asyncio.run(scenario())
+
+
+def test_domains_rows_show_what_each_rule_carried(work_dir):
+    state.add_network_allow(work_dir, "github.com", None)
+    state.add_network_deny(work_dir, "tracker.example")
+    _publish_usage(
+        work_dir,
+        # Allowed by the github.com rule, so counted against that row.
+        {"codeload.github.com": {"up": 2000, "down": 5_400_000, "api": False}},
+    )
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.press("2")
+            app._refresh_usage()
+            await pilot.pause()
+            shown = _usage_shown(app)
+            assert shown["github.com"] == "↑2.0k ↓5.4M"
+            # Nothing got through a deny, so its row stays uncluttered.
+            assert shown["tracker.example"] == ""
+
+    asyncio.run(scenario())
+
+
+def test_domains_rows_have_their_figures_on_first_paint(work_dir):
+    # Opening the tab rebuilds the rows; they must not sit blank until the
+    # next refresh tick.
+    state.add_network_allow(work_dir, "deb.example", None)
+    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            app._refresh_usage()  # populate the cache, as the timer would
+            await pilot.press("2")
+            await pilot.pause()
+            assert _usage_shown(app) == {"deb.example": "↑5 ↓300"}
 
     asyncio.run(scenario())

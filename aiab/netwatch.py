@@ -24,6 +24,10 @@
 # aiab.state mutation, which every parked handler notices on its next poll —
 # so there is no other channel between the two processes.
 #
+# It also reads back the per-host byte counters each proxy publishes (see
+# aiab.netproxy._UsageMeter), summed across the directory's session
+# containers, so the monitor can show where a session's traffic is going.
+#
 # The user interface over this plumbing lives in aiab.monitor_tui (textual).
 # This module deliberately holds no UI of its own, so the queue helpers and
 # the decision recording can be tested without driving a terminal.
@@ -36,8 +40,11 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 from . import StrPath
@@ -158,18 +165,125 @@ class _LogTail:
         return [f"[{self.label}] {line}" for line in data.splitlines()]
 
 
-def log_tails(work_dir: Path) -> list[_LogTail]:
-    """One tail per session the directory could be running.
+def session_containers(work_dir: Path) -> list[tuple[str, str]]:
+    """Every (container name, label) a directory's sessions could be using.
 
     That's every agent, plus every isolated profile of one — those get their
-    own container, and so their own proxy log. Logs that don't exist (yet)
-    just stay silent.
+    own container, and so their own proxy files. The containers need not
+    exist: a caller reading per-container files just finds nothing for the
+    ones that aren't running. The label is the container-name prefix, which
+    is what distinguishes one session from another to a reader.
     """
     return [
-        _LogTail(
-            netproxy.PROXY_DIR / f"{container_name_for_dir(work_dir, prefix)}.log",
-            prefix,
-        )
+        (container_name_for_dir(work_dir, prefix), prefix)
         for agent in agents.AGENT_NAMES
         for prefix in profiles.session_prefixes(agent)
     ]
+
+
+def log_tails(work_dir: Path) -> list[_LogTail]:
+    """One tail per session the directory could be running.
+
+    Logs that don't exist (yet) just stay silent.
+    """
+    return [
+        _LogTail(netproxy.PROXY_DIR / f"{name}.log", label)
+        for name, label in session_containers(work_dir)
+    ]
+
+
+@dataclass(frozen=True)
+class HostBytes:
+    """What one host has carried this session, in both directions.
+
+    `api` marks the agent's own API endpoints (see
+    aiab.netproxy.ProxyServer.is_api_domain), which is what lets a reader
+    separate the agent's own chatter from everything else the container is
+    doing — apt, npm, pip, a git clone — which is usually the interesting
+    part.
+    """
+
+    up: int = 0
+    down: int = 0
+    api: bool = False
+
+    def __add__(self, other: "HostBytes") -> "HostBytes":
+        return HostBytes(
+            self.up + other.up, self.down + other.down, self.api or other.api
+        )
+
+
+@dataclass
+class Usage:
+    """Per-host byte counts for a directory, summed over its sessions."""
+
+    hosts: dict[str, HostBytes] = field(default_factory=dict)
+
+    def totals(self, *, api: bool) -> HostBytes:
+        """The combined counts for agent-API hosts, or for everything else."""
+        total = HostBytes()
+        for host in self.hosts.values():
+            if host.api is api:
+                total = total + host
+        return total
+
+    def under(self, domain: str) -> HostBytes:
+        """The counts for everything a rule covers: the domain and below it.
+
+        A rule for github.com is what allowed codeload.github.com, so its
+        row's figure has to include it — matched the way the policy matches,
+        via aiab.netproxy.host_matches. Overlapping rules (github.com and
+        api.github.com both recorded) each count the traffic they cover, so
+        two such rows are individually right but do not sum to the total.
+        """
+        domain = domain.lower().rstrip(".")
+        total = HostBytes()
+        for host, counts in self.hosts.items():
+            if netproxy.host_matches(host, domain):
+                total = total + counts
+        return total
+
+
+def read_usage(work_dir: Path) -> Usage:
+    """The byte counters the directory's proxies have published so far.
+
+    Counts are summed across the directory's session containers: traffic to
+    a package index is the same traffic whichever agent's container fetched
+    it. A missing or half-written file reads as no traffic rather than an
+    error — this is a readout, and a session is not worth interrupting over
+    it (the proxy renames its file into place, so the half-written case
+    should not arise in the first place).
+    """
+    usage = Usage()
+    for name, _label in session_containers(work_dir):
+        try:
+            raw = json.loads(netproxy.usage_path(name).read_text())
+            hosts = raw["hosts"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(hosts, dict):
+            continue
+        for host, counts in hosts.items():
+            try:
+                entry = HostBytes(
+                    int(counts["up"]), int(counts["down"]), bool(counts["api"])
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            usage.hosts[host] = usage.hosts.get(host, HostBytes()) + entry
+    return usage
+
+
+def format_bytes(count: int) -> str:
+    """Render a byte count in at most five characters, for a one-line header.
+
+    Decimal units, as network figures are conventionally quoted: 1.2M is
+    1,200,000 bytes. Three significant figures would not fit the pane, and
+    the question these numbers answer ("is something pulling a lot in here?")
+    does not need them.
+    """
+    for unit, scale in (("G", 10**9), ("M", 10**6), ("k", 10**3)):
+        if count >= scale:
+            value = count / scale
+            return f"{value:.0f}{unit}" if value >= 10 else f"{value:.1f}{unit}"
+    return str(count)

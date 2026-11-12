@@ -127,6 +127,7 @@ def ensure_proxy(
         f"--dir={work_dir}",
         f"--agent={agent}",
         f"--pending-dir={netwatch.pending_dir(work_dir)}",
+        f"--usage-file={netproxy.usage_path(session.name)}",
     ]
     if profile:
         argv.append(f"--profile={profile}")
@@ -165,6 +166,10 @@ def stop_proxy(container_name: str) -> None:
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGTERM)
     (netproxy.PROXY_DIR / f"{container_name}.pid").unlink(missing_ok=True)
+    # The byte counters are scoped to the session that produced them; leaving
+    # them behind would show a later `aiab monitor` traffic that no live
+    # session is moving.
+    netproxy.usage_path(container_name).unlink(missing_ok=True)
     (netproxy.PROXY_DIR / f"{container_name}.sock").unlink(missing_ok=True)
 
 
