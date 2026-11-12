@@ -265,16 +265,14 @@ def test_relay_keeps_an_idle_tunnel_with_both_ends_live(monkeypatch):
 #
 # The tunnel is the only place every proxied byte passes through, so it is
 # where a session's traffic gets counted (see netproxy._UsageMeter). These
-# cover the counting, the file it publishes for `aiab monitor`, and the
-# agent/other split that keeps a package fetch visible next to an agent
-# streaming completions all day.
+# cover the counting and the file it publishes for `aiab monitor`.
 
 import json  # noqa: E402
 
 from aiab.netproxy import _UsageMeter, usage_path  # noqa: E402
 
 
-def _counted_tunnel(meter, host="example.com", api=False):
+def _counted_tunnel(meter, host="example.com"):
     """A relay whose two directions report into a meter, plus the far ends."""
     client_peer, client = socket.socketpair()
     upstream, upstream_peer = socket.socketpair()
@@ -283,8 +281,8 @@ def _counted_tunnel(meter, host="example.com", api=False):
         args=(
             client,
             upstream,
-            lambda n: meter.count(host, api, up=n),
-            lambda n: meter.count(host, api, down=n),
+            lambda n: meter.count(host, up=n),
+            lambda n: meter.count(host, down=n),
         ),
         daemon=True,
     )
@@ -310,27 +308,16 @@ def test_meter_counts_both_directions_of_a_tunnel(tmp_path):
         upstream_peer.close()
     t.join(10)
     meter.flush()
-    assert _published(path) == {"example.com": {"up": 7, "down": 10, "api": False}}
-
-
-def test_meter_marks_agent_api_hosts(tmp_path):
-    path = tmp_path / "c.bytes"
-    meter = _UsageMeter(path)
-    meter.count("api.anthropic.com", True, down=1000)
-    meter.count("registry.npmjs.org", False, down=50)
-    meter.flush()
-    hosts = _published(path)
-    assert hosts["api.anthropic.com"]["api"] is True
-    assert hosts["registry.npmjs.org"]["api"] is False
+    assert _published(path) == {"example.com": {"up": 7, "down": 10}}
 
 
 def test_meter_accumulates_across_requests(tmp_path):
     path = tmp_path / "c.bytes"
     meter = _UsageMeter(path)
-    meter.count("example.com", False, up=1, down=2)
-    meter.count("example.com", False, up=10, down=20)
+    meter.count("example.com", up=1, down=2)
+    meter.count("example.com", up=10, down=20)
     meter.flush()
-    assert _published(path)["example.com"] == {"up": 11, "down": 22, "api": False}
+    assert _published(path)["example.com"] == {"up": 11, "down": 22}
 
 
 def test_meter_writes_are_rate_limited_but_flush_is_not(tmp_path, monkeypatch):
@@ -339,8 +326,8 @@ def test_meter_writes_are_rate_limited_but_flush_is_not(tmp_path, monkeypatch):
     monkeypatch.setattr(netproxy, "_USAGE_FLUSH_INTERVAL", 3600.0)
     path = tmp_path / "c.bytes"
     meter = _UsageMeter(path)
-    meter.count("example.com", False, down=5)  # the first count is due at once
-    meter.count("example.com", False, down=5)
+    meter.count("example.com", down=5)  # the first count is due at once
+    meter.count("example.com", down=5)
     assert _published(path)["example.com"]["down"] == 5  # second not written yet
     meter.flush()
     assert _published(path)["example.com"]["down"] == 10
@@ -350,7 +337,7 @@ def test_meter_without_a_file_is_inert(tmp_path):
     # --usage-file is optional, so counting has to tolerate its absence
     # rather than every request raising.
     meter = _UsageMeter(None)
-    meter.count("example.com", False, up=1)
+    meter.count("example.com", up=1)
     meter.flush()
     assert list(tmp_path.iterdir()) == []
 
@@ -358,7 +345,7 @@ def test_meter_without_a_file_is_inert(tmp_path):
 def test_meter_leaves_no_temp_file_behind(tmp_path):
     path = tmp_path / "c.bytes"
     meter = _UsageMeter(path)
-    meter.count("example.com", False, up=1)
+    meter.count("example.com", up=1)
     meter.flush()
     assert [p.name for p in tmp_path.iterdir()] == ["c.bytes"]
 
@@ -424,16 +411,3 @@ def test_a_request_through_the_proxy_lands_in_the_usage_file(tmp_path, monkeypat
     assert hosts["deb.example"]["down"] == len(response)
     # The request the proxy rewrote and sent on, counted as it went out.
     assert hosts["deb.example"]["up"] == len(received[0])
-    assert hosts["deb.example"]["api"] is False
-
-
-def test_is_api_domain_matches_what_the_policy_waves_through(tmp_path):
-    srv = ProxyServer("\0aiab-test-api", tmp_path, "claude")
-    try:
-        api = srv.api_domains[0]
-        assert srv.is_api_domain(api)
-        assert srv.is_api_domain(f"sub.{api}".upper())  # host case is irrelevant
-        assert not srv.is_api_domain("registry.npmjs.org")
-        assert not srv.is_api_domain(f"not{api}")  # no suffix confusion
-    finally:
-        srv.server_close()

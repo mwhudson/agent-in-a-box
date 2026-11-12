@@ -295,11 +295,6 @@ class _UsageMeter:
     ciphertext: the figure is bytes on the wire (TLS framing and all), and it
     can only ever be attributed to a host, never to a URL within it.
 
-    Hosts matching the agent's own API domains are flagged, because the
-    interesting traffic is usually the *other* kind -- apt, npm, pip, a git
-    clone -- and an agent streaming completions all day would otherwise bury
-    it in the total.
-
     Counters live for the proxy's lifetime, which is the session's: a new
     `aiab run` starts a new file. Writing is rate-limited by
     _USAGE_FLUSH_INTERVAL and done under the lock, so the handler threads
@@ -309,16 +304,16 @@ class _UsageMeter:
     def __init__(self, path: Path | None) -> None:
         self.path = path
         self._lock = threading.Lock()
-        # host -> [bytes up, bytes down, is an api domain]
+        # host -> [bytes up, bytes down]
         self._hosts: dict[str, list[int]] = {}
         self._last_write = 0.0
 
-    def count(self, host: str, api: bool, *, up: int = 0, down: int = 0) -> None:
+    def count(self, host: str, *, up: int = 0, down: int = 0) -> None:
         """Add bytes in one direction for a host, flushing if it's time."""
         if self.path is None:
             return
         with self._lock:
-            entry = self._hosts.setdefault(host, [0, 0, int(api)])
+            entry = self._hosts.setdefault(host, [0, 0])
             entry[0] += up
             entry[1] += down
             self._maybe_write(time.time() >= self._last_write + _USAGE_FLUSH_INTERVAL)
@@ -337,8 +332,8 @@ class _UsageMeter:
         self._last_write = time.time()
         payload = {
             "hosts": {
-                host: {"up": up, "down": down, "api": bool(api)}
-                for host, (up, down, api) in self._hosts.items()
+                host: {"up": up, "down": down}
+                for host, (up, down) in self._hosts.items()
             }
         }
         # Written whole and renamed into place: a monitor polling the file
@@ -390,15 +385,6 @@ class ProxyServer(socketserver.ThreadingUnixStreamServer):
         self.pending_dir = pending_dir
         self.usage = _UsageMeter(usage_file)
         super().__init__(socket_path, _Handler)
-
-    def is_api_domain(self, host: str) -> bool:
-        """Is this host one of the agent's own API endpoints?
-
-        Matched the same way evaluate() matches them, so what the meter
-        labels 'agent traffic' is exactly what the policy waves through.
-        """
-        host = host.lower().rstrip(".")
-        return any(host_matches(host, d) for d in self.api_domains)
 
     def decide(self, host: str) -> str:
         return evaluate(
@@ -511,13 +497,12 @@ class _Handler(socketserver.StreamRequestHandler):
         # session's traffic is going (the host is as fine-grained as this
         # gets: a CONNECT body is ciphertext).
         meter = self.server.usage
-        api = self.server.is_api_domain(host)
 
         def count_up(n: int) -> None:
-            meter.count(host, api, up=n)
+            meter.count(host, up=n)
 
         def count_down(n: int) -> None:
-            meter.count(host, api, down=n)
+            meter.count(host, down=n)
 
         with upstream:
             upstream.settimeout(None)

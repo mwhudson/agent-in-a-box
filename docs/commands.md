@@ -796,7 +796,7 @@ Restricted mode routes everything through aiab's proxy, which makes it the one
 place that can see how much a session is really moving. The header totals it:
 
 ```
-~/src/project · mode: restricted · net ↑10k ↓31M · agent ↑1.2M ↓48M
+~/src/project · mode: restricted · net ↑1.2M ↓79M
 ```
 
 The directory is written the way you would type it — a `~` for your home
@@ -805,25 +805,28 @@ header is one row of a pane that is already carrying five tabs and the
 [Shell button](#the-shell-button). On a narrow terminal the end of that line
 is what goes first.
 
-`net` is everything the *container* did — `apt`, `npm`, `pip`, a `git clone`,
-a `curl` — and `agent` is the agent's own API traffic, kept apart because an
-agent streaming completions all day moves far more than a package fetch does,
-and the package fetch is the one you didn't already know about. The `agent`
-figure only appears once there is some. Both are for the session: the
-counters live with the proxy, so a new `aiab run` starts from zero.
+`net` is everything the *container* did — the agent talking to its own API,
+`apt`, `npm`, `pip`, a `git clone`, a `curl`, and whatever you ran yourself
+from [`aiab shell`](#aiab-shell). It is for the session: the counters live
+with the proxy, so a new `aiab run` starts from zero.
 
 Worth knowing what the numbers are and aren't:
 
 - **Restricted mode only.** Open mode gives the container its own NIC and no
-  proxy, so there is nothing on the host that sees the traffic; the figures
-  are left off the header entirely rather than shown as a zero that would
-  read as "nothing happened".
+  proxy, so there is nothing on the host that sees the traffic; the figure is
+  left off the header entirely rather than shown as a zero that would read as
+  "nothing happened".
 - **Bytes on the wire, by host.** A tunnelled request is ciphertext to the
   proxy, so traffic can be attributed to a host but never to a URL within it,
   and the figure includes TLS overhead.
 - **Not a measure of what the agent costs.** Model usage is tokens, not
   bytes, and the two barely correlate — streamed responses are small while
   resubmitted context is large. For spend, ask the agent.
+- **Not attributed to who caused it.** The proxy sees a container and a host,
+  which is not enough to tell the agent's `apt` from one you ran yourself in a
+  shell in there. An agent streaming completions does dominate the figure, so
+  if you are watching for a surprise download, watch the per-rule figures on
+  the [domains tab](#domains-tab) rather than the header total.
 - A host that moved bytes under a rule you have since dropped still counts
   toward the header total but no longer has a row of its own.
 

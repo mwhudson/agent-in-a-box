@@ -1006,13 +1006,16 @@ def test_the_header_path_is_written_the_way_you_would_type_it(monkeypatch, tmp_p
     assert monitor_tui._tilde(Path(f"{tmp_path}-other")) == f"{tmp_path}-other"
 
 
-def test_header_totals_traffic_apart_from_the_agents_own(work_dir):
+def test_header_totals_every_hosts_traffic(work_dir):
+    # One figure for the session: the agent's own API hosts are in it on the
+    # same footing as everything else, because the meter cannot tell who
+    # caused a given host's traffic.
     state.set_network_mode(work_dir, state.MODE_RESTRICTED)
     _publish_usage(
         work_dir,
         {
-            "api.anthropic.com": {"up": 1_200_000, "down": 48_000_000, "api": True},
-            "registry.npmjs.org": {"up": 10_000, "down": 31_000_000, "api": False},
+            "api.anthropic.com": {"up": 1_200_000, "down": 48_000_000},
+            "registry.npmjs.org": {"up": 10_000, "down": 31_000_000},
         },
     )
 
@@ -1021,23 +1024,7 @@ def test_header_totals_traffic_apart_from_the_agents_own(work_dir):
         async with app.run_test() as pilot:
             app._refresh_usage()
             await pilot.pause()
-            assert "net ↑10k ↓31M" in _header(app)
-            assert "agent ↑1.2M ↓48M" in _header(app)
-
-    asyncio.run(scenario())
-
-
-def test_header_omits_the_agent_segment_until_there_is_agent_traffic(work_dir):
-    state.set_network_mode(work_dir, state.MODE_RESTRICTED)
-    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
-
-    async def scenario():
-        app = _new_app(work_dir)
-        async with app.run_test() as pilot:
-            app._refresh_usage()
-            await pilot.pause()
-            assert "net ↑5 ↓300" in _header(app)
-            assert "· agent " not in _header(app)
+            assert "net ↑1.2M ↓79M" in _header(app)
 
     asyncio.run(scenario())
 
@@ -1047,7 +1034,7 @@ def test_header_shows_no_figures_in_open_mode(work_dir):
     # would read as "nothing happened" rather than "not measured". Stale
     # counters from an earlier restricted session must not show either.
     state.set_network_mode(work_dir, state.MODE_OPEN)
-    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
+    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300}})
 
     async def scenario():
         app = _new_app(work_dir)
@@ -1066,7 +1053,7 @@ def test_domains_rows_show_what_each_rule_carried(work_dir):
     _publish_usage(
         work_dir,
         # Allowed by the github.com rule, so counted against that row.
-        {"codeload.github.com": {"up": 2000, "down": 5_400_000, "api": False}},
+        {"codeload.github.com": {"up": 2000, "down": 5_400_000}},
     )
 
     async def scenario():
@@ -1087,7 +1074,7 @@ def test_domains_rows_have_their_figures_on_first_paint(work_dir):
     # Opening the tab rebuilds the rows; they must not sit blank until the
     # next refresh tick.
     state.add_network_allow(work_dir, "deb.example", None)
-    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300, "api": False}})
+    _publish_usage(work_dir, {"deb.example": {"up": 5, "down": 300}})
 
     async def scenario():
         app = _new_app(work_dir)

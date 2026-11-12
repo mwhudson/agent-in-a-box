@@ -143,18 +143,18 @@ def test_read_usage_with_nothing_published(tmp_path):
 
 
 def test_read_usage_reports_a_hosts_counts(tmp_path):
-    _publish(tmp_path, {"registry.npmjs.org": {"up": 10, "down": 2000, "api": False}})
+    _publish(tmp_path, {"registry.npmjs.org": {"up": 10, "down": 2000}})
     usage = netwatch.read_usage(tmp_path)
-    assert usage.hosts["registry.npmjs.org"] == netwatch.HostBytes(10, 2000, False)
+    assert usage.hosts["registry.npmjs.org"] == netwatch.HostBytes(10, 2000)
 
 
 def test_read_usage_sums_across_session_containers(tmp_path):
     # apt fetching in two of a directory's containers is the same traffic to
     # the same place; the directory's figure is the total.
-    _publish(tmp_path, {"deb.example": {"up": 1, "down": 100, "api": False}}, which=0)
-    _publish(tmp_path, {"deb.example": {"up": 2, "down": 200, "api": False}}, which=1)
+    _publish(tmp_path, {"deb.example": {"up": 1, "down": 100}}, which=0)
+    _publish(tmp_path, {"deb.example": {"up": 2, "down": 200}}, which=1)
     usage = netwatch.read_usage(tmp_path)
-    assert usage.hosts["deb.example"] == netwatch.HostBytes(3, 300, False)
+    assert usage.hosts["deb.example"] == netwatch.HostBytes(3, 300)
 
 
 def test_read_usage_survives_a_damaged_file(tmp_path):
@@ -170,7 +170,7 @@ def test_read_usage_skips_unreadable_host_entries(tmp_path):
     _publish(
         tmp_path,
         {
-            "good.example": {"up": 1, "down": 2, "api": False},
+            "good.example": {"up": 1, "down": 2},
             "bad.example": {"up": "lots"},
         },
     )
@@ -178,20 +178,17 @@ def test_read_usage_skips_unreadable_host_entries(tmp_path):
     assert set(usage.hosts) == {"good.example"}
 
 
-def test_totals_split_agent_traffic_from_the_rest(tmp_path):
-    # The split the header relies on: an agent streaming completions must not
-    # bury what else the container is doing.
+def test_totals_add_up_every_host(tmp_path):
+    # What the header shows: one figure for the session, every host in it.
     _publish(
         tmp_path,
         {
-            "api.anthropic.com": {"up": 1000, "down": 90000, "api": True},
-            "registry.npmjs.org": {"up": 10, "down": 500, "api": False},
-            "deb.example": {"up": 5, "down": 300, "api": False},
+            "api.anthropic.com": {"up": 1000, "down": 90000},
+            "registry.npmjs.org": {"up": 10, "down": 500},
+            "deb.example": {"up": 5, "down": 300},
         },
     )
-    usage = netwatch.read_usage(tmp_path)
-    assert usage.totals(api=True) == netwatch.HostBytes(1000, 90000, True)
-    assert usage.totals(api=False) == netwatch.HostBytes(15, 800, False)
+    assert netwatch.read_usage(tmp_path).totals() == netwatch.HostBytes(1015, 90800)
 
 
 def test_under_covers_a_rule_and_its_subdomains(tmp_path):
@@ -200,15 +197,15 @@ def test_under_covers_a_rule_and_its_subdomains(tmp_path):
     _publish(
         tmp_path,
         {
-            "codeload.github.com": {"up": 1, "down": 5000, "api": False},
-            "github.com": {"up": 2, "down": 100, "api": False},
-            "nothub.com": {"up": 9, "down": 9, "api": False},
+            "codeload.github.com": {"up": 1, "down": 5000},
+            "github.com": {"up": 2, "down": 100},
+            "nothub.com": {"up": 9, "down": 9},
         },
     )
     usage = netwatch.read_usage(tmp_path)
-    assert usage.under("github.com") == netwatch.HostBytes(3, 5100, False)
-    assert usage.under("codeload.github.com") == netwatch.HostBytes(1, 5000, False)
-    assert usage.under("absent.example") == netwatch.HostBytes(0, 0, False)
+    assert usage.under("github.com") == netwatch.HostBytes(3, 5100)
+    assert usage.under("codeload.github.com") == netwatch.HostBytes(1, 5000)
+    assert usage.under("absent.example") == netwatch.HostBytes(0, 0)
 
 
 # ---------------------------------------------------------------------------

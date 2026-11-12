@@ -194,23 +194,13 @@ def log_tails(work_dir: Path) -> list[_LogTail]:
 
 @dataclass(frozen=True)
 class HostBytes:
-    """What one host has carried this session, in both directions.
-
-    `api` marks the agent's own API endpoints (see
-    aiab.netproxy.ProxyServer.is_api_domain), which is what lets a reader
-    separate the agent's own chatter from everything else the container is
-    doing — apt, npm, pip, a git clone — which is usually the interesting
-    part.
-    """
+    """What one host has carried this session, in both directions."""
 
     up: int = 0
     down: int = 0
-    api: bool = False
 
     def __add__(self, other: "HostBytes") -> "HostBytes":
-        return HostBytes(
-            self.up + other.up, self.down + other.down, self.api or other.api
-        )
+        return HostBytes(self.up + other.up, self.down + other.down)
 
 
 @dataclass
@@ -219,12 +209,11 @@ class Usage:
 
     hosts: dict[str, HostBytes] = field(default_factory=dict)
 
-    def totals(self, *, api: bool) -> HostBytes:
-        """The combined counts for agent-API hosts, or for everything else."""
+    def totals(self) -> HostBytes:
+        """Everything the session has moved, across every host."""
         total = HostBytes()
         for host in self.hosts.values():
-            if host.api is api:
-                total = total + host
+            total = total + host
         return total
 
     def under(self, domain: str) -> HostBytes:
@@ -265,9 +254,7 @@ def read_usage(work_dir: Path) -> Usage:
             continue
         for host, counts in hosts.items():
             try:
-                entry = HostBytes(
-                    int(counts["up"]), int(counts["down"]), bool(counts["api"])
-                )
+                entry = HostBytes(int(counts["up"]), int(counts["down"]))
             except (KeyError, TypeError, ValueError):
                 continue
             usage.hosts[host] = usage.hosts.get(host, HostBytes()) + entry

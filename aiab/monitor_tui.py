@@ -29,8 +29,7 @@
 #     a new domain up front. Writes the same aiab.state the parked-host
 #     decisions do. Each row also carries what that rule has carried this
 #     session, metered by the proxy (see aiab.netwatch.read_usage); the
-#     header totals the same numbers, with the agent's own API traffic kept
-#     separate so a package fetch isn't buried under streamed completions;
+#     header totals the same numbers for the session as a whole;
 #   * Mounts: the recorded mounts for the directory, each a row with a
 #     read-only/read-write toggle and a remove button, plus an input to add
 #     a new one (with filesystem path completion). Edits mutate aiab.state and,
@@ -775,25 +774,22 @@ class MonitorApp(App[None]):
     def _policy_line(self) -> str:
         """The header: what directory this is, its mode, and its traffic.
 
-        The byte figures only appear in restricted mode, because that is the
+        The byte figure only appears in restricted mode, because that is the
         only mode with a proxy to meter: in open mode the container has its
         own NIC and nothing here can see what goes over it, so a zero would
         read as "nothing happened" when it means "not measured".
 
-        Agent-API traffic is reported apart from the rest, and the rest comes
-        first: an agent streaming completions moves far more than a package
-        fetch does, and the package fetch is the one you didn't already know
-        about.
+        One figure for the session, not a breakdown. The meter sees a
+        container and a host, which is not enough to say whose traffic it
+        was — an `apt` you ran yourself in a shell in there looks exactly
+        like one the agent ran — so any split would be guessing at a line
+        the proxy cannot see.
         """
         policy = state.get_network(self.work_dir)
         line = f"{_tilde(self.work_dir)} · mode: {policy['mode']}"
         if policy["mode"] != state.MODE_RESTRICTED:
             return line
-        line += " · net " + _updown(self._usage.totals(api=False))
-        api = self._usage.totals(api=True)
-        if api.up or api.down:
-            line += " · agent " + _updown(api)
-        return line
+        return line + " · net " + _updown(self._usage.totals())
 
     def _refresh_usage(self) -> None:
         """Re-read the proxies' counters; show them in the header and rows."""
