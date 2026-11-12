@@ -259,3 +259,181 @@ def test_relay_keeps_an_idle_tunnel_with_both_ends_live(monkeypatch):
         upstream_peer.close()
     t.join(10)
     assert not t.is_alive()
+
+
+# -- usage metering --
+#
+# The tunnel is the only place every proxied byte passes through, so it is
+# where a session's traffic gets counted (see netproxy._UsageMeter). These
+# cover the counting, the file it publishes for `aiab monitor`, and the
+# agent/other split that keeps a package fetch visible next to an agent
+# streaming completions all day.
+
+import json  # noqa: E402
+
+from aiab.netproxy import _UsageMeter, usage_path  # noqa: E402
+
+
+def _counted_tunnel(meter, host="example.com", api=False):
+    """A relay whose two directions report into a meter, plus the far ends."""
+    client_peer, client = socket.socketpair()
+    upstream, upstream_peer = socket.socketpair()
+    t = threading.Thread(
+        target=_relay,
+        args=(
+            client,
+            upstream,
+            lambda n: meter.count(host, api, up=n),
+            lambda n: meter.count(host, api, down=n),
+        ),
+        daemon=True,
+    )
+    t.start()
+    return t, client_peer, upstream_peer
+
+
+def _published(path):
+    return json.loads(path.read_text())["hosts"]
+
+
+def test_meter_counts_both_directions_of_a_tunnel(tmp_path):
+    path = tmp_path / "c.bytes"
+    meter = _UsageMeter(path)
+    t, client_peer, upstream_peer = _counted_tunnel(meter)
+    try:
+        client_peer.sendall(b"request")  # 7 bytes out
+        assert upstream_peer.recv(64) == b"request"
+        upstream_peer.sendall(b"a response")  # 10 bytes back
+        assert client_peer.recv(64) == b"a response"
+    finally:
+        client_peer.close()
+        upstream_peer.close()
+    t.join(10)
+    meter.flush()
+    assert _published(path) == {"example.com": {"up": 7, "down": 10, "api": False}}
+
+
+def test_meter_marks_agent_api_hosts(tmp_path):
+    path = tmp_path / "c.bytes"
+    meter = _UsageMeter(path)
+    meter.count("api.anthropic.com", True, down=1000)
+    meter.count("registry.npmjs.org", False, down=50)
+    meter.flush()
+    hosts = _published(path)
+    assert hosts["api.anthropic.com"]["api"] is True
+    assert hosts["registry.npmjs.org"]["api"] is False
+
+
+def test_meter_accumulates_across_requests(tmp_path):
+    path = tmp_path / "c.bytes"
+    meter = _UsageMeter(path)
+    meter.count("example.com", False, up=1, down=2)
+    meter.count("example.com", False, up=10, down=20)
+    meter.flush()
+    assert _published(path)["example.com"] == {"up": 11, "down": 22, "api": False}
+
+
+def test_meter_writes_are_rate_limited_but_flush_is_not(tmp_path, monkeypatch):
+    # A busy transfer must not rewrite the file once per 64KB chunk; the end
+    # of a tunnel (and the proxy exiting) publishes regardless.
+    monkeypatch.setattr(netproxy, "_USAGE_FLUSH_INTERVAL", 3600.0)
+    path = tmp_path / "c.bytes"
+    meter = _UsageMeter(path)
+    meter.count("example.com", False, down=5)  # the first count is due at once
+    meter.count("example.com", False, down=5)
+    assert _published(path)["example.com"]["down"] == 5  # second not written yet
+    meter.flush()
+    assert _published(path)["example.com"]["down"] == 10
+
+
+def test_meter_without_a_file_is_inert(tmp_path):
+    # --usage-file is optional, so counting has to tolerate its absence
+    # rather than every request raising.
+    meter = _UsageMeter(None)
+    meter.count("example.com", False, up=1)
+    meter.flush()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_meter_leaves_no_temp_file_behind(tmp_path):
+    path = tmp_path / "c.bytes"
+    meter = _UsageMeter(path)
+    meter.count("example.com", False, up=1)
+    meter.flush()
+    assert [p.name for p in tmp_path.iterdir()] == ["c.bytes"]
+
+
+def test_usage_path_sits_beside_the_other_proxy_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(netproxy, "PROXY_DIR", tmp_path)
+    assert usage_path("claude-proj-abc123") == tmp_path / "claude-proj-abc123.bytes"
+
+
+def test_a_request_through_the_proxy_lands_in_the_usage_file(tmp_path, monkeypatch):
+    """End to end over the real handler: request in, counters on disk.
+
+    The upstream is a socketpair rather than a real host — the point is the
+    wiring between _Handler, _relay and the meter, not the network — but
+    everything on this side of connect_external() is the production path,
+    including the flush at the end of a tunnel.
+    """
+    monkeypatch.setattr(state, "_NET_PATH", tmp_path / "network.json")
+    work = tmp_path / "proj"
+    work.mkdir()
+    state.set_network_mode(work, state.MODE_OPEN)  # allow, without a rule list
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    received: list[bytes] = []
+
+    def fake_upstream(host, port):
+        """Stand in for the host: echo back a canned response, then hang up."""
+        ours, theirs = socket.socketpair()
+
+        def serve():
+            with ours:
+                received.append(ours.recv(65536))
+                ours.sendall(response)
+
+        threading.Thread(target=serve, daemon=True).start()
+        return theirs
+
+    monkeypatch.setattr(netproxy, "connect_external", fake_upstream)
+    usage = tmp_path / "c.bytes"
+    srv = ProxyServer(
+        "\0aiab-test-e2e", work, "claude", usage_file=usage
+    )  # no pending dir: nothing should need parking in open mode
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(10)
+        client.connect("\0aiab-test-e2e")
+        with client:
+            client.sendall(
+                b"GET http://deb.example/pkg HTTP/1.1\r\nHost: deb.example\r\n\r\n"
+            )
+            got = b""
+            while len(got) < len(response):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                got += chunk
+        assert got == response
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    hosts = _published(usage)
+    assert hosts["deb.example"]["down"] == len(response)
+    # The request the proxy rewrote and sent on, counted as it went out.
+    assert hosts["deb.example"]["up"] == len(received[0])
+    assert hosts["deb.example"]["api"] is False
+
+
+def test_is_api_domain_matches_what_the_policy_waves_through(tmp_path):
+    srv = ProxyServer("\0aiab-test-api", tmp_path, "claude")
+    try:
+        api = srv.api_domains[0]
+        assert srv.is_api_domain(api)
+        assert srv.is_api_domain(f"sub.{api}".upper())  # host case is irrelevant
+        assert not srv.is_api_domain("registry.npmjs.org")
+        assert not srv.is_api_domain(f"not{api}")  # no suffix confusion
+    finally:
+        srv.server_close()
