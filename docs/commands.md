@@ -266,7 +266,12 @@ starts in a restricted directory:
   and so on — see `aiab net status` for the full per-agent list) plus the
   directory's recorded allowlist, and refuses its denylist. Everything else
   gets a 403 naming the host, and is logged to
-  `~/.local/share/aiab/proxy/<container>.log`.
+  `~/.local/share/aiab/proxy/<container>.log`;
+- every byte of an admitted request passes through the proxy too, so it also
+  counts them, per host, into
+  `~/.local/share/aiab/proxy/<container>.bytes` — which is what
+  [`aiab monitor`](#aiab-monitor) shows as
+  [traffic figures](#traffic-figures). Both files go away with the session.
 
 `allow` adds domains to the allowlist, `deny` to the denylist (subdomains
 included in both: allowing `github.com` also allows `api.github.com`). The
@@ -675,6 +680,44 @@ gets parked and re-prompted next time. A domain input at the bottom allows a
 new domain up front, before the agent ever reaches for it. These are the same
 records the Network-tab prompts write, so a parked request waiting on a domain
 is released the moment you allow it here.
+
+Each row also carries **what that rule has actually carried** this session —
+`↑sent ↓received`, blank until something goes through it. A rule covers its
+subdomains, so the figure for `github.com` includes the `codeload.github.com`
+fetch it allowed. Overlapping rules each count the traffic they cover, so
+`github.com` and `api.github.com` as separate rules both include the latter's
+bytes: every row is right about its own rule, but the rows don't sum.
+
+### Traffic figures
+
+Restricted mode routes everything through aiab's proxy, which makes it the one
+place that can see how much a session is really moving. The header totals it:
+
+```
+/home/you/src/project · mode: restricted · net ↑10k ↓31M · agent ↑1.2M ↓48M
+```
+
+`net` is everything the *container* did — `apt`, `npm`, `pip`, a `git clone`,
+a `curl` — and `agent` is the agent's own API traffic, kept apart because an
+agent streaming completions all day moves far more than a package fetch does,
+and the package fetch is the one you didn't already know about. The `agent`
+figure only appears once there is some. Both are for the session: the
+counters live with the proxy, so a new `aiab run` starts from zero.
+
+Worth knowing what the numbers are and aren't:
+
+- **Restricted mode only.** Open mode gives the container its own NIC and no
+  proxy, so there is nothing on the host that sees the traffic; the figures
+  are left off the header entirely rather than shown as a zero that would
+  read as "nothing happened".
+- **Bytes on the wire, by host.** A tunnelled request is ciphertext to the
+  proxy, so traffic can be attributed to a host but never to a URL within it,
+  and the figure includes TLS overhead.
+- **Not a measure of what the agent costs.** Model usage is tokens, not
+  bytes, and the two barely correlate — streamed responses are small while
+  resubmitted context is large. For spend, ask the agent.
+- A host that moved bytes under a rule you have since dropped still counts
+  toward the header total but no longer has a row of its own.
 
 ### Mounts tab
 

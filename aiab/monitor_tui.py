@@ -27,7 +27,10 @@
 #     row whose Allow / 15m / Deny / × buttons re-decide it on the spot — so a
 #     past Deny can be flipped to Allow with one click — plus an input to allow
 #     a new domain up front. Writes the same aiab.state the parked-host
-#     decisions do;
+#     decisions do. Each row also carries what that rule has carried this
+#     session, metered by the proxy (see aiab.netwatch.read_usage); the
+#     header totals the same numbers, with the agent's own API traffic kept
+#     separate so a package fetch isn't buried under streamed completions;
 #   * Mounts: the recorded mounts for the directory, each a row with a
 #     read-only/read-write toggle and a remove button, plus an input to add
 #     a new one (with filesystem path completion). Edits mutate aiab.state and,
@@ -99,6 +102,11 @@ _EXCLUDED_PORTS: frozenset[int] = frozenset({netproxy.PROXY_PORT})
 
 _VIEWS = ("network", "domains", "mounts", "ports", "limits")
 
+# How often the proxies' byte counters are re-read. Slower than the main
+# poll: it is one file per container the directory could be running, and
+# the proxy only writes them every netproxy._USAGE_FLUSH_INTERVAL anyway.
+_USAGE_REFRESH = 1.0
+
 # Notifier keys are a single namespace, and a parked host's key is the host
 # itself; prefix the waiting-session ones so the two can never collide.
 _ATTENTION_PREFIX = "waiting:"
@@ -120,6 +128,11 @@ class _Wait:
     shown: bool = False
     seen: bool = False
     done: bool = False
+
+
+def _updown(counts: netwatch.HostBytes) -> str:
+    """Byte counts as one compact "↑sent ↓received" string."""
+    return f"↑{netwatch.format_bytes(counts.up)} ↓{netwatch.format_bytes(counts.down)}"
 
 
 def _read_listening_ports(init_pid: int) -> set[int]:
@@ -192,6 +205,10 @@ class DecisionRow(Horizontal):
         self.expires = expires
         self.agent = agent
         self.editable = editable
+        # What this rule has carried, shown alongside it. Set before mounting
+        # by whoever builds the row (compose() reads it); set_usage() keeps it
+        # current afterwards.
+        self.usage = netwatch.HostBytes()
 
     def compose(self) -> ComposeResult:
         if self.kind == netwatch.DENY:
@@ -201,6 +218,7 @@ class DecisionRow(Horizontal):
         else:
             badge, badge_class = "allowed", "badge-allow"
         yield Static(self.domain, classes="domain")
+        yield Static(self._usage_text(), classes="bytes")
         yield Static(badge, classes=f"badge {badge_class}")
         if self.agent:
             yield Static(f"[{self.agent}]", classes="scope-tag")
@@ -211,6 +229,22 @@ class DecisionRow(Horizontal):
         yield Button("15m", name=netwatch.TEMP, classes=netwatch.TEMP)
         yield Button("Deny", name=netwatch.DENY, classes=netwatch.DENY)
         yield Button("×", name="remove", classes="remove")
+
+    def _usage_text(self) -> str:
+        """This rule's figures, or nothing until it has carried something."""
+        return _updown(self.usage) if (self.usage.up or self.usage.down) else ""
+
+    def set_usage(self, counts: netwatch.HostBytes) -> None:
+        """Update what this rule has carried.
+
+        Updated in place rather than by rebuilding the row, so a running
+        transfer's figures don't fight the mouse for the buttons next to
+        them — or reset the list's scroll position every second. A row that
+        hasn't composed yet just keeps the value for when it does.
+        """
+        self.usage = counts
+        with contextlib.suppress(NoMatches):
+            self.query_one(".bytes", Static).update(self._usage_text())
 
     # Enter/Leave bubble up from the child statics and buttons, so the row sees
     # them whenever the mouse is anywhere along it. Leave fires when crossing
@@ -406,6 +440,15 @@ class MonitorApp(App[None]):
     DecisionRow .domain {
         width: 1fr;
         padding: 0 1;
+    }
+    /* Wide enough for the longest pair of figures format_bytes can produce
+       ("↑1000k ↓1000k"), with the gap on the left: the badge that follows
+       brings its own padding. */
+    DecisionRow .bytes {
+        width: 14;
+        padding: 0 0 0 1;
+        text-align: right;
+        color: $text-muted;
     }
     DecisionRow .badge {
         width: 9;
@@ -618,6 +661,11 @@ class MonitorApp(App[None]):
         # Whether the window this pane is in has the user's attention, which
         # decides whether a wait in it is worth a notification at all.
         self._focus = focus.Focus()
+        # The proxies' byte counters, as of the last refresh. Cached because
+        # the header is redrawn on every poll while the counters only need
+        # re-reading (one file per possible session container) about once a
+        # second.
+        self._usage = netwatch.Usage()
         self._init_pid: int | None = None
         self._known_ports: set[int] = set()
         self._ignored_ports: set[int] = set()
@@ -657,6 +705,7 @@ class MonitorApp(App[None]):
         self._select_view("network")
         self._refresh_policy()
         self.set_interval(netwatch.POLL_INTERVAL, self._poll)
+        self.set_interval(_USAGE_REFRESH, self._refresh_usage)
         # A slow blink of the Network tab, so a parked host pulls focus back
         # while you are over on Domains or Mounts.
         self.set_interval(0.6, self._flash_tab)
@@ -664,10 +713,41 @@ class MonitorApp(App[None]):
     # -- network view --
 
     def _refresh_policy(self) -> None:
+        self.query_one("#policy", Static).update(self._policy_line())
+
+    def _policy_line(self) -> str:
+        """The header: what directory this is, its mode, and its traffic.
+
+        The byte figures only appear in restricted mode, because that is the
+        only mode with a proxy to meter: in open mode the container has its
+        own NIC and nothing here can see what goes over it, so a zero would
+        read as "nothing happened" when it means "not measured".
+
+        Agent-API traffic is reported apart from the rest, and the rest comes
+        first: an agent streaming completions moves far more than a package
+        fetch does, and the package fetch is the one you didn't already know
+        about.
+        """
         policy = state.get_network(self.work_dir)
-        self.query_one("#policy", Static).update(
-            f"{self.work_dir} · mode: {policy['mode']}"
-        )
+        line = f"{self.work_dir} · mode: {policy['mode']}"
+        if policy["mode"] != state.MODE_RESTRICTED:
+            return line
+        line += " · net " + _updown(self._usage.totals(api=False))
+        api = self._usage.totals(api=True)
+        if api.up or api.down:
+            line += " · agent " + _updown(api)
+        return line
+
+    def _refresh_usage(self) -> None:
+        """Re-read the proxies' counters; show them in the header and rows."""
+        try:
+            self.query_one("#policy", Static)
+        except NoMatches:
+            return  # a timer tick during teardown; see _poll
+        self._usage = netwatch.read_usage(self.work_dir)
+        self._refresh_policy()
+        for row in self.query(DecisionRow):
+            row.set_usage(self._usage.under(row.domain))
 
     def _poll(self) -> None:
         # Driven by a repeating timer, whose life is not exactly the DOM's: a
@@ -925,6 +1005,10 @@ class MonitorApp(App[None]):
         rows = self._decision_rows(
             state.get_network(self.work_dir), editable=True
         ) + self._decision_rows(state.get_global_network(), editable=False)
+        # Fill in the figures from the cache before the rows go up, so opening
+        # the tab doesn't show an empty column until the next refresh tick.
+        for row in rows:
+            row.set_usage(self._usage.under(row.domain))
         self._replace_rows(domain_list, DecisionRow, rows)
 
     def _decide_domain(self, row: DecisionRow, action: str) -> None:
