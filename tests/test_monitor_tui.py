@@ -35,9 +35,9 @@ def work_dir(tmp_path):
     return work
 
 
-def _new_app(work_dir, looking=None):
+def _new_app(work_dir, looking=None, container=None, agent=None, profile=None):
     """A MonitorApp with live container ops stubbed out (no LXD in tests)."""
-    app = monitor_tui.MonitorApp(work_dir)
+    app = monitor_tui.MonitorApp(work_dir, container, agent, profile)
     app._containers = lambda: []  # mount edits stay state-only, no lxc calls
     # Never ask the real tmux where the user is: a test run from inside tmux
     # would otherwise read (and change options on) the developer's own server.
@@ -828,5 +828,130 @@ def test_remove_button_drops_mount(work_dir, tmp_path):
             await pilot.pause()
             assert state.get_mounts(work_dir) == []
             assert _mounts_shown(app) == []
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# the Shell button
+# ---------------------------------------------------------------------------
+
+
+def _fake_shellwin(monkeypatch, created=True, error=None):
+    """Stand in for aiab.shellwin; return what it was asked for."""
+    asked: dict[str, object] = {}
+
+    def show(work_dir, container, agent, profile=None, argv0=None):
+        asked.update(
+            work_dir=work_dir, container=container, agent=agent, profile=profile
+        )
+        if error is not None:
+            raise monitor_tui.shellwin.Error(error)
+        return monitor_tui.shellwin.Window(id="@2", index="2", created=created)
+
+    monkeypatch.setattr(monitor_tui.shellwin, "show", show)
+    return asked
+
+
+def _log_lines(app):
+    return [str(line) for line in app.query_one("#log").lines]
+
+
+def test_shell_button_opens_a_window_for_this_pane_s_container(
+    work_dir, monkeypatch
+):
+    asked = _fake_shellwin(monkeypatch)
+
+    async def scenario():
+        app = _new_app(
+            work_dir, container="claude-proj-abc123", agent="claude", profile="hardened"
+        )
+        async with app.run_test() as pilot:
+            await pilot.click("#shell")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+    # The run this pane was opened for, so the shell is the same kind of
+    # session the agent is — same container, same credentials.
+    assert asked["container"] == "claude-proj-abc123"
+    assert (asked["agent"], asked["profile"]) == ("claude", "hardened")
+
+
+def test_shift_s_opens_the_shell_window(work_dir, monkeypatch):
+    # Shift-S, not `s`: that one answers Skip to a parked host.
+    asked = _fake_shellwin(monkeypatch)
+
+    async def scenario():
+        app = _new_app(work_dir, container="claude-proj-abc123", agent="claude")
+        async with app.run_test() as pilot:
+            await pilot.press("S")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+    assert asked["container"] == "claude-proj-abc123"
+
+
+def test_lowercase_s_still_skips_rather_than_opening_a_shell(work_dir, monkeypatch):
+    asked = _fake_shellwin(monkeypatch)
+    pdir = netwatch.pending_dir(work_dir)
+
+    async def scenario():
+        app = _new_app(work_dir, container="claude-proj-abc123", agent="claude")
+        async with app.run_test() as pilot:
+            (pdir / "example.com").write_text("0\n")
+            app._poll()
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+    assert asked == {}
+
+
+def test_shell_window_already_there_is_switched_to(work_dir, monkeypatch):
+    _fake_shellwin(monkeypatch, created=False)
+
+    async def scenario():
+        app = _new_app(work_dir, container="claude-proj-abc123", agent="claude")
+        async with app.run_test() as pilot:
+            await pilot.click("#shell")
+            await pilot.pause()
+            # Said out loud: in a session group the window joins every
+            # terminal's list, but only this pane's session follows it there.
+            assert any(
+                "switched to the shell window" in line for line in _log_lines(app)
+            ), _log_lines(app)
+
+    asyncio.run(scenario())
+
+
+def test_a_standalone_monitor_has_no_shell_to_offer(work_dir, monkeypatch):
+    # Nobody told it which container it is steering, so there is nothing to
+    # open a shell in; it says so rather than guessing one.
+    asked = _fake_shellwin(monkeypatch)
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            await pilot.click("#shell")
+            await pilot.pause()
+            assert any("no session container" in line for line in _log_lines(app))
+
+    asyncio.run(scenario())
+    assert asked == {}
+
+
+def test_a_tmux_refusal_is_reported_not_raised(work_dir, monkeypatch):
+    # The pane is a control panel: it has to survive whatever tmux says.
+    _fake_shellwin(monkeypatch, error="not inside a tmux session")
+
+    async def scenario():
+        app = _new_app(work_dir, container="claude-proj-abc123", agent="claude")
+        async with app.run_test() as pilot:
+            await pilot.click("#shell")
+            await pilot.pause()
+            assert any(
+                "not inside a tmux session" in line for line in _log_lines(app)
+            ), _log_lines(app)
 
     asyncio.run(scenario())

@@ -110,6 +110,24 @@ def test_container_prefix_avoids_the_at_sign():
 
 
 # ---------------------------------------------------------------------------
+# isolated_names
+# ---------------------------------------------------------------------------
+
+
+def test_isolated_names_lists_the_profiles_with_their_own_container():
+    assert profiles.isolated_names("claude") == ["openrouter"]
+
+
+def test_isolated_names_skips_profiles_scoped_to_another_agent():
+    assert profiles.isolated_names("copilot") == []
+
+
+def test_isolated_names_skips_a_profile_that_shares_the_agents_container():
+    state.set_profile("hardened", {"allow": ["example.com"]})
+    assert profiles.isolated_names("copilot") == []
+
+
+# ---------------------------------------------------------------------------
 # session_prefixes
 # ---------------------------------------------------------------------------
 

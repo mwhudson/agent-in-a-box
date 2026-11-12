@@ -56,6 +56,7 @@ from . import netproxy
 from . import profiles
 from . import provision
 from . import release
+from . import shellwin
 from . import state
 
 CONFIG_CONTAINER_PATH: str = CONTAINER_HOME  # agent home dir is mounted here
@@ -252,6 +253,21 @@ def _self_argv0() -> str:
     return shutil.which(argv0) or argv0
 
 
+# What every aiab session-group name starts with, so one can be recognised as
+# ours and the container it is for read back out of it (see _shell_identity).
+_TMUX_GROUP_PREFIX = "aiab-"
+
+
+def _tmux_usable() -> bool:
+    """Whether a session can be put in a tmux window at all.
+
+    Both halves matter: without tmux installed there is nothing to wrap a
+    session in, and without a terminal there is nobody to attach — a piped or
+    redirected `aiab run` has to stay the process it already is.
+    """
+    return sys.stdin.isatty() and shutil.which("tmux") is not None
+
+
 def _tmux_group(container_name: str) -> str:
     """The tmux session-group name for a session container.
 
@@ -260,7 +276,7 @@ def _tmux_group(container_name: str) -> str:
     and a different agent or isolated profile (a different container) gets its
     own.
     """
-    return f"aiab-{container_name}"
+    return f"{_TMUX_GROUP_PREFIX}{container_name}"
 
 
 def _tmux_sessions() -> list[tuple[str, str]]:
@@ -347,7 +363,12 @@ def _tmux_joined_nothing(commands: list[str] | None) -> bool:
     return not any(commands)
 
 
-def _reexec_under_tmux(group: str, window: str) -> None:
+def _reexec_under_tmux(
+    group: str,
+    window: str,
+    inner_argv: list[str] | None = None,
+    mark: tuple[str, str] | None = None,
+) -> None:
     """Run this aiab invocation inside a tmux session named for its container.
 
     The first run for a container creates the session; a concurrent one joins
@@ -355,6 +376,13 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     current-window pointer — so each terminal sees every agent running for the
     directory and can look at whichever it likes without moving anyone else's
     view.
+
+    `inner_argv` is what the window should run, for a caller whose window is
+    not simply this command again: `aiab shell` hands over its terminal to the
+    same `aiab run --shell` a shell window runs under tmux (see
+    aiab.shellwin), and re-running `aiab shell` there would only look for a
+    window to switch to all over again. `mark` is a tmux window option to set
+    on the window, which is how such a window says what it holds.
 
     Stderr from the inner process is teed to a temp file while still showing
     live in the pane.  After tmux closes, if the inner exit code was non-zero
@@ -368,7 +396,7 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     turned on just before the terminal attaches — the only moment it can be
     (see aiab.focus).
     """
-    inner = shlex.join([_self_argv0(), *sys.argv[1:]])
+    inner = shlex.join(inner_argv or [_self_argv0(), *sys.argv[1:]])
 
     # Pre-create the log, rc, and notice files so we know the paths before
     # launching. The notice file carries a message (e.g. "backgrounded") from
@@ -383,6 +411,19 @@ def _reexec_under_tmux(group: str, window: str) -> None:
     sessions = _tmux_sessions()
     member = _tmux_group_member(group, sessions)
     name = _tmux_session_name(group, {s for s, _ in sessions})
+
+    # A window option the caller wants on the window this runs in, set from
+    # inside it, where TMUX_PANE names the window. That works the same whether
+    # tmux makes the window below or in a session we join, and it lands before
+    # the container starts — so a second ask for this shell finds this window
+    # rather than opening a duplicate while it is still coming up.
+    mark_cmd = ""
+    if mark is not None:
+        option, value = mark
+        mark_cmd = (
+            'tmux set-option -w -t "$TMUX_PANE" '
+            f"{shlex.quote(option)} {shlex.quote(value)} 2>/dev/null\n"
+        )
 
     # Write a bash wrapper that tees stderr and records the exit code, both to
     # files the outer process can read after tmux exits.
@@ -400,6 +441,7 @@ def _reexec_under_tmux(group: str, window: str) -> None:
             (
                 "#!/bin/bash\n"
                 f"export {_EXIT_NOTICE_ENV}={shlex.quote(notice_path)}\n"
+                f"{mark_cmd}"
                 f"{inner} 2> >(tee {shlex.quote(log_path)} >&2)\n"
                 f"echo $? > {shlex.quote(rc_path)}\n"
                 f"tmux kill-session -t {shlex.quote(name)} 2>/dev/null\n"
@@ -510,13 +552,21 @@ def _reexec_under_tmux(group: str, window: str) -> None:
 
 
 @contextlib.contextmanager
-def _monitor_pane(work_dir: Path, container_name: str, enabled: bool) -> Iterator[None]:
+def _monitor_pane(
+    work_dir: Path,
+    container_name: str,
+    enabled: bool,
+    agent: str | None = None,
+    profile_name: str | None = None,
+) -> Iterator[None]:
     """Show `aiab monitor` in a tmux pane below us for the duration.
 
     The pane is told which session container it is steering, so its mounts
-    view edits that container's live mounts. Best-effort: if the split fails
-    (ancient tmux, weird layout), the agent session proceeds without a control
-    plane and the proxy stays fail-fast.
+    view edits that container's live mounts, and which run made it, so its
+    Shell button can open a shell in the same container the same way `aiab
+    shell` would (see aiab.shellwin). Best-effort: if the split fails (ancient
+    tmux, weird layout), the agent session proceeds without a control plane
+    and the proxy stays fail-fast.
     """
     pane_id = None
     if enabled:
@@ -526,6 +576,8 @@ def _monitor_pane(work_dir: Path, container_name: str, enabled: bool) -> Iterato
                 "monitor",
                 f"--for={work_dir}",
                 f"--container={container_name}",
+                *([f"--agent={agent}"] if agent else []),
+                *([f"--profile={profile_name}"] if profile_name else []),
             ]
         )
         r = subprocess.run(
@@ -666,7 +718,7 @@ def _notify_backgrounded(session: lxd.Container, agent: str) -> None:
         f"{agent} is still running in the background inside container "
         f"'{session.name}'.",
         "The container will stay up until that session finishes.",
-        f"Re-attach from this directory with `aiab run --shell {agent}`, "
+        f"Re-attach from this directory with `aiab shell {agent}`, "
         f"then `{agent} agents`.",
     ]
     notice = "\n".join(lines) + "\n"
@@ -981,7 +1033,7 @@ def run(
     # Wrap sessions in tmux (see the tmux control plane section).
     # Inside tmux already — ours or the user's — _watch_pane below splits the
     # current window instead, so this re-exec only fires on a bare terminal.
-    use_tmux = not no_tmux and sys.stdin.isatty() and shutil.which("tmux") is not None
+    use_tmux = not no_tmux and _tmux_usable()
     if use_tmux and "TMUX" not in os.environ:
         # does not return
         _reexec_under_tmux(_tmux_group(session_name), agent)
@@ -1091,7 +1143,13 @@ def run(
             home_key,
             profile.get("env") if profile else None,
         )
-        with _monitor_pane(work_dir, session.name, enabled=use_tmux):
+        with _monitor_pane(
+            work_dir,
+            session.name,
+            enabled=use_tmux,
+            agent=agent,
+            profile_name=profile_name,
+        ):
             rc = session.run_interactive(
                 run_cmd,
                 cwd=container_cwd,
@@ -1106,6 +1164,131 @@ def run(
         if lifecycle.has_live_background_session(session, agent):
             _notify_backgrounded(session, agent)
     sys.exit(rc)
+
+
+# --------------------------------------------------------------------------
+# shell
+# --------------------------------------------------------------------------
+
+
+def _tmux_session_group() -> str | None:
+    """The session group the caller's tmux session belongs to, or None.
+
+    A lone session reports no group and is named after the group it would be
+    the first member of (see _tmux_group_member), so its name stands in.
+    """
+    r = subprocess.run(
+        ["tmux", "display-message", "-p", "#{session_name}\t#{session_group}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return None
+    name, _, group = r.stdout.strip().partition("\t")
+    return group or name or None
+
+
+def _shell_identity(work_dir: Path) -> tuple[str, str | None] | None:
+    """The (agent, isolated profile) whose container our tmux group holds.
+
+    `aiab shell` asked from inside an agent's own window should not have to be
+    told which agent that is. The group is named after the container
+    (_tmux_group), and a container name is a pure function of the directory
+    and the run that would create it, so the candidates are *computed* and
+    compared rather than the name parsed — `claude-openrouter-proj-ab12c3`
+    being either the openrouter profile in `proj` or plain claude in a
+    directory called `openrouter-proj`, which only the comparison can tell
+    apart.
+
+    None when there is nothing to go on: not in tmux, or a session that isn't
+    one of ours (a shell window of your own, say, or your own session).
+    """
+    group = _tmux_session_group()
+    if group is None or not group.startswith(_TMUX_GROUP_PREFIX):
+        return None
+    container = group[len(_TMUX_GROUP_PREFIX) :]
+    for agent in agents.AGENT_NAMES:
+        for profile in [None, *profiles.isolated_names(agent)]:
+            prefix = profiles.container_prefix(agent, profile, profile is not None)
+            if lxd.container_name_for_dir(work_dir, prefix) == container:
+                return agent, profile
+    return None
+
+
+@main.command(cls=click.Command)
+@click.argument("agent", type=AGENT_CHOICE, required=False)
+@click.option(
+    "--for",
+    "for_dir",
+    metavar="DIR",
+    type=_DIR,
+    default=None,
+    help="open the shell for DIR (default: current directory)",
+)
+@click.option(
+    "--profile",
+    "profile_name",
+    metavar="NAME",
+    default=None,
+    help="the profile whose container to open a shell in (see `aiab profile " "list`)",
+)
+def shell(agent: str | None, for_dir: str | None, profile_name: str | None) -> None:
+    """Open, or switch to, a shell in this directory's container.
+
+    Inside tmux this is a window of its own next to the agent's: the first ask
+    opens it, every later one switches back to it, so `C-b l` toggles between
+    the agent and a shell in the box it is working in. From a bare terminal it
+    hands this terminal to that window, joining the directory's session group
+    if agents are already running for it.
+
+    AGENT can be left out when asked from inside an agent's own aiab window —
+    the session says which container it is for.
+    """
+    work_dir = _realdir(for_dir)
+    # Resolved up front: it is also the question "is there a window to switch
+    # to at all", which decides between the two halves below.
+    session_id = shellwin.session()
+
+    if agent is None:
+        identity = _shell_identity(work_dir) if session_id else None
+        if identity is None:
+            raise click.UsageError(
+                "say which agent's container to open a shell in "
+                f"({', '.join(agents.AGENT_NAMES)}); only a shell asked for "
+                "from inside an agent's own aiab window can tell by itself"
+            )
+        agent, group_profile = identity
+        # An explicit --profile stays the user's: it names a container of its
+        # own, which is a different thing to ask for than the one we are in.
+        if profile_name is None:
+            profile_name = group_profile
+
+    profile = _resolve_profile(profile_name, agent)
+    isolated = bool(profile.get("isolated")) if profile else False
+    container = lxd.container_name_for_dir(
+        work_dir, profiles.container_prefix(agent, profile_name, isolated)
+    )
+
+    if session_id is None:
+        inner = shellwin.command(work_dir, agent, profile_name, _self_argv0())
+        if _tmux_usable():
+            # does not return
+            _reexec_under_tmux(
+                _tmux_group(container),
+                shellwin.WINDOW_NAME,
+                inner_argv=inner,
+                mark=(shellwin.MARK, container),
+            )
+        # No tmux, so no window to switch to now or later: just be the shell.
+        sys.exit(subprocess.run(inner).returncode)
+
+    try:
+        window = shellwin.show(work_dir, container, agent, profile_name, _self_argv0())
+    except shellwin.Error as e:
+        raise click.ClickException(str(e))
+    where = f" (window {window.index})" if window.index else ""
+    what = "Opened" if window.created else "Switched to"
+    print(f"{what} the shell window for '{container}'{where}.", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -2389,6 +2572,18 @@ _container_option = click.option(
     "--container", "container_name", metavar="NAME", default=None, hidden=True
 )
 
+# --agent and --profile come from the same pane, and say which run the
+# container belongs to. The container name alone doesn't: a shell opened in it
+# has to be the same kind of session the agent is (its config, its credential
+# store), which is what the Shell button needs these for. Hidden for the same
+# reason as --container.
+_monitor_agent_option = click.option(
+    "--agent", "agent", metavar="NAME", default=None, hidden=True
+)
+_monitor_profile_option = click.option(
+    "--profile", "profile_name", metavar="NAME", default=None, hidden=True
+)
+
 
 # A plain Command (like the net group): the monitor only reads/writes recorded
 # state and drives LXD lazily from the TUI, so it skips the _Command machinery
@@ -2396,7 +2591,14 @@ _container_option = click.option(
 @main.command(cls=click.Command)
 @_for_dir_option
 @_container_option
-def monitor(for_dir: str | None, container_name: str | None) -> None:
+@_monitor_agent_option
+@_monitor_profile_option
+def monitor(
+    for_dir: str | None,
+    container_name: str | None,
+    agent: str | None,
+    profile_name: str | None,
+) -> None:
     """Open the interactive session control panel for a directory.
 
     Five tabs in one pane (switch with header buttons or hotkeys 1-5;
@@ -2416,14 +2618,18 @@ def monitor(for_dir: str | None, container_name: str | None) -> None:
       * Limits — shows recorded resource limits for this directory.
 
     Each prompt is a row of clickable buttons. `aiab run` opens this in a tmux
-    pane automatically; it also works standalone in any terminal.
+    pane automatically; it also works standalone in any terminal. In the pane
+    `aiab run` opens, the **Shell** button (or `S`) opens or switches to a
+    shell window in the session container, the same as `aiab shell`.
     """
     # Imported here rather than at module scope so that textual (and the rest
     # of the UI) is only loaded by the one command that draws it, keeping
     # every other `aiab` invocation's startup cheap.
     from . import monitor_tui
 
-    sys.exit(monitor_tui.monitor(_realdir(for_dir), container_name))
+    sys.exit(
+        monitor_tui.monitor(_realdir(for_dir), container_name, agent, profile_name)
+    )
 
 
 # --------------------------------------------------------------------------

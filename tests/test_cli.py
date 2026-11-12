@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 
 import click
+import click.testing
 
 from aiab import CONTAINER_HOME
-from aiab import agents, attention, profiles, state
+from aiab import agents, attention, lxd, profiles, shellwin, state
 
 from aiab.cli import (
     _agent_command,
+    _shell_identity,
     _mv_moves_on_disk,
     _drop_stale_home_overlays,
     _guard_git_repo,
@@ -30,6 +32,7 @@ from aiab.cli import (
     _shared_home_mounts,
     _reexec_under_tmux,
     _tmux_group,
+    shell,
     _tmux_group_member,
     _tmux_joined_nothing,
     _tmux_session_name,
@@ -537,6 +540,172 @@ def test_tmux_joined_nothing_false_when_the_window_list_is_unreadable():
     # empty list means the same, since a session always has one window.
     assert _tmux_joined_nothing(None) is False
     assert _tmux_joined_nothing([]) is False
+
+
+def test_reexec_runs_the_command_it_is_given_and_marks_the_window(
+    monkeypatch, tmp_path
+):
+    # `aiab shell` hands its terminal to the same `aiab run --shell` a shell
+    # window runs; re-running `aiab shell` in that window would only look for
+    # a window to switch to all over again. The mark is set from inside the
+    # window, before the container starts, so a second ask finds this one.
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("aiab.cli.tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr("aiab.cli.subprocess.run", fake_run)
+    monkeypatch.setattr("aiab.cli.focus.enable", lambda: True)
+    with pytest.raises(SystemExit):
+        _reexec_under_tmux(
+            "aiab-claude-proj",
+            "shell",
+            inner_argv=["/usr/bin/aiab", "run", "--shell", "--no-tmux", "claude"],
+            mark=("@aiab_shell", "claude-proj"),
+        )
+
+    script = next(p for p in tmp_path.iterdir() if p.name.startswith("aiab-run-"))
+    body = script.read_text()
+    assert "aiab run --shell --no-tmux claude" in body
+    assert 'set-option -w -t "$TMUX_PANE" @aiab_shell claude-proj' in body
+    # Not this invocation again: that is what the caller is avoiding.
+    assert "aiab shell" not in body
+
+
+# ---------------------------------------------------------------------------
+# _shell_identity
+# ---------------------------------------------------------------------------
+
+
+def test_shell_identity_names_the_agent_of_our_group(monkeypatch, tmp_path):
+    # Asked from inside an agent's own window, `aiab shell` should not have to
+    # be told which agent that is: the group is named after the container.
+    container = lxd.container_name_for_dir(tmp_path, "claude")
+    monkeypatch.setattr("aiab.cli._tmux_session_group", lambda: f"aiab-{container}")
+    assert _shell_identity(tmp_path) == ("claude", None)
+
+
+def test_shell_identity_names_an_isolated_profiles_container(monkeypatch, tmp_path):
+    # claude-openrouter-<slug> is also 'claude-' plus something; only
+    # comparing computed names tells it from plain claude in a directory
+    # called openrouter-<...>.
+    container = lxd.container_name_for_dir(tmp_path, "claude-openrouter")
+    monkeypatch.setattr("aiab.cli._tmux_session_group", lambda: f"aiab-{container}")
+    assert _shell_identity(tmp_path) == ("claude", "openrouter")
+
+
+def test_shell_identity_is_unknown_outside_an_aiab_session(monkeypatch, tmp_path):
+    monkeypatch.setattr("aiab.cli._tmux_session_group", lambda: "my-own-session")
+    assert _shell_identity(tmp_path) is None
+
+
+def test_shell_identity_is_unknown_for_another_directorys_group(monkeypatch, tmp_path):
+    other = lxd.container_name_for_dir(tmp_path / "elsewhere", "claude")
+    monkeypatch.setattr("aiab.cli._tmux_session_group", lambda: f"aiab-{other}")
+    assert _shell_identity(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# aiab shell
+# ---------------------------------------------------------------------------
+
+
+def _invoke_shell(args):
+    """Run `aiab shell` with Click's test runner."""
+    return click.testing.CliRunner().invoke(shell, args)
+
+
+def test_shell_switches_to_the_window_for_this_directory(monkeypatch, tmp_path):
+    asked: dict[str, object] = {}
+
+    def fake_show(work_dir, container, agent, profile=None, argv0=None):
+        asked.update(
+            work_dir=work_dir, container=container, agent=agent, profile=profile
+        )
+        return shellwin.Window(id="@2", index="2", created=False)
+
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
+    monkeypatch.setattr("aiab.cli.shellwin.show", fake_show)
+    result = _invoke_shell(["claude", f"--for={tmp_path}"])
+
+    assert result.exit_code == 0, result.output
+    assert asked["container"] == lxd.container_name_for_dir(tmp_path, "claude")
+    assert asked["agent"] == "claude"
+    assert "Switched to" in result.output
+
+
+def test_shell_needs_an_agent_when_the_session_cannot_say(monkeypatch, tmp_path):
+    # Outside an agent's own aiab window there is nothing to infer from, and
+    # guessing one of several containers would be worse than asking.
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
+    monkeypatch.setattr("aiab.cli._shell_identity", lambda work_dir: None)
+    result = _invoke_shell([f"--for={tmp_path}"])
+    assert result.exit_code != 0
+    assert "which agent" in result.output
+
+
+def test_shell_takes_the_agent_from_the_session_it_is_in(monkeypatch, tmp_path):
+    asked: dict[str, object] = {}
+
+    def fake_show(work_dir, container, agent, profile=None, argv0=None):
+        asked.update(agent=agent, profile=profile, container=container)
+        return shellwin.Window(id="@2", index="2", created=True)
+
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
+    monkeypatch.setattr("aiab.cli.shellwin.show", fake_show)
+    monkeypatch.setattr(
+        "aiab.cli._shell_identity", lambda work_dir: ("claude", "openrouter")
+    )
+    result = _invoke_shell([f"--for={tmp_path}"])
+
+    assert result.exit_code == 0, result.output
+    assert (asked["agent"], asked["profile"]) == ("claude", "openrouter")
+    # The isolated profile's own container, not the plain agent's.
+    assert asked["container"] == lxd.container_name_for_dir(
+        tmp_path, "claude-openrouter"
+    )
+
+
+def test_shell_outside_tmux_hands_the_terminal_to_a_window(monkeypatch, tmp_path):
+    handed: dict[str, Any] = {}
+
+    def fake_reexec(group, window, inner_argv=None, mark=None):
+        handed.update(group=group, window=window, inner_argv=inner_argv, mark=mark)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: None)
+    monkeypatch.setattr("aiab.cli._tmux_usable", lambda: True)
+    monkeypatch.setattr("aiab.cli._reexec_under_tmux", fake_reexec)
+    result = _invoke_shell(["claude", f"--for={tmp_path}"])
+
+    assert result.exit_code == 0, result.output
+    container = lxd.container_name_for_dir(tmp_path, "claude")
+    # Into the directory's own session group, so the shell lands beside
+    # whatever agents are already running for it.
+    assert handed["group"] == f"aiab-{container}"
+    assert handed["window"] == shellwin.WINDOW_NAME
+    assert handed["mark"] == (shellwin.MARK, container)
+    assert "--shell" in handed["inner_argv"]
+
+
+def test_shell_without_tmux_at_all_just_runs_the_shell(monkeypatch, tmp_path):
+    # No window to switch to now or later, so there is nothing to wrap: be
+    # the shell session in this terminal.
+    ran: dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):
+        ran["argv"] = argv
+        return subprocess.CompletedProcess(argv, 3)
+
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: None)
+    monkeypatch.setattr("aiab.cli._tmux_usable", lambda: False)
+    monkeypatch.setattr("aiab.cli.subprocess.run", fake_run)
+    result = _invoke_shell(["claude", f"--for={tmp_path}"])
+
+    assert result.exit_code == 3
+    assert "--no-tmux" in ran["argv"]
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,13 @@
 #     a Set button. Changes are saved to aiab.state and take effect on the next
 #     `aiab run` for the directory.
 #
+# The header also carries one button that isn't a tab: Shell (or Shift-S)
+# opens, or switches to, a tmux window holding a shell in the session
+# container — the same window `aiab shell` reaches, since both go through
+# aiab.shellwin. It is the pane's answer to "let me look around in there
+# myself", and it sits to the right of the policy line so it doesn't read as
+# a sixth view.
+#
 # Two things are also raised as desktop notifications, so that neither depends
 # on this pane being looked at: a parked host, carrying the same
 # Allow / 15m / Deny buttons, and an agent that has been waiting on the user
@@ -85,6 +92,7 @@ from . import netproxy
 from . import netwatch
 from . import notify
 from . import profiles
+from . import shellwin
 from . import state
 from .lxd import Container, Lxd
 
@@ -349,6 +357,13 @@ class MonitorApp(App[None]):
         color: $text;
         text-style: bold;
     }
+    .action {
+        height: 1;
+        min-width: 7;
+        border: none;
+        margin: 0;
+        background: $panel-lighten-2;
+    }
     #log {
         height: 1fr;
         padding: 0 1;
@@ -576,10 +591,20 @@ class MonitorApp(App[None]):
         Binding("p", "select_view('ports')", "ports", show=False),
         Binding("5", "select_view('limits')", "limits", show=False),
         Binding("l", "select_view('limits')", "limits", show=False),
+        # Shift-S, not `s`: that one answers Skip to a parked host, and a
+        # keystroke that decides a network question must not become a
+        # keystroke that moves the terminal somewhere else.
+        Binding("S", "shell", "shell", show=False),
         Binding("q", "quit", "quit"),
     ]
 
-    def __init__(self, work_dir: Path, container_name: str | None = None) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        container_name: str | None = None,
+        agent: str | None = None,
+        profile_name: str | None = None,
+    ) -> None:
         super().__init__()
         self.work_dir = work_dir
         # The session container whose live mounts a mounts edit should touch
@@ -588,6 +613,11 @@ class MonitorApp(App[None]):
         # directory. The Lxd handle is built lazily, only when a mount op needs
         # it, so the network view never reaches for LXD.
         self.container_name = container_name
+        # Which run that container belongs to, for opening a shell in it the
+        # way `aiab run` would (see _open_shell). None in a stand-alone
+        # monitor, which was never told.
+        self.agent = agent
+        self.profile_name = profile_name
         self._lxd: Lxd | None = None
         self.pdir = netwatch.pending_dir(work_dir)
         self.tails = netwatch.log_tails(work_dir)
@@ -631,6 +661,9 @@ class MonitorApp(App[None]):
             yield Button("Ports", id="tab-ports", classes="tab")
             yield Button("Limits", id="tab-limits", classes="tab")
             yield Static(id="policy")
+            # Right of the policy line, away from the tabs: this one acts
+            # rather than switching what the pane shows.
+            yield Button("Shell", id="shell", classes="action")
         yield RichLog(id="log")
         with Vertical(id="domains"):
             yield VerticalScroll(id="domain-list")
@@ -729,6 +762,35 @@ class MonitorApp(App[None]):
                 return True
             return None
         return True
+
+    def action_shell(self) -> None:
+        """Open, or switch to, a shell in the session container."""
+        self._open_shell()
+
+    def _open_shell(self) -> None:
+        """Show a shell window for this pane's container (see aiab.shellwin).
+
+        Reports into the log rather than raising: the pane is a control panel
+        that has to survive whatever tmux says, and a monitor that was never
+        told which container it is steering (a stand-alone one) has no shell
+        to offer.
+        """
+        if self.container_name is None or self.agent is None:
+            self._write_log("no session container here to open a shell in")
+            return
+        try:
+            window = shellwin.show(
+                self.work_dir, self.container_name, self.agent, self.profile_name
+            )
+        except shellwin.Error as e:
+            self._write_log(f"shell window: {e}")
+            return
+        # Said out loud because the switch may not be visible: in a session
+        # group the window joins every terminal's list, but only the session
+        # this pane belongs to follows it there.
+        where = f"C-b {window.index}" if window.index else "C-b w"
+        verb = "opened" if window.created else "switched to"
+        self._write_log(f"{verb} the shell window ({where})")
 
     def action_decide(self, action: str) -> None:
         """Apply a keystroke decision to the oldest pending host."""
@@ -1236,6 +1298,9 @@ class MonitorApp(App[None]):
         if button.id and button.id.startswith("tab-"):
             self._select_view(button.id.removeprefix("tab-"))
             return
+        if button.id == "shell":
+            self._open_shell()
+            return
         if button.id and self._focus_add_input(button.id):
             return
         self._handle_row_button(button)
@@ -1244,11 +1309,16 @@ class MonitorApp(App[None]):
         self._handle_input(event)
 
 
-def monitor(work_dir: Path, container_name: str | None = None) -> int:
+def monitor(
+    work_dir: Path,
+    container_name: str | None = None,
+    agent: str | None = None,
+    profile_name: str | None = None,
+) -> int:
     """Run the textual monitor UI for a directory; return an exit code."""
     if not sys.stdin.isatty():
         print("aiab monitor needs an interactive terminal", file=sys.stderr)
         return 1
     with netwatch.attached(netwatch.pending_dir(work_dir)):
-        MonitorApp(work_dir, container_name).run()
+        MonitorApp(work_dir, container_name, agent, profile_name).run()
     return 0

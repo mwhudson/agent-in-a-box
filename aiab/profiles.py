@@ -171,6 +171,23 @@ def names() -> list[str]:
     return sorted({*BUILTIN, *state.list_profiles()})
 
 
+def isolated_names(agent: str) -> list[str]:
+    """Every *isolated* profile that applies to agent, by name.
+
+    These are the profiles that give a run a session container of its own.
+    session_prefixes() turns them into container names; a caller working the
+    other way — from a container back to the run that would recreate it, as
+    `aiab shell` does when it is not told which agent it is sitting in — needs
+    the names themselves.
+    """
+    found = []
+    for name in names():
+        profile = get(name)
+        if profile and profile.get("isolated") and applies_to(profile, agent):
+            found.append(name)
+    return found
+
+
 def session_prefixes(agent: str) -> list[str]:
     """Every container prefix a directory could have sessions under, for agent.
 
@@ -180,12 +197,7 @@ def session_prefixes(agent: str) -> list[str]:
     the monitor, the netwatch log tails) need this rather than the agent name
     alone, or they silently miss profile sessions.
     """
-    found = [agent]
-    for name in names():
-        profile = get(name)
-        if profile and profile.get("isolated") and applies_to(profile, agent):
-            found.append(container_prefix(agent, name, True))
-    return found
+    return [agent, *(container_prefix(agent, p, True) for p in isolated_names(agent))]
 
 
 def applies_to(profile: Profile, agent: str) -> bool:
