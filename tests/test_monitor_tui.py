@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -991,6 +992,18 @@ def _usage_shown(app):
         row.domain: str(row.query_one(".bytes", monitor_tui.Static).renderable)
         for row in app.query(monitor_tui.DecisionRow)
     }
+
+
+def test_the_header_path_is_written_the_way_you_would_type_it(monkeypatch, tmp_path):
+    # The directory leads a line that has to end with the traffic figures, so
+    # the columns $HOME would have cost are ones the figures get instead.
+    monkeypatch.setattr(monitor_tui.Path, "home", classmethod(lambda cls: tmp_path))
+    assert monitor_tui._tilde(tmp_path / "src" / "project") == "~/src/project"
+    assert monitor_tui._tilde(tmp_path) == "~"
+    # A directory elsewhere is left alone rather than refused.
+    assert monitor_tui._tilde(Path("/srv/work/project")) == "/srv/work/project"
+    # And a sibling of the home directory isn't mistaken for a child of it.
+    assert monitor_tui._tilde(Path(f"{tmp_path}-other")) == f"{tmp_path}-other"
 
 
 def test_header_totals_traffic_apart_from_the_agents_own(work_dir):

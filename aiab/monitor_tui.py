@@ -145,6 +145,28 @@ def _updown(counts: netwatch.HostBytes) -> str:
     return f"↑{netwatch.format_bytes(counts.up)} ↓{netwatch.format_bytes(counts.down)}"
 
 
+def _tilde(path: Path) -> str:
+    """A directory as you would have typed it: `~` for the home directory.
+
+    The header is one cropped line, and everything after the directory — the
+    mode, the traffic figures — is what gets cut when the line runs out of
+    pane. The path is the part with slack in it: project directories nearly
+    all sit under $HOME, where this hands the rest of the line back the
+    columns $HOME would have spent.
+
+    String surgery rather than Path.relative_to, which raises rather than
+    declining when the path is elsewhere, and (like aiab.state._repointed)
+    needs neither end to exist.
+    """
+    home = str(Path.home())
+    text = str(path)
+    if text == home:
+        return "~"
+    if text.startswith(home + "/"):
+        return "~" + text[len(home) :]
+    return text
+
+
 def _read_listening_ports(init_pid: int) -> set[int]:
     """Return ports with TCP LISTEN sockets in a container's network namespace.
 
@@ -764,7 +786,7 @@ class MonitorApp(App[None]):
         about.
         """
         policy = state.get_network(self.work_dir)
-        line = f"{self.work_dir} · mode: {policy['mode']}"
+        line = f"{_tilde(self.work_dir)} · mode: {policy['mode']}"
         if policy["mode"] != state.MODE_RESTRICTED:
             return line
         line += " · net " + _updown(self._usage.totals(api=False))

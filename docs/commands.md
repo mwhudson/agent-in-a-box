@@ -796,8 +796,14 @@ Restricted mode routes everything through aiab's proxy, which makes it the one
 place that can see how much a session is really moving. The header totals it:
 
 ```
-/home/you/src/project · mode: restricted · net ↑10k ↓31M · agent ↑1.2M ↓48M
+~/src/project · mode: restricted · net ↑10k ↓31M · agent ↑1.2M ↓48M
 ```
+
+The directory is written the way you would type it — a `~` for your home
+directory — because it leads a line the figures come at the end of, and the
+header is one row of a pane that is already carrying five tabs and the
+[Shell button](#the-shell-button). On a narrow terminal the end of that line
+is what goes first.
 
 `net` is everything the *container* did — `apt`, `npm`, `pip`, a `git clone`,
 a `curl` — and `agent` is the agent's own API traffic, kept apart because an
