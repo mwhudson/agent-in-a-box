@@ -41,10 +41,12 @@
 #
 # The header also carries one button that isn't a tab: Shell (or Shift-S)
 # opens, or switches to, a tmux window holding a shell in the session
-# container — the same window `aiab shell` reaches, since both go through
+# container — the same shell `aiab shell` reaches, since both go through
 # aiab.shellwin. It is the pane's answer to "let me look around in there
 # myself", and it sits to the right of the policy line so it doesn't read as
-# a sixth view.
+# a sixth view. A window means this pane is no longer on screen while you are
+# in the shell; `aiab shell --pane` is the other arrangement, which brings the
+# shell in here instead and leaves the monitor live beside it.
 #
 # Two things are also raised as desktop notifications, so that neither depends
 # on this pane being looked at: a parked host, carrying the same
@@ -779,18 +781,19 @@ class MonitorApp(App[None]):
             self._write_log("no session container here to open a shell in")
             return
         try:
-            window = shellwin.show(
-                self.work_dir, self.container_name, self.agent, self.profile_name
+            outcome = shellwin.show(
+                self.work_dir,
+                self.container_name,
+                self.agent,
+                profile=self.profile_name,
             )
         except shellwin.Error as e:
-            self._write_log(f"shell window: {e}")
+            self._write_log(f"shell: {e}")
             return
         # Said out loud because the switch may not be visible: in a session
         # group the window joins every terminal's list, but only the session
         # this pane belongs to follows it there.
-        where = f"C-b {window.index}" if window.index else "C-b w"
-        verb = "opened" if window.created else "switched to"
-        self._write_log(f"{verb} the shell window ({where})")
+        self._write_log(outcome.describe())
 
     def action_decide(self, action: str) -> None:
         """Apply a keystroke decision to the oldest pending host."""

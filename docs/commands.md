@@ -76,7 +76,7 @@ On first use it prompts for your OpenRouter API key and writes it to
 ## aiab shell
 
 ```
-aiab shell [AGENT] [--for DIR] [--profile NAME]
+aiab shell [AGENT] [--for DIR] [--profile NAME] [--pane]
 ```
 
 Opens — or switches to — a shell inside the directory's session container.
@@ -102,15 +102,54 @@ you are standing in it. It is exactly what [`aiab run --shell`](#aiab-run)
 opens — `aiab shell` is that plus the window, and finding the window again
 next time.
 
-The shell window deliberately gets **no monitor pane** of its own: two
-monitors polling one directory would both answer the same parked host. While
-you are in there, network decisions belong to the agent window's monitor (its
-[Shell button](#the-shell-button) is the same window from the other side) or
-to [`aiab net`](#aiab-net). With no monitor running anywhere for the
-directory, the proxy stays fail-fast as usual.
+The shell gets **no monitor pane** of its own. Two monitors are not in
+themselves a problem — they hold the "a monitor is attached" marker shared,
+precisely so concurrent `aiab run`s each get one — but notifications are
+deduplicated per process, so every parked host would raise two desktop
+banners. While you are in the shell, network decisions belong to the agent
+window's monitor (its [Shell button](#the-shell-button) is the same shell from
+the other side) or to [`aiab net`](#aiab-net). With no monitor running
+anywhere for the directory, the proxy stays fail-fast as usual.
 
 When the shell exits its window closes, and tmux shows you whatever is next —
-the agent, if that is all there is.
+the agent, if that is all there is. The window belongs to the agent's tmux
+session, so it also goes away if the *agent* exits first: ending a run returns
+that terminal by killing its session, and a shell window in it is killed too.
+
+### Keeping the monitor in view
+
+A window is a window: while you are in the shell you cannot see the monitor,
+which is a split of the agent's window — and tmux cannot show one pane in two
+windows. (A popup cannot stand in for it either: tmux does not update panes
+while a popup is up, so the monitor behind it would be a frozen snapshot.) The
+window still signals: a parked host rings the bell, which tmux shows as an
+alert flag on the agent's window in the status line, and the desktop
+notification carries the Allow / 15m / Deny buttons regardless.
+
+When you would rather see it, `aiab shell --pane` puts the shell in the window
+you are in instead — ten lines between the agent and its monitor, so all three
+are live at once:
+
+```
+┌────────────────┐        ┌────────────────┐
+│ agent          │        │ agent          │
+│                │        ├────────────────┤
+│                │   →    │ shell     (10) │
+├────────────────┤        ├────────────────┤
+│ monitor   (10) │        │ monitor   (10) │
+└────────────────┘        └────────────────┘
+```
+
+Asking again with `--pane` puts it back in a window of its own, and plain
+`aiab shell` while it is here takes it back out and switches to it. It is one
+shell throughout: a tmux pane keeps its process when it is moved between
+windows, so whatever is running in it survives the trip. That is also what
+"parked in its own window" means — a window's panes keep running while you
+look elsewhere, which is as close as tmux comes to a pane that is hidden by
+default; there is no hidden pane *within* a window.
+
+The agent pays for the space while the shell is there, so on a short terminal
+expect it to be tight — `C-b z` zooms the shell to the full window and back.
 
 ### Binding it to a key
 
@@ -779,6 +818,11 @@ switch is not always visible: in a session group the window joins every
 terminal's window list, but only the session this pane belongs to follows it
 there — so if a second terminal is attached to the same container, that one
 stays where it was and reaches the shell with `C-b w`.
+
+The button opens the shell as a window, the same as a plain `aiab shell`. To
+keep this pane in view while you work in the shell, ask for it as a pane
+instead — `aiab shell --pane` — which puts it in this window, above the
+monitor (see [Keeping the monitor in view](#keeping-the-monitor-in-view)).
 
 A stand-alone `aiab monitor` has nothing to offer here and says so: `aiab run`
 is what tells the pane which container, and which kind of session, it is

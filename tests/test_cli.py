@@ -542,13 +542,12 @@ def test_tmux_joined_nothing_false_when_the_window_list_is_unreadable():
     assert _tmux_joined_nothing([]) is False
 
 
-def test_reexec_runs_the_command_it_is_given_and_marks_the_window(
-    monkeypatch, tmp_path
-):
+def test_reexec_runs_the_command_it_is_given_and_marks_the_pane(monkeypatch, tmp_path):
     # `aiab shell` hands its terminal to the same `aiab run --shell` a shell
-    # window runs; re-running `aiab shell` in that window would only look for
-    # a window to switch to all over again. The mark is set from inside the
-    # window, before the container starts, so a second ask finds this one.
+    # pane runs; re-running `aiab shell` in that window would only look for a
+    # shell to switch to all over again. The mark is set from inside the pane,
+    # before the container starts, so a second ask finds this one — and on the
+    # pane rather than the window, which break-pane would replace.
     calls: list[tuple[str, ...]] = []
 
     def fake_run(args, **kwargs):
@@ -569,7 +568,7 @@ def test_reexec_runs_the_command_it_is_given_and_marks_the_window(
     script = next(p for p in tmp_path.iterdir() if p.name.startswith("aiab-run-"))
     body = script.read_text()
     assert "aiab run --shell --no-tmux claude" in body
-    assert 'set-option -w -t "$TMUX_PANE" @aiab_shell claude-proj' in body
+    assert 'set-option -p -t "$TMUX_PANE" @aiab_shell claude-proj' in body
     # Not this invocation again: that is what the caller is avoiding.
     assert "aiab shell" not in body
 
@@ -620,11 +619,15 @@ def _invoke_shell(args):
 def test_shell_switches_to_the_window_for_this_directory(monkeypatch, tmp_path):
     asked: dict[str, object] = {}
 
-    def fake_show(work_dir, container, agent, profile=None, argv0=None):
+    def fake_show(work_dir, container, agent, *, as_pane=False, profile=None, **kw):
         asked.update(
-            work_dir=work_dir, container=container, agent=agent, profile=profile
+            work_dir=work_dir,
+            container=container,
+            agent=agent,
+            profile=profile,
+            as_pane=as_pane,
         )
-        return shellwin.Window(id="@2", index="2", created=False)
+        return shellwin.Outcome(shellwin.SWITCHED, "2")
 
     monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
     monkeypatch.setattr("aiab.cli.shellwin.show", fake_show)
@@ -633,7 +636,27 @@ def test_shell_switches_to_the_window_for_this_directory(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.output
     assert asked["container"] == lxd.container_name_for_dir(tmp_path, "claude")
     assert asked["agent"] == "claude"
-    assert "Switched to" in result.output
+    # The default is a window of its own, not a pane in the agent's.
+    assert asked["as_pane"] is False
+    assert "Switched to the shell window (C-b 2)" in result.output
+
+
+def test_shell_pane_asks_for_a_pane_in_this_window(monkeypatch, tmp_path):
+    # The flag is how the monitor pane stays visible while you work in the
+    # shell: it can only be seen from the window it is a split of.
+    asked: dict[str, object] = {}
+
+    def fake_show(work_dir, container, agent, *, as_pane=False, **kw):
+        asked.update(as_pane=as_pane)
+        return shellwin.Outcome(shellwin.JOINED, None)
+
+    monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
+    monkeypatch.setattr("aiab.cli.shellwin.show", fake_show)
+    result = _invoke_shell(["claude", "--pane", f"--for={tmp_path}"])
+
+    assert result.exit_code == 0, result.output
+    assert asked["as_pane"] is True
+    assert "Pulled the shell into this window" in result.output
 
 
 def test_shell_needs_an_agent_when_the_session_cannot_say(monkeypatch, tmp_path):
@@ -649,9 +672,9 @@ def test_shell_needs_an_agent_when_the_session_cannot_say(monkeypatch, tmp_path)
 def test_shell_takes_the_agent_from_the_session_it_is_in(monkeypatch, tmp_path):
     asked: dict[str, object] = {}
 
-    def fake_show(work_dir, container, agent, profile=None, argv0=None):
+    def fake_show(work_dir, container, agent, *, as_pane=False, profile=None, **kw):
         asked.update(agent=agent, profile=profile, container=container)
-        return shellwin.Window(id="@2", index="2", created=True)
+        return shellwin.Outcome(shellwin.OPENED, "2")
 
     monkeypatch.setattr("aiab.cli.shellwin.session", lambda: "$0")
     monkeypatch.setattr("aiab.cli.shellwin.show", fake_show)

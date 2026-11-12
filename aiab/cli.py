@@ -381,8 +381,10 @@ def _reexec_under_tmux(
     not simply this command again: `aiab shell` hands over its terminal to the
     same `aiab run --shell` a shell window runs under tmux (see
     aiab.shellwin), and re-running `aiab shell` there would only look for a
-    window to switch to all over again. `mark` is a tmux window option to set
-    on the window, which is how such a window says what it holds.
+    window to switch to all over again. `mark` is a tmux pane option to set on
+    the pane, which is how a shell says which container it is in (the pane
+    rather than the window because a shell can be moved between them — see
+    aiab.shellwin).
 
     Stderr from the inner process is teed to a temp file while still showing
     live in the pane.  After tmux closes, if the inner exit code was non-zero
@@ -412,16 +414,16 @@ def _reexec_under_tmux(
     member = _tmux_group_member(group, sessions)
     name = _tmux_session_name(group, {s for s, _ in sessions})
 
-    # A window option the caller wants on the window this runs in, set from
-    # inside it, where TMUX_PANE names the window. That works the same whether
-    # tmux makes the window below or in a session we join, and it lands before
-    # the container starts — so a second ask for this shell finds this window
-    # rather than opening a duplicate while it is still coming up.
+    # A pane option the caller wants on the pane this runs in, set from inside
+    # it, where TMUX_PANE names that pane. That works the same whether tmux
+    # makes the window below or in a session we join, and it lands before the
+    # container starts — so a second ask for this shell finds this pane rather
+    # than opening a duplicate while it is still coming up.
     mark_cmd = ""
     if mark is not None:
         option, value = mark
         mark_cmd = (
-            'tmux set-option -w -t "$TMUX_PANE" '
+            'tmux set-option -p -t "$TMUX_PANE" '
             f"{shlex.quote(option)} {shlex.quote(value)} 2>/dev/null\n"
         )
 
@@ -1232,7 +1234,16 @@ def _shell_identity(work_dir: Path) -> tuple[str, str | None] | None:
     default=None,
     help="the profile whose container to open a shell in (see `aiab profile " "list`)",
 )
-def shell(agent: str | None, for_dir: str | None, profile_name: str | None) -> None:
+@click.option(
+    "--pane",
+    "as_pane",
+    is_flag=True,
+    help="put the shell in this window as a pane instead, so the monitor "
+    "stays visible; asking again puts it back",
+)
+def shell(
+    agent: str | None, for_dir: str | None, profile_name: str | None, as_pane: bool
+) -> None:
     """Open, or switch to, a shell in this directory's container.
 
     Inside tmux this is a window of its own next to the agent's: the first ask
@@ -1240,6 +1251,12 @@ def shell(agent: str | None, for_dir: str | None, profile_name: str | None) -> N
     the agent and a shell in the box it is working in. From a bare terminal it
     hands this terminal to that window, joining the directory's session group
     if agents are already running for it.
+
+    --pane puts the same shell in the window you are looking at, under the
+    agent and above its monitor pane, which is the only way to watch the
+    monitor while working in the shell. Asking again with --pane puts it back
+    in its own window. It is one shell either way: the pane keeps its process
+    as it moves, so nothing running in it is lost.
 
     AGENT can be left out when asked from inside an agent's own aiab window —
     the session says which container it is for.
@@ -1283,12 +1300,18 @@ def shell(agent: str | None, for_dir: str | None, profile_name: str | None) -> N
         sys.exit(subprocess.run(inner).returncode)
 
     try:
-        window = shellwin.show(work_dir, container, agent, profile_name, _self_argv0())
+        outcome = shellwin.show(
+            work_dir,
+            container,
+            agent,
+            as_pane=as_pane,
+            profile=profile_name,
+            argv0=_self_argv0(),
+        )
     except shellwin.Error as e:
         raise click.ClickException(str(e))
-    where = f" (window {window.index})" if window.index else ""
-    what = "Opened" if window.created else "Switched to"
-    print(f"{what} the shell window for '{container}'{where}.", file=sys.stderr)
+    said = outcome.describe()
+    print(f"{said[:1].upper()}{said[1:]}.", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------

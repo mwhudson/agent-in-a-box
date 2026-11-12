@@ -837,17 +837,23 @@ def test_remove_button_drops_mount(work_dir, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _fake_shellwin(monkeypatch, created=True, error=None):
+def _fake_shellwin(monkeypatch, action=None, error=None):
     """Stand in for aiab.shellwin; return what it was asked for."""
     asked: dict[str, object] = {}
 
-    def show(work_dir, container, agent, profile=None, argv0=None):
+    def show(work_dir, container, agent, *, as_pane=False, profile=None, **kw):
         asked.update(
-            work_dir=work_dir, container=container, agent=agent, profile=profile
+            work_dir=work_dir,
+            container=container,
+            agent=agent,
+            profile=profile,
+            as_pane=as_pane,
         )
         if error is not None:
             raise monitor_tui.shellwin.Error(error)
-        return monitor_tui.shellwin.Window(id="@2", index="2", created=created)
+        return monitor_tui.shellwin.Outcome(
+            action or monitor_tui.shellwin.OPENED, "2"
+        )
 
     monkeypatch.setattr(monitor_tui.shellwin, "show", show)
     return asked
@@ -875,6 +881,9 @@ def test_shell_button_opens_a_window_for_this_pane_s_container(
     # session the agent is — same container, same credentials.
     assert asked["container"] == "claude-proj-abc123"
     assert (asked["agent"], asked["profile"]) == ("claude", "hardened")
+    # A window of its own, as `aiab shell` gives by default: the button is a
+    # shortcut to the same thing, not a third layout of its own.
+    assert asked["as_pane"] is False
 
 
 def test_shift_s_opens_the_shell_window(work_dir, monkeypatch):
@@ -909,7 +918,7 @@ def test_lowercase_s_still_skips_rather_than_opening_a_shell(work_dir, monkeypat
 
 
 def test_shell_window_already_there_is_switched_to(work_dir, monkeypatch):
-    _fake_shellwin(monkeypatch, created=False)
+    _fake_shellwin(monkeypatch, action=monitor_tui.shellwin.SWITCHED)
 
     async def scenario():
         app = _new_app(work_dir, container="claude-proj-abc123", agent="claude")
