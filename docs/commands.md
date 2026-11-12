@@ -4,6 +4,7 @@ Run `aiab run`, `aiab remove`, etc. from inside the project directory you want
 the agent to work in (or use `--for DIR` on the commands that accept it).
 
 - [aiab run](#aiab-run)
+- [aiab shell](#aiab-shell)
 - [aiab stop](#aiab-stop)
 - [aiab remove](#aiab-remove)
 - [aiab mv](#aiab-mv)
@@ -38,7 +39,10 @@ aiab run <agent> [--for DIR] [--add-mount DIR]... [--add-mount-rw DIR]... [--bas
   [`aiab profile`](#aiab-profile)).
 - `--no-git-guard` — don't shadow the repo's `.git/hooks` and `.git/config`
   (see [the git guard](concepts.md#protecting-the-host-repo-the-git-guard)).
-- `--shell` — open an interactive shell in the container instead of the agent.
+- `--shell` — open an interactive shell in the container instead of the
+  agent. To reach a shell *alongside* a running agent rather than instead
+  of one, use [`aiab shell`](#aiab-shell), which puts it in a tmux window
+  you can switch to.
 - `--no-tmux` — don't wrap the session in tmux with an `aiab monitor` control
   pane (see [Launching it](#launching-it) under `aiab monitor`).
 - Anything after `--` is passed straight through to the agent.
@@ -68,6 +72,64 @@ aiab run --profile openrouter claude
 On first use it prompts for your OpenRouter API key and writes it to
 `~/.local/share/aiab/claude@openrouter/home/.claude/settings.json`. See
 [`aiab profile`](#aiab-profile).
+
+## aiab shell
+
+```
+aiab shell [AGENT] [--for DIR] [--profile NAME]
+```
+
+Opens — or switches to — a shell inside the directory's session container.
+
+Inside tmux it is a window of its own next to the agent's: the first ask opens
+it, every later ask switches back to the one already there. So `C-b l` (tmux's
+last-window) toggles between the agent and a shell in the box it is working
+in, and `C-b w` lists both. From a bare terminal it hands *that* terminal to
+the window instead, joining the directory's session group if agents are
+already running for it (see [Launching it](#launching-it)). With no tmux
+installed at all there is no window to switch to, so it simply becomes the
+shell.
+
+`AGENT` can be left out when you ask from inside an agent's own aiab window:
+that session is named after the container, so it already says which agent (or
+isolated profile) you are sitting in. Anywhere else — a tmux session of your
+own, a bare terminal, a different directory — say which: `aiab shell claude`.
+
+The shell is a full session rather than a bare `lxc exec`: the same mounts,
+environment, network policy and git guard as the agent gets, and it holds the
+per-container lock, so the idle-stopper won't take the container down while
+you are standing in it. It is exactly what [`aiab run --shell`](#aiab-run)
+opens — `aiab shell` is that plus the window, and finding the window again
+next time.
+
+The shell window deliberately gets **no monitor pane** of its own: two
+monitors polling one directory would both answer the same parked host. While
+you are in there, network decisions belong to the agent window's monitor (its
+[Shell button](#the-shell-button) is the same window from the other side) or
+to [`aiab net`](#aiab-net). With no monitor running anywhere for the
+directory, the proxy stays fail-fast as usual.
+
+When the shell exits its window closes, and tmux shows you whatever is next —
+the agent, if that is all there is.
+
+### Binding it to a key
+
+aiab does not bind a key for this, deliberately. tmux key tables are
+server-wide — there is no per-session scope for a binding — so a key aiab
+claimed would change your own sessions too. (The `mouse` option it sets is
+per-session; `focus-events` is server-wide only because tmux gives it no
+narrower scope, and that is called out under
+[Waiting agents](#waiting-agents).) The verb is aiab's; the keymap stays
+yours:
+
+```tmux
+bind-key S run-shell -c '#{pane_current_path}' 'aiab shell'
+```
+
+`run-shell` runs the command on the tmux **server**, so `aiab` has to be on
+the server's `PATH`, and `-c` is what makes the shell be for the directory of
+the pane you pressed the key in rather than wherever that server was started
+from. No agent name is needed in an aiab window, per the inference above.
 
 ## aiab stop
 
@@ -554,7 +616,8 @@ aiab monitor [--for DIR]
 `aiab monitor` is the session control panel: a single pane with five tabs,
 selected from the **Network** / **Domains** / **Mounts** / **Ports** /
 **Limits** buttons in the header (or the `1`–`5` keys; `m`, `p`, and `l` also
-jump to Mounts, Ports, and Limits).
+jump to Mounts, Ports, and Limits). One header button is not a tab: see
+[The Shell button](#the-shell-button).
 
 ### Network tab
 
@@ -701,6 +764,25 @@ The limits tab shows the directory's CPU and memory limits, each editable inline
 with a **Set** button. Changes are saved to the same record as
 [`aiab limits`](#aiab-limits) and take effect on the next `aiab run` for the
 directory.
+
+### The Shell button
+
+To the right of the policy line, clear of the tabs because it acts rather than
+switching what the pane shows, sits **Shell** (or `Shift-S` — lowercase `s`
+answers Skip to a parked host). It opens, or switches to, a shell window in
+the session container this pane is steering: the same window
+[`aiab shell`](#aiab-shell) reaches, so the two find each other's rather than
+opening one each. It is the pane's answer to "let me look in there myself".
+
+The pane says in its log which window it opened or switched to, because the
+switch is not always visible: in a session group the window joins every
+terminal's window list, but only the session this pane belongs to follows it
+there — so if a second terminal is attached to the same container, that one
+stays where it was and reaches the shell with `C-b w`.
+
+A stand-alone `aiab monitor` has nothing to offer here and says so: `aiab run`
+is what tells the pane which container, and which kind of session, it is
+attached to.
 
 ### Launching it
 
