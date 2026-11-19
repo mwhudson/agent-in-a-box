@@ -36,7 +36,8 @@
 #     when a session container is around, take effect live on it — the same
 #     thing `aiab mount`/`aiab unmount` do;
 #   * Ports: lists TCP ports the container is listening on above the threshold
-#     and prompts to forward them to the host;
+#     and prompts to forward them to the host, once they have stayed open for
+#     _PORT_SETTLE seconds (so a test suite's short-lived ports go unremarked);
 #   * Limits: the directory's CPU and memory limits, each editable inline with
 #     a Set button. Changes are saved to aiab.state and take effect on the next
 #     `aiab run` for the directory.
@@ -108,6 +109,12 @@ _MIN_FORWARD_PORT = 1024
 # Ports to exclude even if they're above the threshold — our own proxy port
 # is always listening inside restricted containers.
 _EXCLUDED_PORTS: frozenset[int] = frozenset({netproxy.PROXY_PORT})
+
+# How long a port has to stay listening before it is offered for forwarding.
+# Test suites open and close ports all the time, and a bell for a port that
+# is gone again before you could get to the Ports tab is only a distraction;
+# one that has been up this long is more likely a server you meant to start.
+_PORT_SETTLE = 2.0
 
 _VIEWS = ("network", "domains", "mounts", "ports", "limits")
 
@@ -701,8 +708,9 @@ class MonitorApp(App[None]):
         self._flash_on = False
         # Port-forwarding state: the cached init PID of the session container
         # (fetched lazily from lxc info, reset when the proc entry vanishes),
-        # ports seen on the last poll, ports the user chose to ignore this
-        # session, and ports currently forwarded to the host.
+        # ports seen on the last poll, when each of those not yet offered for
+        # forwarding was first seen (see _PORT_SETTLE), ports the user chose
+        # to ignore this session, and ports currently forwarded to the host.
         # Desktop notifications for parked hosts, so a decision is
         # noticeable when nobody is looking at this pane. A no-op when
         # notify-send isn't installed (see aiab.notify).
@@ -721,6 +729,7 @@ class MonitorApp(App[None]):
         self._usage = netwatch.Usage()
         self._init_pid: int | None = None
         self._known_ports: set[int] = set()
+        self._settling_ports: dict[int, float] = {}
         self._ignored_ports: set[int] = set()
         self._forwarded_ports: set[int] = set()
 
@@ -1233,6 +1242,7 @@ class MonitorApp(App[None]):
             # detected fresh and pending rows for old ports are cleaned up.
             self._init_pid = None
             self._known_ports.clear()
+            self._settling_ports.clear()
         containers = self._containers()
         if not containers:
             return None
@@ -1250,23 +1260,38 @@ class MonitorApp(App[None]):
         if init_pid is None:
             return
         current = _read_listening_ports(init_pid)
-        new_ports = (
-            current - self._known_ports - self._ignored_ports - self._forwarded_ports
-        )
+        now = time.monotonic()
+        for port in current - self._known_ports:
+            self._settling_ports[port] = now
         gone_ports = self._known_ports - current
         self._known_ports = current
+        settled = sorted(
+            port
+            for port, since in self._settling_ports.items()
+            if now - since >= _PORT_SETTLE
+        )
+        for port in settled:
+            del self._settling_ports[port]
+        new_ports = [
+            port
+            for port in settled
+            if port not in self._ignored_ports and port not in self._forwarded_ports
+        ]
 
         pending = self.query_one("#port-pending", VerticalScroll)
         rows = {row.port: row for row in pending.query(PortPendingRow)}
 
         for port in gone_ports:
+            if self._settling_ports.pop(port, None) is not None:
+                # Gone before it was ever offered: nothing to say about it.
+                continue
             if port in rows:
                 rows[port].remove()
                 self._write_log(f"port :{port} closed before a decision was made")
             elif port in self._forwarded_ports:
                 self._write_log(f"port :{port} closed (forward still active)")
 
-        for port in sorted(new_ports):
+        for port in new_ports:
             pending.mount(PortPendingRow(port))
             self._write_log(f"port :{port} opened — forward to host? (Ports tab)")
 

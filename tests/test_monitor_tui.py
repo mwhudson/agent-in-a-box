@@ -1085,3 +1085,88 @@ def test_domains_rows_have_their_figures_on_first_paint(work_dir):
             assert _usage_shown(app) == {"deb.example": "↑5 ↓300"}
 
     asyncio.run(scenario())
+
+
+# -- ports --
+
+
+def _ports_offered(app):
+    return [row.port for row in app.query(monitor_tui.PortPendingRow)]
+
+
+def _watch_ports(app, monkeypatch, listening):
+    """Point the app's port scan at `listening`, a set the test mutates."""
+    app._get_init_pid = lambda: 1
+    monkeypatch.setattr(
+        monitor_tui, "_read_listening_ports", lambda pid: set(listening)
+    )
+    bells = []
+    app.bell = lambda: bells.append(True)
+    return bells
+
+
+def test_a_port_is_offered_once_it_has_stayed_open(work_dir, monkeypatch):
+    monkeypatch.setattr(monitor_tui, "_PORT_SETTLE", 0.0)
+    listening = {8000}
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            bells = _watch_ports(app, monkeypatch, listening)
+            app._check_ports()
+            await pilot.pause()
+            assert _ports_offered(app) == [8000]
+            assert bells == [True]
+
+            # Still open next poll: not offered a second time.
+            app._check_ports()
+            await pilot.pause()
+            assert _ports_offered(app) == [8000]
+            assert bells == [True]
+
+    asyncio.run(scenario())
+
+
+def test_a_port_that_closes_quickly_says_nothing(work_dir, monkeypatch):
+    monkeypatch.setattr(monitor_tui, "_PORT_SETTLE", 60.0)
+    listening = {8000}
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            bells = _watch_ports(app, monkeypatch, listening)
+            logged: list[str] = []
+            app._write_log = logged.append
+            app._check_ports()
+            await pilot.pause()
+            listening.clear()
+            app._check_ports()
+            await pilot.pause()
+            assert _ports_offered(app) == []
+            assert bells == []
+            assert logged == []
+            assert app._settling_ports == {}
+
+    asyncio.run(scenario())
+
+
+def test_a_port_is_held_back_until_it_settles(work_dir, monkeypatch):
+    monkeypatch.setattr(monitor_tui, "_PORT_SETTLE", 0.2)
+    listening = {8000}
+
+    async def scenario():
+        app = _new_app(work_dir)
+        async with app.run_test() as pilot:
+            bells = _watch_ports(app, monkeypatch, listening)
+            app._check_ports()
+            await pilot.pause()
+            assert _ports_offered(app) == []
+            assert bells == []
+
+            await asyncio.sleep(0.3)
+            app._check_ports()
+            await pilot.pause()
+            assert _ports_offered(app) == [8000]
+            assert bells == [True]
+
+    asyncio.run(scenario())
