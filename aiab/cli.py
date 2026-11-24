@@ -49,6 +49,7 @@ from . import (
 )
 from . import agents
 from . import attention
+from . import bridge
 from . import focus
 from . import lifecycle
 from . import lxd
@@ -862,8 +863,14 @@ def _apply_git_guard(
             _guard_mount(session, work_dir, source, mount_cwd)
 
 
+# What a clipboard agent is told so that it reaches for wl-copy at all. Claude
+# Code only copies with wl-copy when WAYLAND_DISPLAY is set, and the shims
+# (aiab.bridge) don't care what it says — there is no compositor socket in the
+# container any more, so the name is one nothing will be found at.
+_CLIPBOARD_ENV = {"WAYLAND_DISPLAY": "aiab-bridge"}
+
+
 def _session_env(
-    session: lxd.Container,
     cfg: agents.Agent,
     proxy_env: dict[str, str],
     work_dir: Path,
@@ -877,8 +884,8 @@ def _session_env(
     on top, so the precedence is dir > profile: a profile is a reusable
     default, and a variable set for one directory is the more specific
     statement. Both are then overlaid with HOME, PATH, the network-proxy vars,
-    the Wayland socket and where to report a wait, which aiab manages and which
-    stay authoritative.
+    the clipboard and where to report a wait, which aiab manages and which stay
+    authoritative.
     """
     env = dict(profile_env or {})
     env.update(state.get_env(work_dir, agent))
@@ -886,8 +893,8 @@ def _session_env(
     env["PATH"] = _CONTAINER_PATH
     env.update(attention.env(home_key, cfg.attention))
     env.update(proxy_env)
-    if cfg.wayland:
-        env.update(session.mount_wayland(CONTAINER_USER))
+    if cfg.clipboard:
+        env.update(_CLIPBOARD_ENV)
     return env
 
 
@@ -1136,8 +1143,16 @@ def run(
         if cfg.attention:
             attention.install(session, work_dir, home_key, cfg.attention)
 
+        # The host's clipboard, through the bridge rather than the compositor.
+        # Sessions created while aiab still bind-mounted the Wayland socket
+        # keep that device until something takes it out, so this does.
+        if cfg.clipboard:
+            bridge.install(session)
+        for device in list(session.devices()):
+            if device.startswith("wayland-"):
+                session.remove_device(device)
+
         env = _session_env(
-            session,
             cfg,
             proxy_env,
             work_dir,
@@ -1145,13 +1160,19 @@ def run(
             home_key,
             profile.get("env") if profile else None,
         )
-        with _monitor_pane(
-            work_dir,
-            session.name,
-            enabled=use_tmux,
-            agent=agent,
-            profile_name=profile_name,
-        ):
+        with contextlib.ExitStack() as stack:
+            # Served for as long as the agent runs, by this process.
+            if cfg.clipboard:
+                env.update(stack.enter_context(bridge.serve(work_dir)))
+            stack.enter_context(
+                _monitor_pane(
+                    work_dir,
+                    session.name,
+                    enabled=use_tmux,
+                    agent=agent,
+                    profile_name=profile_name,
+                )
+            )
             rc = session.run_interactive(
                 run_cmd,
                 cwd=container_cwd,
@@ -2212,7 +2233,7 @@ def env() -> None:
     run there; pass --agent to scope a variable to a single agent (an
     agent-specific value overrides the directory-wide one). Changes take effect
     the next time an agent starts here. HOME, PATH, and the network-proxy and
-    Wayland variables are managed by aiab and stay authoritative.
+    clipboard variables are managed by aiab and stay authoritative.
     """
 
 

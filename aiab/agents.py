@@ -129,8 +129,9 @@ class Agent:
     upgrade_cmds: list[Step] = field(default_factory=list)
     # Arguments to prepend to the agent command (e.g., permission-skipping flags).
     extra_args: list[str] = field(default_factory=list)
-    # Bind-mount the host Wayland socket (clipboard support).
-    wayland: bool = False
+    # Give the session the host's clipboard, through wl-copy/wl-paste shims
+    # that ask the host to run its own (see aiab.bridge).
+    clipboard: bool = False
     # How this agent tells the host it is waiting on the user, so `aiab
     # monitor` can raise a desktop notification: one of attention.MECHANISMS,
     # or empty for an agent that has no way to say (see aiab.attention).
@@ -214,27 +215,11 @@ AGENTS: dict[str, Agent] = {
         # have no apt package, and would break if pointed at one. It ends by
         # itself once the home stops being shared per-agent.
         command="claude",
-        # wl-clipboard stays in the upgrade path (install_cmds doubles as
-        # upgrade_cmds) so existing templates pick it up; apt-get install is a
-        # no-op once it's present.
-        install_cmds=_claude_install()
-        + [
-            (
-                "Installing wl-clipboard ...",
-                [
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "-q",
-                    "--no-install-recommends",
-                    "wl-clipboard",
-                ],
-            ),
-        ],
+        install_cmds=_claude_install(),
         extra_args=["--dangerously-skip-permissions"],
-        # Claude shells out to wl-clipboard (wl-copy/wl-paste) for clipboard
-        # access on Wayland — image paste in, copy out.
-        wayland=True,
+        # Claude shells out to wl-copy/wl-paste for clipboard access — image
+        # paste in, copy out.
+        clipboard=True,
         # Claude Code hooks can report a wait to the host (see aiab.attention).
         attention=attention.HOOKS,
         # Versioned Claude config (CLAUDE.md + slash commands) from this repo.
@@ -278,20 +263,8 @@ AGENTS: dict[str, Agent] = {
                     "curl -fsSL https://opencode.ai/v2/install | bash",
                 ],
             ),
-            (
-                "Installing wl-clipboard ...",
-                [
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "-q",
-                    "--no-install-recommends",
-                    "wl-clipboard",
-                ],
-            ),
         ],
-        # Re-running the installer is enough to upgrade; no need to reinstall
-        # wl-clipboard, which apt dist-upgrade already covers. The /v2/ URL
+        # Re-running the installer is enough to upgrade. The /v2/ URL
         # matters: the old installer only ever installs opencode 1 (it refuses
         # a 2.x version outright), so a template upgraded through it stays on
         # the newest 1.x while opencode itself keeps offering the major.
@@ -309,7 +282,7 @@ AGENTS: dict[str, Agent] = {
                 ],
             ),
         ],
-        wayland=True,
+        clipboard=True,
         # An opencode plugin can report a wait to the host (see
         # aiab.attention); the plugin itself is the overlay below.
         attention=attention.PLUGIN,

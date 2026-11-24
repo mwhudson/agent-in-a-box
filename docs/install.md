@@ -15,6 +15,10 @@
   0.1.x relic that predates the modern API). Only `aiab monitor` imports it,
   so the other subcommands still work without it, but the interactive
   allow/deny prompts that restricted mode relies on do not.
+- Optionally `wl-copy`/`wl-paste` (`apt install wl-clipboard`) and a Wayland
+  session, for the agents' clipboard: copying from an agent, and pasting
+  images into one, are done by asking the host's wl-clipboard (see
+  `aiab/bridge.py`). Without them both just fail inside the container.
 - Optionally `notify-send` (`apt install libnotify-bin`), which lets
   [`aiab monitor`](commands.md#network-tab) raise a parked host as a desktop
   notification with Allow/Deny buttons on it, and say when an agent has been

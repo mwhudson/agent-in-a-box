@@ -308,17 +308,11 @@ def test_resolve_profile_wrong_agent_exits():
 # ---------------------------------------------------------------------------
 
 
-class _EnvFakeContainer:
-    def mount_wayland(self, user):
-        return {"WAYLAND_DISPLAY": "wayland-0"}
-
-
 def _env_for(monkeypatch, dir_env, profile_env, agent="claude"):
     """Run _session_env with a stubbed directory env and no proxy."""
     monkeypatch.setattr(state, "get_env", lambda work_dir, agent: dir_env)
     cfg = agents.get(agent)
-    container: Any = _EnvFakeContainer()
-    return _session_env(container, cfg, {}, Path("/tmp/x"), agent, agent, profile_env)
+    return _session_env(cfg, {}, Path("/tmp/x"), agent, agent, profile_env)
 
 
 def test_session_env_includes_profile_vars(monkeypatch):
@@ -349,6 +343,14 @@ def test_session_env_says_where_a_plugin_reports_a_wait(monkeypatch):
 def test_session_env_leaves_hook_agents_without_it(monkeypatch):
     # Claude's drop-in is generated per session and has the name in it already.
     assert attention.ENV_VAR not in _env_for(monkeypatch, {}, {})
+
+
+def test_session_env_points_clipboard_agents_at_wl_copy(monkeypatch):
+    # Claude Code only copies through wl-copy when WAYLAND_DISPLAY is set; the
+    # shims behind it (aiab.bridge) don't need a compositor, so any name will
+    # do — and a directory's recorded value can't take it away.
+    env = _env_for(monkeypatch, {"WAYLAND_DISPLAY": "wayland-1"}, {})
+    assert env["WAYLAND_DISPLAY"] == "aiab-bridge"
 
 
 # ---------------------------------------------------------------------------

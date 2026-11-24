@@ -62,7 +62,7 @@ doesn't sweep them up: the persisted per-agent home (otherwise you authenticate
 every run), `/setup-container` and the `/aiab` state dir (on the host your
 machine already has the toolchain — its *form* reaches into the agent's surface,
 but its reason is the box), port forwarding (a dev server inside the container
-is otherwise unreachable), Wayland passthrough, the monitor's
+is otherwise unreachable), clipboard passthrough, the monitor's
 Network/Domains/Mounts/Limits tabs, `upgrade-templates`/`gc`/`list`/`lxc`, and
 not reaping a container out from under a `/background` session (box work by
 definition — nothing the agent can defend itself against).
