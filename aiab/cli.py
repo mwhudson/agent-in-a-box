@@ -43,6 +43,7 @@ import click
 from . import (
     PROJECT,
     CONTAINER_USER,
+    CONTAINER_LOGIN,
     CONTAINER_HOME,
     WORK_PREFIX,
     STATE_MOUNT,
@@ -863,6 +864,49 @@ def _apply_git_guard(
             _guard_mount(session, work_dir, source, mount_cwd)
 
 
+# The container user's systemd user manager, which a normal login would have
+# started. `lxc exec` goes nowhere near PAM, so logind never hears of the agent
+# and nothing starts one: no `systemctl --user`, no session bus, no
+# /run/user/<uid>. Lingering is the part that doesn't need a login — logind
+# starts a lingering user's manager at boot — and the marker is just a file,
+# so it is written directly rather than by asking a logind that may still be
+# coming up in a container that has only just started. Starting the unit as
+# well covers the run that writes it, and waits for the manager to be up, so
+# the bus is there by the time the agent looks; once it is running that is a
+# no-op of a few milliseconds.
+_RUNTIME_DIR = f"/run/user/{CONTAINER_USER}"
+_USER_ENV = {
+    "XDG_RUNTIME_DIR": _RUNTIME_DIR,
+    "DBUS_SESSION_BUS_ADDRESS": f"unix:path={_RUNTIME_DIR}/bus",
+}
+_START_USER_MANAGER = (
+    "mkdir -p /var/lib/systemd/linger && "
+    f"touch /var/lib/systemd/linger/{CONTAINER_LOGIN} && "
+    f"systemctl start user@{CONTAINER_USER}.service"
+)
+
+
+def _start_user_manager(session: lxd.Container) -> None:
+    """Make sure the container user's systemd manager is running.
+
+    Not fatal: an agent ran without one until now, and a container whose
+    systemd won't start it shouldn't stop the agent starting.
+    """
+    r = session.exec(
+        ["sh", "-c", _START_USER_MANAGER],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(
+            "Warning: could not start the user's systemd manager in the "
+            f"container: {r.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
 # What a clipboard agent is told so that it reaches for wl-copy at all. Claude
 # Code only copies with wl-copy when WAYLAND_DISPLAY is set, and the shims
 # (aiab.bridge) don't care what it says — there is no compositor socket in the
@@ -883,14 +927,15 @@ def _session_env(
     A profile's vars go in first and the directory's recorded `aiab env` vars
     on top, so the precedence is dir > profile: a profile is a reusable
     default, and a variable set for one directory is the more specific
-    statement. Both are then overlaid with HOME, PATH, the network-proxy vars,
-    the clipboard and where to report a wait, which aiab manages and which stay
-    authoritative.
+    statement. Both are then overlaid with HOME, PATH, the user session's
+    runtime dir and bus, the network-proxy vars, the clipboard and where to
+    report a wait, which aiab manages and which stay authoritative.
     """
     env = dict(profile_env or {})
     env.update(state.get_env(work_dir, agent))
     env["HOME"] = CONTAINER_HOME
     env["PATH"] = _CONTAINER_PATH
+    env.update(_USER_ENV)
     env.update(attention.env(home_key, cfg.attention))
     env.update(proxy_env)
     if cfg.clipboard:
@@ -1142,6 +1187,8 @@ def run(
         # monitor can say so on the desktop (see aiab.attention).
         if cfg.attention:
             attention.install(session, work_dir, home_key, cfg.attention)
+
+        _start_user_manager(session)
 
         # The host's clipboard, through the bridge rather than the compositor.
         # Sessions created while aiab still bind-mounted the Wayland socket
@@ -2232,8 +2279,9 @@ def env() -> None:
     Variables are recorded per directory and, by default, apply to every agent
     run there; pass --agent to scope a variable to a single agent (an
     agent-specific value overrides the directory-wide one). Changes take effect
-    the next time an agent starts here. HOME, PATH, and the network-proxy and
-    clipboard variables are managed by aiab and stay authoritative.
+    the next time an agent starts here. HOME, PATH, and the user-session,
+    network-proxy and clipboard variables are managed by aiab and stay
+    authoritative.
     """
 
 

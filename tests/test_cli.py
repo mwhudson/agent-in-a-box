@@ -29,6 +29,7 @@ from aiab.cli import (
     _reseed_tree,
     _resolve_profile,
     _session_env,
+    _start_user_manager,
     _shared_home_mounts,
     _reexec_under_tmux,
     _tmux_group,
@@ -343,6 +344,39 @@ def test_session_env_says_where_a_plugin_reports_a_wait(monkeypatch):
 def test_session_env_leaves_hook_agents_without_it(monkeypatch):
     # Claude's drop-in is generated per session and has the name in it already.
     assert attention.ENV_VAR not in _env_for(monkeypatch, {}, {})
+
+
+def test_session_env_finds_the_user_session(monkeypatch):
+    # The container's own user manager, not the host's runtime dir (which is
+    # what the Wayland passthrough used to hand over).
+    env = _env_for(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/4242"}, {})
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_start_user_manager_lingers_and_starts_it():
+    class _Session:
+        def exec(self, cmd, **kwargs):
+            self.cmd = cmd
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    s = _Session()
+    container: Any = s
+    _start_user_manager(container)
+    script = s.cmd[2]
+    assert "touch /var/lib/systemd/linger/ubuntu" in script
+    assert script.endswith("systemctl start user@1000.service")
+
+
+def test_start_user_manager_failing_only_warns(capsys):
+    class _Session:
+        def exec(self, cmd, **kwargs):
+            assert kwargs["check"] is False
+            return subprocess.CompletedProcess(cmd, 1, "", "no systemd here")
+
+    container: Any = _Session()
+    _start_user_manager(container)
+    assert "no systemd here" in capsys.readouterr().err
 
 
 def test_session_env_points_clipboard_agents_at_wl_copy(monkeypatch):

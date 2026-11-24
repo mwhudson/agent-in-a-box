@@ -514,9 +514,9 @@ overrides the directory-wide one. Like `aiab mount`/`aiab net`, the records are
 persisted per directory (in `~/.local/share/aiab/env.json`) and only edit
 recorded state. They take effect the next time an agent starts.
 
-`HOME`, `PATH`, and the network-proxy and clipboard variables are managed by aiab
-and stay authoritative — `set` refuses `HOME`/`PATH`, and the rest can't be
-overridden by a recorded value.
+`HOME`, `PATH`, and the user-session, network-proxy and clipboard variables are
+managed by aiab and stay authoritative — `set` refuses `HOME`/`PATH`, and the
+rest can't be overridden by a recorded value.
 
 This is the building block for per-directory credentials. Agents that read their
 key straight from the environment can be pointed at a directory-specific key
